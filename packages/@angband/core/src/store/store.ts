@@ -13,9 +13,11 @@
  */
 
 import type { ObjectType, ObjectKind } from "../types/index.js";
-import { TVal } from "../types/index.js";
+import { TVal, ObjectFlag } from "../types/index.js";
 import type { Player } from "../types/index.js";
 import { BitFlag, type RNG } from "../z/index.js";
+import { canStack } from "../object/pile.js";
+import { STORE_DEFS, cleanKindName, type StoreDef } from "./store-data.js";
 
 // ---------------------------------------------------------------------------
 // Store types (matching Angband's 9 store types)
@@ -134,38 +136,6 @@ const DEFAULT_OWNERS: Record<number, StoreOwner> = {
 // ---------------------------------------------------------------------------
 // Markup / markdown tables
 // ---------------------------------------------------------------------------
-
-/**
- * Buy markup factor (percentage the store charges above base value).
- * Higher = more expensive for the player.
- */
-const BUY_MARKUP: Record<number, number> = {
-  [StoreType.GENERAL]: 130,
-  [StoreType.ARMORY]: 110,
-  [StoreType.WEAPON]: 110,
-  [StoreType.TEMPLE]: 110,
-  [StoreType.ALCHEMY]: 110,
-  [StoreType.MAGIC]: 110,
-  [StoreType.BLACKMARKET]: 150,
-  [StoreType.HOME]: 100,
-  [StoreType.BOOKSHOP]: 110,
-};
-
-/**
- * Sell markdown factor (percentage of base value the store pays).
- * Lower = less gold for the player.
- */
-const SELL_MARKDOWN: Record<number, number> = {
-  [StoreType.GENERAL]: 50,
-  [StoreType.ARMORY]: 75,
-  [StoreType.WEAPON]: 75,
-  [StoreType.TEMPLE]: 75,
-  [StoreType.ALCHEMY]: 75,
-  [StoreType.MAGIC]: 75,
-  [StoreType.BLACKMARKET]: 50,
-  [StoreType.HOME]: 100,
-  [StoreType.BOOKSHOP]: 75,
-};
 
 // ---------------------------------------------------------------------------
 // Store carries table  (which TVal categories a store accepts)
@@ -288,7 +258,7 @@ export function createStore(type: StoreType): Store {
     maxStock: type === StoreType.HOME ? HOME_MAX_STOCK : DEFAULT_MAX_STOCK,
     owner,
     purse: owner.maxCost,
-    turnover: type === StoreType.HOME ? 0 : 4,
+    turnover: type === StoreType.HOME ? 0 : (STORE_DEFS[type]?.turnover ?? 4),
   };
 }
 
@@ -334,28 +304,32 @@ export function storeGetPrice(
   // Home has no pricing
   if (store.type === StoreType.HOME) return 0;
 
-  const baseValue = objectBaseValue(obj);
+  let price = objectBaseValue(obj);
+  const black = store.type === StoreType.BLACKMARKET;
 
   // Worthless items
-  if (baseValue <= 0) {
+  if (price <= 0) {
     return selling ? 0 : 1;
   }
 
-  let price: number;
+  // Port of price_item() (store.c, 4.2.6): no haggling, no general markup.
+  let adjust = 100;
+  if (black) adjust = 150;
 
   if (selling) {
-    // Player sells to store -- store pays a markdown
-    const markdown = SELL_MARKDOWN[store.type] ?? 50;
-    price = Math.floor((baseValue * markdown) / 100);
+    // Shops pay 2/3 of true value (half that at the black market)
+    adjust = Math.min(100, 100 + (100 - adjust));
+    price = Math.floor((price * 2) / 3);
+    if (black) price = Math.floor(price / 2);
+  } else if (black) {
+    price = price * 2;
+  }
 
-    // Cap at the owner's purse limit
-    if (price > store.owner.maxCost) {
-      price = store.owner.maxCost;
-    }
-  } else {
-    // Player buys from store -- store charges a markup
-    const markup = BUY_MARKUP[store.type] ?? 130;
-    price = Math.floor((baseValue * markup) / 100);
+  price = Math.floor((price * adjust + 50) / 100);
+
+  // Cap at the owner's purse limit when the store is buying
+  if (selling && price > store.owner.maxCost) {
+    price = store.owner.maxCost;
   }
 
   // Never free for non-worthless items
@@ -379,18 +353,30 @@ export function storeCarries(store: Store, obj: ObjectType): boolean {
   return tvals.has(obj.tval);
 }
 
+/** Extra context so a bought-out store can restock itself (store.c store_maint). */
+export interface StoreRestockContext {
+  readonly kinds: readonly ObjectKind[];
+  readonly rng: RNG;
+}
+
 /**
  * Player buys an item from the store.
+ *
+ * Staple ("always") items are never depleted, as in 4.2.6 do_cmd_buy.
  *
  * @param store     - The store selling the item.
  * @param player    - The player buying.
  * @param itemIndex - Index into store.stock.
+ * @param quantity  - How many of the stack to buy (default 1).
+ * @param ctx       - Optional kinds + rng, to restock a sold-out store.
  * @returns BuyResult with success/failure and the price paid.
  */
 export function storeBuy(
   store: Store,
   player: Player,
   itemIndex: number,
+  quantity: number = 1,
+  ctx?: StoreRestockContext,
 ): BuyResult {
   // Home has no buying -- use homeRetrieve instead
   if (store.type === StoreType.HOME) {
@@ -403,7 +389,18 @@ export function storeBuy(
   }
 
   const obj = store.stock[itemIndex]!;
-  const price = storeGetPrice(store, obj, false);
+  const stackSize = Math.max(1, obj.number ?? 1);
+  if (!Number.isInteger(quantity) || quantity < 1) {
+    return { success: false, price: 0, message: "Invalid quantity." };
+  }
+  if (quantity > stackSize) {
+    return {
+      success: false,
+      price: 0,
+      message: `The store only has ${stackSize}.`,
+    };
+  }
+  const price = storeGetPrice(store, obj, false) * quantity;
 
   // Check if the player can afford it
   if (player.au < price) {
@@ -414,10 +411,24 @@ export function storeBuy(
     };
   }
 
-  // Check if player inventory is full
+  // Work out where the goods go: merge into a stack, else a new slot
   const pGear = player as PlayerWithGear;
   ensureInventory(pGear);
-  if (pGear.inventory.length >= MAX_PLAYER_INVENTORY) {
+  const inv = pGear.inventory as (ObjectType | null)[];
+  const maxStack = obj.kind?.base?.maxStack ?? 40;
+  let remaining = quantity;
+  const merges: [ObjectType, number][] = [];
+  for (const have of inv) {
+    if (remaining <= 0) break;
+    if (!have || !canStack(have, obj)) continue;
+    const room = maxStack - have.number;
+    if (room <= 0) continue;
+    const take = Math.min(room, remaining);
+    merges.push([have, take]);
+    remaining -= take;
+  }
+  const freeSlot = inv.findIndex((x) => x == null);
+  if (remaining > 0 && freeSlot < 0 && inv.length >= MAX_PLAYER_INVENTORY) {
     return {
       success: false,
       price: 0,
@@ -427,13 +438,40 @@ export function storeBuy(
 
   // Execute the transaction
   player.au -= price;
-  store.stock.splice(itemIndex, 1);
-  pGear.inventory.push(obj);
+  for (const [have, take] of merges) have.number += take;
+  const reduce = storeSaleShouldReduceStock(store, obj);
+  if (remaining > 0) {
+    const bought: ObjectType =
+      reduce && remaining === stackSize
+        ? obj
+        : ({
+            ...obj,
+            number: remaining,
+            flags: obj.flags.clone(),
+            modifiers: obj.modifiers.slice(),
+          } as ObjectType);
+    if (freeSlot >= 0) inv[freeSlot] = bought;
+    else inv.push(bought);
+  }
 
+  // Remove the goods from the store unless it is a readily replaced staple
+  if (reduce) {
+    if (obj.number > quantity) {
+      obj.number -= quantity;
+    } else {
+      store.stock.splice(itemIndex, 1);
+    }
+    // Sold out: the shopkeeper brings out new stock
+    if (store.stock.length === 0 && ctx) {
+      for (let i = 0; i < 10; i++) storeMaint(store, ctx.kinds, ctx.rng);
+    }
+  }
+
+  const label = obj.kind?.name ?? "an item";
   return {
     success: true,
     price,
-    message: `You bought ${obj.kind?.name ?? "an item"} for ${price} gold.`,
+    message: `You bought ${quantity > 1 ? `${quantity} x ` : ""}${label} for ${price} gold.`,
   };
 }
 
@@ -502,13 +540,223 @@ export function storeSell(
   };
 }
 
+interface StoreTables {
+  readonly def: StoreDef;
+  readonly always: ObjectKind[];
+  readonly normal: ObjectKind[];
+}
+
 /**
- * Populate a store's initial inventory from a set of object kinds.
+ * Resolve a store's always/normal tables against the kind list.  Returns
+ * null when the store should use the legacy tval-pool stocking (black
+ * market, or a kind list that contains none of the 4.2.6 names).
+ */
+function resolveTables(
+  store: Store,
+  kinds: readonly ObjectKind[],
+): StoreTables | null {
+  if (store.type === StoreType.BLACKMARKET) return null;
+  const def = STORE_DEFS[store.type];
+  if (!def) return null;
+  const find = (e: readonly [TVal, string]): ObjectKind | undefined => {
+    const want = cleanKindName(e[1]);
+    return kinds.find((k) => k.tval === e[0] && cleanKindName(k.name) === want);
+  };
+  const always = def.always.map(find).filter((k): k is ObjectKind => !!k);
+  const normal = def.normal.map(find).filter((k): k is ObjectKind => !!k);
+  const declared = def.always.length + def.normal.length;
+  if (declared > 0 && always.length + normal.length === 0) return null;
+  return { def, always, normal };
+}
+
+/** Is this item one of the store's permanent staples (store_is_staple)? */
+function isStaple(store: Store, obj: ObjectType): boolean {
+  const def = STORE_DEFS[store.type];
+  if (!def || !obj.kind) return false;
+  const name = cleanKindName(obj.kind.name);
+  return def.always.some((e) => e[0] === obj.kind!.tval && cleanKindName(e[1]) === name);
+}
+
+/** Port of store_sale_should_reduce_stock(): false for plain staples. */
+function storeSaleShouldReduceStock(store: Store, obj: ObjectType): boolean {
+  if (obj.artifact || obj.ego) return true;
+  if ((obj.toH || obj.toD) && obj.tval >= TVal.SHOT && obj.tval <= TVal.SWORD) return true;
+  if (obj.toA) return true;
+  return !isStaple(store, obj);
+}
+
+function massRoll(rng: RNG, times: number, max: number): number {
+  let t = 0;
+  for (let i = 0; i < times; i++) t += rng.randint0(max);
+  return t;
+}
+
+/** Port of mass_produce(): cheap goods come in piles. */
+function massProduce(obj: ObjectType, rng: RNG): void {
+  let size = 1;
+  const cost = obj.kind?.cost ?? 0;
+  switch (obj.tval) {
+    case TVal.FOOD:
+    case TVal.MUSHROOM:
+    case TVal.FLASK:
+    case TVal.LIGHT:
+      if (cost <= 5) size += massRoll(rng, 3, 5);
+      if (cost <= 20) size += massRoll(rng, 3, 5);
+      break;
+    case TVal.POTION:
+    case TVal.SCROLL:
+      if (cost <= 60) size += massRoll(rng, 3, 5);
+      if (cost <= 240) size += massRoll(rng, 1, 5);
+      break;
+    case TVal.SOFT_ARMOR:
+    case TVal.HARD_ARMOR:
+    case TVal.SHIELD:
+    case TVal.GLOVES:
+    case TVal.BOOTS:
+    case TVal.CLOAK:
+    case TVal.HELM:
+    case TVal.CROWN:
+    case TVal.SWORD:
+    case TVal.POLEARM:
+    case TVal.HAFTED:
+    case TVal.DIGGING:
+    case TVal.BOW:
+      if (obj.ego) break;
+      if (cost <= 10) size += massRoll(rng, 3, 5);
+      if (cost <= 100) size += massRoll(rng, 3, 5);
+      break;
+    case TVal.SHOT:
+    case TVal.ARROW:
+    case TVal.BOLT:
+      if (cost <= 5) size = rng.randint1(2) * 20;
+      else if (cost <= 50) size = rng.randint1(4) * 10;
+      else if (cost <= 500) size = rng.randint1(4) * 5;
+      else size = 1;
+      break;
+    default:
+      break;
+  }
+  obj.number = Math.min(size, obj.kind?.base?.maxStack ?? 40);
+}
+
+/** Port of store_carry(): merge into an existing stack, else take a slot. */
+function storeCarryObj(store: Store, obj: ObjectType): boolean {
+  for (const have of store.stock) {
+    if (have.kind === obj.kind && canStack(have, obj)) {
+      const max = have.kind?.base?.maxStack ?? 40;
+      have.number += Math.max(0, Math.min(obj.number, max - have.number));
+      return true;
+    }
+  }
+  if (store.stock.length >= store.maxStock) return false;
+  store.stock.push(obj);
+  return true;
+}
+
+/** Port of store_delete_random(): sell off (part of) a random stack. */
+function storeDeleteRandom(store: Store, rng: RNG): void {
+  if (store.stock.length === 0) return;
+  const what = rng.randint0(store.stock.length);
+  const obj = store.stock[what]!;
+  let num = obj.number;
+  if (num > 1) {
+    const ammo = obj.tval === TVal.SHOT || obj.tval === TVal.ARROW || obj.tval === TVal.BOLT;
+    if (ammo) {
+      if (rng.randint0(100) < 50 || num < 10) num = obj.number;
+      else num = rng.randint1(Math.floor(num / 5)) * 5 + (num % 5);
+    } else if (rng.randint0(100) < 50) {
+      num = 1;
+    } else if (rng.randint0(100) < 50) {
+      num = Math.floor((num + 1) / 2);
+    } else {
+      num = obj.number;
+    }
+  }
+  if (obj.number > num) obj.number -= num;
+  else store.stock.splice(what, 1);
+}
+
+/** Port of store_create_random() for the normal-item pool. */
+function storeCreateRandom(store: Store, tables: StoreTables, rng: RNG): boolean {
+  if (tables.normal.length === 0) return false;
+  for (let tries = 0; tries < 6; tries++) {
+    const kind = tables.normal[rng.randint0(tables.normal.length)]!;
+    if (kind.cost < 1) continue;
+    const obj = createStoreObject(kind);
+    massProduce(obj, rng);
+    if (storeCarryObj(store, obj)) return true;
+  }
+  return false;
+}
+
+/** Port of store_maint() for stores with 4.2.6 stocking tables. */
+function storeMaintTables(store: Store, tables: StoreTables, rng: RNG): void {
+  const { def } = tables;
+  if (def.turnover) {
+    let stock = store.stock.length - rng.randint1(def.turnover);
+    stock = Math.min(Math.max(stock, 0), def.slotsMax);
+    while (store.stock.length > stock) storeDeleteRandom(store, rng);
+  } else if (tables.always.length && store.stock.length) {
+    let sales = rng.randint1(store.stock.length);
+    while (sales-- > 0 && store.stock.length) storeDeleteRandom(store, rng);
+  }
+
+  // Ensure staples exist, in full stacks
+  for (const kind of tables.always) {
+    let obj = store.stock.find(
+      (o) => o.kind === kind && !storeSaleShouldReduceStock(store, o),
+    );
+    if (!obj) {
+      const fresh = createStoreObject(kind);
+      if (!storeCarryObj(store, fresh)) continue;
+      obj = store.stock.find((o) => o === fresh) ?? store.stock.find((o) => o.kind === kind);
+      if (!obj) continue;
+    }
+    obj.number = kind.base?.maxStack ?? 40;
+  }
+
+  if (def.turnover) {
+    let stock = store.stock.length + rng.randint1(def.turnover);
+    const min = def.slotsMin + tables.always.length;
+    const max = def.slotsMax + tables.always.length;
+    stock = Math.min(Math.max(stock, min), max);
+    let attempts = 1000;
+    while (store.stock.length < stock && attempts-- > 0) {
+      storeCreateRandom(store, tables, rng);
+    }
+  }
+}
+
+/** Legacy tval-pool stocking, used for the black market and unknown kind lists. */
+function legacyKinds(store: Store, depth: number, kinds: readonly ObjectKind[]): ObjectKind[] {
+  const tvals = STORE_TVALS[store.type];
+  if (!tvals) return [];
+  return kinds.filter(
+    (k) => tvals.has(k.tval) && k.allocProb > 0 && k.level <= depth + 10,
+  );
+}
+
+function storeMaint(
+  store: Store,
+  kinds: readonly ObjectKind[],
+  rng: RNG,
+  depth = 0,
+): void {
+  const tables = resolveTables(store, kinds);
+  if (tables) {
+    storeMaintTables(store, tables, rng);
+    return;
+  }
+  legacyMaintenance(store, depth, kinds, rng);
+}
+
+/**
+ * Populate a store's initial inventory.
  *
- * @param store - The store to populate.
- * @param depth - Dungeon level for item generation (affects quality).
- * @param kinds - Pool of available object kinds to select from.
- * @param rng   - Random number generator.
+ * Like store_reset() in 4.2.6 this runs ten rounds of maintenance, which
+ * creates the always-stocked staples and a random selection of normal items.
+ * The black market, and kind lists that do not contain the 4.2.6 item
+ * names, fall back to a random draw from the store's tval list.
  */
 export function initStoreStock(
   store: Store,
@@ -519,13 +767,13 @@ export function initStoreStock(
   // Home starts empty
   if (store.type === StoreType.HOME) return;
 
-  // Filter kinds to those this store would carry
-  const validKinds = kinds.filter((k) => {
-    const tvals = STORE_TVALS[store.type];
-    if (!tvals) return false;
-    return tvals.has(k.tval) && k.allocProb > 0 && k.level <= depth + 10;
-  });
+  const tables = resolveTables(store, kinds);
+  if (tables) {
+    for (let i = 0; i < 10; i++) storeMaintTables(store, tables, rng);
+    return;
+  }
 
+  const validKinds = legacyKinds(store, depth, kinds);
   if (validKinds.length === 0) return;
 
   // Stock between half and full capacity
@@ -542,12 +790,8 @@ export function initStoreStock(
 }
 
 /**
- * Perform store maintenance: remove some old items and add new ones.
- *
- * @param store - The store to maintain.
- * @param depth - Dungeon level for new items.
- * @param kinds - Pool of available object kinds.
- * @param rng   - Random number generator.
+ * Perform store maintenance: sell off some old items, make sure the staples
+ * are in stock, and add new items (store_maint in 4.2.6).
  */
 export function storeMaintenance(
   store: Store,
@@ -557,7 +801,15 @@ export function storeMaintenance(
 ): void {
   // Home never has maintenance
   if (store.type === StoreType.HOME) return;
+  storeMaint(store, kinds, rng, depth);
+}
 
+function legacyMaintenance(
+  store: Store,
+  depth: number,
+  kinds: readonly ObjectKind[],
+  rng: RNG,
+): void {
   const turnover = store.turnover;
 
   // Remove some items
@@ -567,13 +819,7 @@ export function storeMaintenance(
     store.stock.splice(idx, 1);
   }
 
-  // Add some new items
-  const validKinds = kinds.filter((k) => {
-    const tvals = STORE_TVALS[store.type];
-    if (!tvals) return false;
-    return tvals.has(k.tval) && k.allocProb > 0 && k.level <= depth + 10;
-  });
-
+  const validKinds = legacyKinds(store, depth, kinds);
   if (validKinds.length === 0) return;
 
   const addCount = Math.min(
@@ -671,6 +917,9 @@ function ensureInventory(p: PlayerWithGear): void {
  * produce a lightweight item sufficient for store mechanics.
  */
 function createStoreObject(kind: ObjectKind): ObjectType {
+  const flags = new BitFlag(ObjectFlag.MAX);
+  if (kind.base?.flags) flags.union(kind.base.flags);
+  if (kind.flags) flags.union(kind.flags);
   return {
     kind,
     ego: null,
@@ -690,7 +939,7 @@ function createStoreObject(kind: ObjectKind): ObjectType {
     toA: 0,
     toH: 0,
     toD: 0,
-    flags: new BitFlag(39),
+    flags,
     modifiers: new Array(16).fill(0),
     elInfo: [],
     brands: null,

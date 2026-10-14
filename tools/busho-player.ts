@@ -6,6 +6,12 @@
  * 学習した戦術をログに記録し、スキルとして保存可能にする。
  */
 
+import {
+  DECISION_FORMAT_VERSION, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision,
+} from "./decision/index.js";
+import type { DecisionType, DecisionRequest } from "./decision/index.js";
+import { SavepointBank } from "./savepoint/bank.js";
+
 const API = process.env.API ?? "http://localhost:3000";
 
 // ── 方向定数 (numpad) ──
@@ -30,11 +36,24 @@ const FEAT = {
   LAVA: 23, PASS_RUBBLE: 24,
 };
 const PASSABLE_FEATS = new Set([FEAT.FLOOR, FEAT.OPEN_DOOR, FEAT.BROKEN_DOOR, FEAT.UP_STAIR, FEAT.DOWN_STAIR, FEAT.LAVA, FEAT.PASS_RUBBLE]);
+// 掘削具 (Shovel/Pick) を持っているか。VANILLA では初期所持なし → 持たない時は花崗岩/マグマ/石英を掘らない
+let canDigHard = true;
+const SOFT_DIG_FEATS = new Set([FEAT.CLOSED_DOOR, FEAT.SECRET, FEAT.RUBBLE]);
+function playerHasDigger(p: any): boolean {
+  for (const it of [...(p.inventory ?? []), ...(p.equipment ?? [])]) {
+    if (it && it.tval === 6 && (it.qty ?? 1) > 0) return true;
+  }
+  return false;
+}
+/** この地形を掘る価値があるか (掘削具なしだと扉/瓦礫のみ) */
+function digWorthwhile(feat: number): boolean {
+  return canDigHard ? DIGGABLE_FEATS.has(feat) : SOFT_DIG_FEATS.has(feat);
+}
 const DIGGABLE_FEATS = new Set([FEAT.CLOSED_DOOR, FEAT.SECRET, FEAT.RUBBLE, FEAT.MAGMA, FEAT.QUARTZ, FEAT.MAGMA_K, FEAT.QUARTZ_K, FEAT.GRANITE]);
 
 // ── TVal定数 (list-tvals.h準拠) ──
 const TVAL = {
-  SCROLL: 25, POTION: 26, FOOD: 28,
+  SCROLL: 25, POTION: 26, FLASK: 27, FOOD: 28,
   // 装備品 (正確な値)
   DIGGING: 6, HAFTED: 7, POLEARM: 8, SWORD: 9,
   BOOTS: 10, GLOVES: 11, HELM: 12, CROWN: 13, SHIELD: 14, CLOAK: 15,
@@ -242,6 +261,69 @@ function itemPower(item: {
   return score;
 }
 
+const STATIONARY_RE = /jelly|mold|mushroom|patch|floating eye|lichen|shrieker|spore|ooze/i;
+// 接触で痛い動かない敵 (ゼリー/カビ/浮遊眼)。キノコ (HP1-2) は殴って倒す方が安全
+function hurtsOnContact(m: any): boolean {
+  const name = m.name ?? "";
+  if (!STATIONARY_RE.test(name)) return false;
+  return /floating eye/i.test(name) || (m.maxhp ?? m.hp ?? 99) > 5;
+}
+// ── 序盤ルール改善 (RULEFIX=danger,restock,escape。"none" で旧ルール、A/B 用) ──
+const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape").split(",").map((t) => t.trim()));
+// モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
+const MON_BLOW_AVG: Map<string, number> = (() => {
+  const m = new Map<string, number>();
+  try {
+    const fs = require("node:fs");
+    const raw = JSON.parse(fs.readFileSync(`${process.cwd()}/packages/@angband/core/gamedata/monster.json`, "utf-8"));
+    const list: any[] = Array.isArray(raw) ? raw : (Object.values(raw)[0] as any[]);
+    for (const mon of list) {
+      const blows: string[] = Array.isArray(mon.blow) ? mon.blow : mon.blow ? [mon.blow] : [];
+      let avg = 0;
+      for (const b of blows) {
+        const d = /(\d+)d(\d+)/.exec(b);
+        if (d) avg += Number(d[1]) * (Number(d[2]) + 1) / 2;
+      }
+      if (mon.name) m.set(String(mon.name).toLowerCase(), avg);
+    }
+  } catch { /* gamedata なし: danger 判定は無効 */ }
+  return m;
+})();
+// 殴り合いの見積もり: 倒すまでに受けるダメージが現HPの半分以上なら殴らない (CL<15)
+function meleeTooCostly(m: any, p: any): boolean {
+  if (!RULEFIX.has("danger") || p.level >= 15 || !MON_BLOW_AVG.size) return false;
+  const blowAvg = MON_BLOW_AVG.get(String(m.name ?? "").toLowerCase());
+  if (!blowAvg) return false;
+  const weapon = (p.equipment ?? []).find((e: any) => e && (e.dd ?? 0) > 0);
+  const perBlow = weapon ? weapon.dd * (weapon.ds + 1) / 2 + (weapon.toD ?? 0) : 1.5;
+  const myDmg = Math.max(1, (p.numBlows ?? 1) * (perBlow + (p.toD ?? 0)) * 0.75);
+  const speedRatio = Math.max(0.5, ((m.speed ?? 110) - 100) / Math.max(5, (p.speed ?? 110) - 100));
+  const theirDmg = blowAvg * 0.7 * speedRatio;
+  const turnsToKill = Math.ceil((m.hp ?? m.maxhp ?? 1) / myDmg);
+  return theirDmg * turnsToKill >= 0.5 * p.hp;
+}
+let restockTrip = false; // 浅層で消耗品切れ → 上り階段で町へ (着いたら補充して解除)
+
+// CL<12 の BFS 回避マス (毎ターン更新): 上記の敵のマス (hard: 歩くと攻撃になる) とその隣 (soft: 接触攻撃を受ける)
+let avoidHard = new Set<string>();
+let avoidSoft = new Set<string>();
+function setStationaryAvoid(monsters: any[], level: number): void {
+  avoidHard = new Set(); avoidSoft = new Set();
+  if (level >= 12) return;
+  for (const m of monsters) {
+    if (!hurtsOnContact(m)) continue;
+    avoidHard.add(`${m.x},${m.y}`);
+    for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) avoidSoft.add(`${m.x + dx},${m.y + dy}`);
+  }
+}
+// ── 序盤の高速/強敵 (Fang, Grip, 洞窟蜘蛛群れ等): CL<10 では格上の速い敵は逃げ/投擲対象 ──
+function lowCLDanger(mon: { level: number; speed: number; isUnique?: boolean; name?: string }, playerLevel: number): boolean {
+  if (playerLevel >= 10) return false;
+  // 動かない敵 (ゼリー/カビ/キノコ等は speed120 だが追って来ない。サーバに NEVER_MOVE が出ないので名前で除外)
+  if (mon.name && STATIONARY_RE.test(mon.name)) return false;
+  return mon.speed >= 120 && (!!mon.isUnique || mon.level >= playerLevel + 2);
+}
+
 // ── モンスター脅威度評価 ──
 function monsterThreat(mon: {
   level: number; speed: number; hp: number; maxhp: number;
@@ -280,6 +362,7 @@ function isDangerousMonster(mon: {
   isUnique?: boolean; breathElements?: string[]; hasSummon?: boolean;
   isBreeder?: boolean; freqSpell?: number; freqInnate?: number;
 }, playerLevel: number, depth: number, playerResists?: Set<string>): boolean {
+  if (lowCLDanger(mon, playerLevel)) return true;
   // 速度130+は「速い+強い」の組み合わせが危険 (低レベル高速モンスターは戦える)
   if (mon.speed >= 130 && (mon.level >= playerLevel * 0.7 || mon.level >= 15)) return true;
 
@@ -371,8 +454,10 @@ let fleeAttempts = 0;
 let deathCause = "";
 
 // ── 録画システム ──
-const RECORD_PATH = "/tmp/busho-replay.jsonl";
-let recordEnabled = true;
+// Per-run scratch files (replay, wisdom, report); BUSHO_TMP keeps parallel native players apart.
+const BUSHO_TMP = process.env.BUSHO_TMP ?? "/tmp";
+const RECORD_PATH = `${BUSHO_TMP}/busho-replay.jsonl`;
+let recordEnabled = process.env.ROLLOUT_FORCE ? false : true; // ロールアウト中は録画しない
 let frameNumber = 0;
 const recordedFrames: string[] = [];
 
@@ -415,6 +500,7 @@ function recordFrame(state: any, event?: string) {
 }
 
 async function flushRecording() {
+  if (!recordEnabled) return;
   const fs = await import("node:fs");
   fs.writeFileSync(RECORD_PATH, recordedFrames.join("\n"));
   console.log(`  録画保存: ${RECORD_PATH} (${recordedFrames.length}フレーム)`);
@@ -466,8 +552,15 @@ async function getState(): Promise<any> {
 // ルールで判断しにくい場面でLLM(Claude haiku)に聞く
 
 const LLM_API_KEY = process.env.ANTHROPIC_API_KEY ?? "";
-const LLM_BACKEND = process.env.LLM_BACKEND ?? (LLM_API_KEY ? "anthropic" : "ollama"); // "anthropic" or "ollama"
-const LLM_ENABLED = LLM_BACKEND === "anthropic" ? LLM_API_KEY.length > 0 : true;
+// System One decision model: local Kev (http://localhost:8009) or hosted Jev (https://api.typesafe.ai)
+const SYSTEMONE_URL = (process.env.SYSTEMONE_URL ?? "").replace(/\/+$/, "");
+const SYSTEMONE_API_KEY = process.env.SYSTEMONE_API_KEY || process.env.TYPESAFE_API_KEY || "";
+const SYSTEMONE_MODEL = process.env.SYSTEMONE_MODEL ?? "kev-latest";
+const DECISION_MIN_CONFIDENCE = Number(process.env.DECISION_MIN_CONFIDENCE ?? "0.3"); // これ未満の確信度はルールに任せる
+const LLM_BACKEND = process.env.LLM_BACKEND ?? (SYSTEMONE_URL ? "systemone" : LLM_API_KEY ? "anthropic" : "ollama"); // "systemone", "anthropic" or "ollama"
+const LLM_ENABLED = LLM_BACKEND === "anthropic" ? LLM_API_KEY.length > 0
+  : LLM_BACKEND === "systemone" ? SYSTEMONE_URL.length > 0
+  : true;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "phi3.5";
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
 let llmCallCount = 0;
@@ -475,7 +568,7 @@ let llmCacheHits = 0;
 let llmTotalMs = 0;
 
 // ── クロスラン記憶: 過去の走行から学んだ教訓をLLMに渡す ──
-const WISDOM_FILE = "/tmp/busho-wisdom.jsonl";
+const WISDOM_FILE = `${BUSHO_TMP}/busho-wisdom.jsonl`;
 interface WisdomEntry {
   seed: number; maxDL: number; maxCL: number; deathDL: number; deathCause: string;
   hadResists: string; ac: number; dps: number; blows: number;
@@ -615,6 +708,58 @@ Answer (one line, start with YES/NO or the choice):`,
   }
 }
 
+// ── System One (Kev / Jev): 型付き質問 → 確率付きの回答 ──
+type SystemOneQuestion =
+  | { type: "noul"; instructions: string; criteria?: { true?: string; false?: string } }
+  | { type: "choice"; instructions: string; criteria: Record<string, string> };
+
+async function askSystemOne(questions: Record<string, SystemOneQuestion>, context: string): Promise<Record<string, any> | null> {
+  if (!LLM_ENABLED) return null;
+
+  llmCallCount++;
+  const start = Date.now();
+  try {
+    const res = await fetch(`${SYSTEMONE_URL}/v1/systemone`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(SYSTEMONE_API_KEY ? { Authorization: `Bearer ${SYSTEMONE_API_KEY}` } : {}),
+      },
+      body: JSON.stringify({
+        model: SYSTEMONE_MODEL,
+        state: context, // tools/decision の state (wisdomContext なし)
+        questions,
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const ms = Date.now() - start;
+    llmTotalMs += ms;
+    if (!res.ok) {
+      console.log(`  [LLM systemone] HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
+      return null;
+    }
+    const answers = ((await res.json()) as any)?.answers ?? null;
+    for (const [id, a] of Object.entries<any>(answers ?? {})) {
+      const summary = a.type === "noul" ? `p(yes)=${a.noul}` : `${a.choice} conf=${a.confidence}`;
+      console.log(`  [LLM systemone] Q: ${questions[id]?.instructions.slice(0, 55)} → ${summary} (${ms}ms)`);
+    }
+    return answers;
+  } catch (e) {
+    llmTotalMs += Date.now() - start;
+    console.log(`  [LLM systemone] error: ${(e as Error).message}`);
+    return null;
+  }
+}
+
+// choice: 確信度が低ければ null (ルールに任せる)
+async function decideChoice(req: DecisionRequest): Promise<string | null> {
+  const answers = await askSystemOne(req.questions, req.state);
+  const a = answers?.decision;
+  const criteria = req.questions.decision.criteria;
+  if (!a || !(a.choice in criteria) || a.confidence < DECISION_MIN_CONFIDENCE) return null;
+  return a.choice as string;
+}
+
 function gameContextString(state: any): string {
   const p = state.player;
   const monsters = state.monsters ?? [];
@@ -636,94 +781,378 @@ Equipment: ${equip.map((e: any) => e.name).join(", ") || "none"}
 Nearby monsters: ${nearby.map((m: any) => `${m.name}(Lv${m.level},HP${m.hp}/${m.maxhp},spd${m.speed},dist${m.distance}${m.isUnique ? ",UNIQUE" : ""}${m.breathElements?.length ? ",BREATH:" + m.breathElements.join("/") : ""})`).join(", ") || "none"}`;
 }
 
-// LLM判断: この敵と戦うべきか逃げるべきか
-async function llmShouldFight(state: any, monster: any): Promise<boolean | null> {
-  if (!LLM_ENABLED) return null; // let rules decide
-  const ctx = gameContextString(state);
-  const answer = await askLLM(
-    `Should I fight ${monster.name} (Lv${monster.level}, HP${monster.maxhp}, speed ${monster.speed}${monster.isUnique ? ", UNIQUE" : ""}) or flee? Consider my HP, healing supplies, and level.`,
-    ctx
-  );
-  if (answer.toUpperCase().startsWith("YES") || answer.toUpperCase().includes("FIGHT")) return true;
-  if (answer.toUpperCase().startsWith("NO") || answer.toUpperCase().includes("FLEE")) return false;
-  return null; // ambiguous → rules decide
+// ── 判断の入口 (全6フックがここを通る) ──
+// DECISION_LOG=1: モデルは呼ばずに記録だけ行い null を返す (ルールが決める)
+const DECISION_LOG = process.env.DECISION_LOG === "1";
+const DECISION_LOG_DIR = process.env.DECISION_LOG_DIR ?? `${BUSHO_TMP}/decisions`;
+// ROLLOUT_FORCE=<type>:<option>: ルールのみで続行し、最初の decide(<type>) だけ強制オプションを返す (Phase 2 ラベリング用)
+const ROLLOUT_FORCE = process.env.ROLLOUT_FORCE ?? "";
+const ROLLOUT = ROLLOUT_FORCE !== "";
+const [ROLLOUT_TYPE, ROLLOUT_OPTION] = ROLLOUT_FORCE.split(":");
+const ROLLOUT_HORIZON = Number(process.env.ROLLOUT_HORIZON ?? "150");
+const ROLLOUT_MAX_WAIT = Number(process.env.ROLLOUT_MAX_WAIT ?? "5");
+let rolloutFired = false;
+// /state の player に exp-to-next は無いので 4.2 の player_exp 表 × 種族 expfact から推定 (クラスの expfact は 4.2 では 0)
+const PLAYER_EXP = [10, 25, 45, 70, 100, 140, 200, 280, 380, 500, 650, 850, 1100, 1400, 1800, 2300, 2900, 3600, 4400, 5400,
+  6800, 8400, 10200, 12500, 17500, 25000, 35000, 50000, 75000, 100000, 150000, 200000, 275000, 350000, 450000, 550000, 700000, 850000, 1000000, 1250000,
+  1500000, 1800000, 2100000, 2400000, 2700000, 3000000, 3500000, 4000000, 4500000, 5000000];
+const RACE_EXPFACT: Record<string, number> = { Human: 100, "Half-Elf": 120, Elf: 120, Hobbit: 120, Gnome: 120, Dwarf: 120, "Half-Orc": 120, "Half-Troll": 120, Dunadan: 120, "High-Elf": 145, Kobold: 120 };
+function expToNextLevel(p: any): number | null {
+  if (typeof p.expToNext === "number") return p.expToNext; // サーバが出すようになったらそれを使う
+  const f = RACE_EXPFACT[p.race];
+  const need = PLAYER_EXP[p.level - 1];
+  if (f === undefined || need === undefined) return null;
+  return Math.max(0, Math.floor(need * f / 100) - (p.exp ?? 0));
+}
+let rolloutActions = 0;
+let minHpFrac = 1; // ロールアウト中の最低HP割合 (危険度の指標)
+// DECISION_TRIGGERS=wide: ログモードと同じ広いトリガー集合を、ログなしでも使う (評価/DAgger 用)。既定は従来のゲート
+const DECISION_TRIGGERS = process.env.DECISION_TRIGGERS ?? "default";
+const LOGLIKE = DECISION_LOG || DECISION_TRIGGERS === "wide"; // ログモード相当のトリガー/追加質問
+const WIDE = LOGLIKE || ROLLOUT; // 判断トリガーを広げる (ログ/ロールアウトで同じ地点に到達するため)
+// DECISION_POLICY=model (DECISION_LOG=1 と併用): ログを書きつつモデルの答えで実際に行動する。
+// モデル呼び出し失敗/確信度 < DECISION_MIN_CONFIDENCE ならルールにフォールバック (acted: "rules")
+const DECISION_POLICY = process.env.DECISION_POLICY ?? "rules";
+const POLICY_MODEL = DECISION_LOG && DECISION_POLICY === "model";
+// DECISION_MODEL_TYPES=fight,tactic: モデル方策でもモデルに聞くのはこの型だけ (学習していない型はルール)
+const DECISION_MODEL_TYPES = new Set((process.env.DECISION_MODEL_TYPES ?? "").split(",").map((t) => t.trim()).filter(Boolean));
+const DECISION_ON = (LLM_ENABLED && !ROLLOUT) || WIDE; // 呼出側のゲート用
+const GAME_START_TS = Date.now();
+const GAME_SEED = process.env.SEED ?? process.env.GAME_SEED ?? null; // サーバの--seed (stateには出ない)
+
+interface DecideCtx {
+  state: any;
+  rules: string | null;      // ルールが実際に取る選択 (ログ用)
+  monster?: any; enemies?: any[]; hpPct?: number;
+  kills?: number; turns?: number; current?: any; candidate?: any;
 }
 
-// LLM判断: 降下してよいか
-async function llmShouldDescend(state: any): Promise<boolean | null> {
+function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
+  switch (type) {
+    case "fight": return fightDecision(c.state, c.monster);
+    case "tactic": return tacticDecision(c.state, c.enemies ?? [], c.hpPct ?? 0);
+    case "recall": return recallDecision(c.state);
+    case "descend": return descendDecision(c.state);
+    case "explore": return exploreDecision(c.state, c.kills ?? 0, c.turns ?? 0);
+    case "equip": return equipDecision(c.state, c.current, c.candidate);
+  }
+}
+
+// 返り値はオプション名。null ならルールに任せる。
+async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> {
+  if (ROLLOUT) {
+    if (!rolloutFired && type === ROLLOUT_TYPE && rolloutActions <= ROLLOUT_MAX_WAIT) {
+      rolloutFired = true;
+      console.log(`  [ROLLOUT] ${type} 強制: ${ROLLOUT_OPTION} (rules=${c.rules})`);
+      return ROLLOUT_OPTION!;
+    }
+    return null;
+  }
+  if (DECISION_LOG) {
+    const req = buildRequest(type, c);
+    if (!POLICY_MODEL || (DECISION_MODEL_TYPES.size > 0 && !DECISION_MODEL_TYPES.has(type))) {
+      await logDecision(type, c, req);
+      return null;
+    }
+    // モデル方策: モデルに聞いて記録し、十分な確信度ならその答えで行動する
+    let modelChoice: string | null = null;
+    let modelConfidence: number | null = null;
+    if (LLM_ENABLED) {
+      if (LLM_BACKEND === "systemone") {
+        const answers = await askSystemOne(req.questions, req.state);
+        const a = answers?.decision;
+        if (a && typeof a.choice === "string" && a.choice in req.questions.decision.criteria) {
+          modelChoice = a.choice;
+          modelConfidence = typeof a.confidence === "number" ? a.confidence : null;
+        }
+      } else {
+        modelChoice = await decideText(type, c); // 自由文バックエンドは確信度なし
+      }
+    }
+    const useModel = modelChoice !== null && (modelConfidence === null || modelConfidence >= DECISION_MIN_CONFIDENCE);
+    await logDecision(type, c, req, { model_choice: modelChoice, model_confidence: modelConfidence, acted: useModel ? "model" : "rules" });
+    return useModel ? modelChoice : null;
+  }
   if (!LLM_ENABLED) return null;
-  const ctx = gameContextString(state);
-  const answer = await askLLM(
-    `Should I descend to the next dungeon level? Consider my CL vs DL, healing/teleport supplies, equipment quality, and resistances.`,
-    ctx
-  );
-  if (answer.toUpperCase().startsWith("YES")) return true;
-  if (answer.toUpperCase().startsWith("NO")) return false;
+  if (LLM_BACKEND === "systemone") return decideChoice(buildRequest(type, c));
+  return decideText(type, c);
+}
+
+// ollama / anthropic: 自由文の回答をオプションへ
+async function decideText(type: DecisionType, c: DecideCtx): Promise<string | null> {
+  const ctx = gameContextString(c.state);
+  const yn = (answer: string, yes: string, no: string): string | null => {
+    const up = answer.toUpperCase();
+    if (up.startsWith("YES")) return yes;
+    if (up.startsWith("NO")) return no;
+    return null;
+  };
+  switch (type) {
+    case "fight": {
+      const m = c.monster;
+      const answer = await askLLM(
+        `Should I fight ${m.name} (Lv${m.level}, HP${m.maxhp}, speed ${m.speed}${m.isUnique ? ", UNIQUE" : ""}) or flee? Consider my HP, healing supplies, and level.`,
+        ctx
+      );
+      if (answer.toUpperCase().startsWith("YES") || answer.toUpperCase().includes("FIGHT")) return "melee";
+      if (answer.toUpperCase().startsWith("NO") || answer.toUpperCase().includes("FLEE")) return "flee";
+      return null; // ambiguous → rules decide
+    }
+    case "descend":
+      return yn(await askLLM(
+        `Should I descend to the next dungeon level? Consider my CL vs DL, healing/teleport supplies, equipment quality, and resistances.`,
+        ctx
+      ), "descend", "stay");
+    case "equip": {
+      const cur = c.current, cand = c.candidate;
+      const q = `Should I swap ${cur?.name ?? "empty"} (resists: ${itemResistNames(cur)}) for ${cand.name} (resists: ${itemResistNames(cand)})? In Angband, elemental resists are CRITICAL for survival in deep dungeon. Weight affects number of blows.`;
+      return yn(await askLLM(q, ctx), "swap", "keep");
+    }
+    case "tactic": {
+      const enemyStr = (c.enemies ?? []).slice(0, 3).map((m: any) =>
+        `${m.name}(Lv${m.level},HP${m.hp},spd${m.speed}${m.isUnique ? ",UNQ" : ""})`).join(", ");
+      const answer = await askLLM(
+        `HP ${Math.round((c.hpPct ?? 0)*100)}% with ${(c.enemies ?? []).length} adjacent enemies: ${enemyStr}. Should I HEAL (use potion), FLEE (teleport away), or FIGHT (keep attacking)?`,
+        ctx
+      );
+      const up = answer.toUpperCase();
+      if (up.includes("HEAL")) return "heal";
+      if (up.includes("FLEE") || up.includes("TELEPORT") || up.includes("ESCAPE")) return "flee";
+      if (up.includes("FIGHT") || up.includes("ATTACK")) return "fight";
+      return null;
+    }
+    case "recall":
+      return yn(await askLLM(
+        `Should I use Word of Recall to return to town? Consider my HP, healing supplies, and the danger level at current depth. Low supplies or dangerous depth = YES.`,
+        ctx
+      ), "recall", "continue");
+    case "explore":
+      return yn(await askLLM(
+        `I've killed ${c.kills} monsters and spent ${c.turns} turns on DL${c.state.depth}. Should I keep exploring this level for more XP/items (YES) or descend to the next level (NO)? Consider my CL vs DL ratio and equipment readiness.`,
+        ctx
+      ), "explore", "descend");
+  }
+}
+
+function itemResistNames(item: any): string {
+  const names = ["ACID","ELEC","FIRE","COLD","POIS","LIGHT","DARK","SOUND","SHARD","NEXUS","NETHER","CHAOS","DISEN"];
+  const rs = (item?.resists ?? []).filter((r: any) => r.level > 0).map((r: any) => names[r.elem] ?? `elem${r.elem}`);
+  return rs.join(",") || "none";
+}
+
+// ── DECISION_LOG: 判断点を JSONL + スナップショットで記録 ──
+let snapshotWarned = false;
+let snapshotMissing = false; // 404 → 以後呼ばない
+let decisionGameId: string | null = null;
+
+async function takeSnapshot(gameId: string, turn: number, type: DecisionType): Promise<string | null> {
+  if (snapshotMissing) return null;
+  const warn = (msg: string) => {
+    if (!snapshotWarned) { snapshotWarned = true; console.log(`  [DECISION_LOG] snapshot unavailable (${msg}); storing null`); }
+  };
+  try {
+    let res: Response | null = null;
+    for (let retry = 0; retry < 3; retry++) {
+      res = await fetch(`${API}/snapshot`);
+      if (res.status !== 409) break; // ループが待機中でない → 少し待って再試行
+      await new Promise(r => setTimeout(r, 50));
+    }
+    if (!res || !res.ok) {
+      if (res?.status === 404) snapshotMissing = true;
+      warn(`HTTP ${res?.status}`);
+      return null;
+    }
+    const body = await res.text();
+    const fs = await import("node:fs");
+    const zlib = await import("node:zlib");
+    const rel = `snapshots/${gameId}-${turn}-${type}.json.gz`;
+    fs.mkdirSync(`${DECISION_LOG_DIR}/snapshots`, { recursive: true });
+    fs.writeFileSync(`${DECISION_LOG_DIR}/${rel}`, zlib.gzipSync(body));
+    return rel;
+  } catch (e) {
+    warn((e as Error).message);
+    return null;
+  }
+}
+
+async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionRequest, extra: Record<string, unknown> = {}) {
+  try {
+    const st = c.state;
+    if (!decisionGameId) {
+      decisionGameId = `${GAME_SEED ?? "noseed"}-${st.player.race}-${st.player.class}-${GAME_START_TS}`
+        .toLowerCase().replace(/[^a-z0-9_.-]+/g, "_");
+    }
+    const snapshot = await takeSnapshot(decisionGameId, st.turn, type);
+    const rec = {
+      format_version: DECISION_FORMAT_VERSION,
+      game_id: decisionGameId,
+      seed: GAME_SEED === null ? null : Number(GAME_SEED),
+      race: st.player.race,
+      class: st.player.class,
+      start_ts: GAME_START_TS,
+      decision_type: type,
+      turn: st.turn,
+      depth: st.depth,
+      player_level: st.player.level,
+      state: req.state,
+      questions: req.questions,
+      snapshot,
+      rules_choice: c.rules,
+      ...extra,
+    };
+    const fs = await import("node:fs");
+    fs.mkdirSync(DECISION_LOG_DIR, { recursive: true });
+    fs.appendFileSync(`${DECISION_LOG_DIR}/decisions.jsonl`, JSON.stringify(rec) + "\n");
+    decisionLogCounts[type] = (decisionLogCounts[type] ?? 0) + 1;
+  } catch (e) {
+    console.log(`  [DECISION_LOG] error: ${(e as Error).message}`);
+  }
+}
+const decisionLogCounts: Record<string, number> = {};
+
+// /snapshot 本文 (JSON文字列)。ループ待機中でない (409) 時は少し待って再試行
+async function fetchSnapshotBody(): Promise<string | null> {
+  if (snapshotMissing) return null;
+  try {
+    for (let retry = 0; retry < 5; retry++) {
+      const res = await fetch(`${API}/snapshot`);
+      if (res.status === 409) { await new Promise(r => setTimeout(r, 50)); continue; }
+      if (!res.ok) { if (res.status === 404) snapshotMissing = true; return null; }
+      return await res.text();
+    }
+  } catch {}
+  return null;
+}
+const savepointBank = new SavepointBank();
+function gameIdOf(st: any): string {
+  if (!decisionGameId) {
+    decisionGameId = `${GAME_SEED ?? "noseed"}-${st.player.race}-${st.player.class}-${GAME_START_TS}`
+      .toLowerCase().replace(/[^a-z0-9_.-]+/g, "_");
+  }
+  return decisionGameId;
+}
+
+// 序盤の買い物: 予算内で 油 > Phase > 掘削具(Shovel) > CLW の優先順 (全店を見て最安を買う)。深層用リストは buySupplies
+// 4.2.6 の always 品 (油/Phase/CLW/Shovel/Pick) は常に在庫あり。まとめ買い (quantity) 対応。
+// Word of Recall は買わない (初期所持1本を温存)。Pick(300G)は高価なので Shovel(10G)を買う。持ち物に入れるだけで装備しない
+async function buyEarlyKit(): Promise<void> {
+  const kinds: Record<string, (i: any) => boolean> = {
+    oil: i => i.tval === TVAL.FLASK && (i.name ?? "").includes("Flask"),
+    phase: i => i.tval === TVAL.SCROLL && (i.name ?? "").includes("Phase Door"),
+    digger: i => i.tval === TVAL.DIGGING && (i.name ?? "").includes("Shovel"),
+    clw: i => i.tval === TVAL.POTION && (i.name ?? "") === "Cure Light Wounds",
+    csw: i => i.tval === TVAL.POTION && (i.name ?? "") === "Cure Serious Wounds", // CLW が置いてない店の代用
+  };
+  const haveOf = (inv: any[], kind: string) =>
+    kind === "digger"
+      ? inv.filter(i => i.tval === TVAL.DIGGING && i.qty > 0).reduce((a, i) => a + i.qty, 0)
+      : inv.filter(i => kinds[kind]!(i) && i.qty > 0).reduce((a, i) => a + i.qty, 0);
+  const steps: [string, number][] = [["oil", 5], ["phase", 2], ["digger", 1], ["oil", 10], ["phase", 5], ["clw", 3], ["clw", 5], ["csw", 2]];
+  const bought: Record<string, number> = { oil: 0, phase: 0, digger: 0, clw: 0, csw: 0 };
+  let spent = 0, n = 0;
+  for (const [kind, target] of steps) {
+    const test = kinds[kind]!;
+    for (let guard = 0; guard < 6 && n < 40; guard++) {
+      const st = await getState();
+      if (st.depth !== 0 || !st.stores) return;
+      const have = haveOf(st.player.inventory as any[], kind);
+      if (have >= target) break;
+      let best: { storeType: number; item: any } | null = null;
+      for (const store of st.stores as any[]) {
+        if (![0, 3, 4, 5, 6].includes(store.type)) continue;
+        for (const it of store.stock) {
+          if (!test(it) || it.price <= 0 || it.price > st.player.gold) continue;
+          if (!best || it.price < best.item.price) best = { storeType: store.type, item: it };
+        }
+      }
+      if (!best) break;
+      const qty = Math.max(1, Math.min(target - have, Math.floor(st.player.gold / best.item.price), best.item.number ?? 1));
+      const res = await fetch(`${API}/buy`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeType: best.storeType, itemIndex: best.item.index, quantity: qty }),
+      });
+      const r: any = await res.json();
+      n++;
+      if (!r.success) break;
+      bought[kind]! += qty; spent += best.item.price * qty;
+    }
+  }
+  const after = await getState();
+  console.log(`  [序盤購入] oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw} csw+${bought.csw} (${spent}G使用, 残金${after.player.gold}G)`);
+  addLesson(0, 0, "序盤購入", `oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw}。残金${after.player.gold}G`);
+}
+
+const MAX_ACTIONS = Number(process.env.MAX_ACTIONS ?? "100000"); // テスト用の早期終了
+
+// LLM判断: この敵と戦うべきか逃げるべきか (rules: ルールは戦う)
+type FightChoice = "melee" | "throw" | "flee";
+async function decideFight(state: any, monster: any, rules: FightChoice): Promise<FightChoice | null> {
+  const choice = await decide("fight", { state, monster, rules });
+  return choice === "melee" || choice === "throw" || choice === "flee" ? choice : null;
+}
+// 個体ごとに決まった fight 判断 (モデル/強制)。ルール任せの個体は入らない
+const fightPlan = new Map<string, FightChoice>();
+const fleeSteps = new Map<string, number>();
+// サーバに射線なしで拒否された投擲 ("px,py>mx,my")。同じ地点からは投げずに殴る (拒否はターンが進まず無限ループになる)
+const noThrowLOS = new Set<string>();
+let throwHits = 0, throwKills = 0, throwsMade = 0, earlyFleeActions = 0, earlyFleeStairs = 0, phasesRead = 0, lastEarlyPhaseAction = -99;
+
+// ルール自身の fight 分類: 序盤の高速/強敵は 油 > 逃走 > 殴る
+function rulesFightChoice(m: any, plevel: number, inv: any[], tiles: any[], px: number, py: number): FightChoice {
+  if (!lowCLDanger(m, plevel) && !(lastKnownState?.player && meleeTooCostly(m, lastKnownState.player))) return "melee";
+  if (findOilFlask(inv) !== null && m.distance <= THROW_RANGE && hasLOS(tiles, px, py, m.x, m.y)) return "throw";
+  const st = nearestStair(tiles, px, py);
+  if (findPhaseScroll(inv) !== null || (st !== null && st.len <= 8)) return "flee";
+  return "melee";
+}
+
+// 序盤の逃走: 足元の階段 > Phase Door (敵が近い時) > 最寄り階段へ歩く > Phase Door
+function earlyFleeCommand(tiles: any[], px: number, py: number, inv: any[], m: any, actionNo: number): { cmd: Record<string, unknown>; kind: string } | null {
+  const here = tiles.find((t: any) => t.x === px && t.y === py);
+  if (here?.feat === FEAT.DOWN_STAIR) return { cmd: { type: CMD.GO_DOWN }, kind: "stairs" };
+  if (here?.feat === FEAT.UP_STAIR) return { cmd: { type: CMD.GO_UP }, kind: "stairs" };
+  const phase = findPhaseScroll(inv);
+  const phaseOk = phase !== null && actionNo - lastEarlyPhaseAction >= 4;
+  const st = nearestStair(tiles, px, py);
+  if (phaseOk && m.distance <= 2 && !(st && st.len <= 2)) {
+    lastEarlyPhaseAction = actionNo;
+    return { cmd: { type: CMD.READ, itemIndex: phase }, kind: "phase" };
+  }
+  if (st) return { cmd: { type: CMD.WALK, direction: st.dir }, kind: "walk" };
+  if (phaseOk && m.distance <= 6) {
+    lastEarlyPhaseAction = actionNo;
+    return { cmd: { type: CMD.READ, itemIndex: phase }, kind: "phase" };
+  }
   return null;
 }
 
-// LLM判断: どの装備に変えるべきか
-async function llmChooseEquipment(state: any, current: any, candidate: any): Promise<boolean | null> {
-  if (!LLM_ENABLED) return null;
-  const ctx = gameContextString(state);
-  const currentResists = (current?.resists ?? []).filter((r: any) => r.level > 0).map((r: any) => {
-    const names = ["ACID","ELEC","FIRE","COLD","POIS","LIGHT","DARK","SOUND","SHARD","NEXUS","NETHER","CHAOS","DISEN"];
-    return names[r.elem] ?? `elem${r.elem}`;
-  });
-  const candidateResists = (candidate?.resists ?? []).filter((r: any) => r.level > 0).map((r: any) => {
-    const names = ["ACID","ELEC","FIRE","COLD","POIS","LIGHT","DARK","SOUND","SHARD","NEXUS","NETHER","CHAOS","DISEN"];
-    return names[r.elem] ?? `elem${r.elem}`;
-  });
-  const answer = await askLLM(
-    `Should I swap ${current?.name ?? "empty"} (resists: ${currentResists.join(",") || "none"}) for ${candidate.name} (resists: ${candidateResists.join(",") || "none"})? In Angband, elemental resists are CRITICAL for survival in deep dungeon. Weight affects number of blows.`,
-    ctx
-  );
-  if (answer.toUpperCase().startsWith("YES")) return true;
-  if (answer.toUpperCase().startsWith("NO")) return false;
-  return null;
+// LLM判断: 降下してよいか (rules: 降下)
+async function llmShouldDescend(state: any, rules: "descend" | "stay" = "descend"): Promise<boolean | null> {
+  const choice = await decide("descend", { state, rules });
+  return choice === null ? null : choice === "descend";
+}
+
+// LLM判断: どの装備に変えるべきか (rules: 交換)
+async function llmChooseEquipment(state: any, current: any, candidate: any, rules: "swap" | "keep" = "swap"): Promise<boolean | null> {
+  const choice = await decide("equip", { state, current, candidate, rules });
+  return choice === null ? null : choice === "swap";
 }
 
 // LLM判断: 戦闘中にヒールすべきか逃走すべきか
-async function llmHealOrFlee(state: any, enemies: any[], hpPct: number): Promise<"heal" | "flee" | "fight" | null> {
-  if (!LLM_ENABLED) return null;
-  const ctx = gameContextString(state);
-  const enemyStr = enemies.slice(0, 3).map((m: any) =>
-    `${m.name}(Lv${m.level},HP${m.hp},spd${m.speed}${m.isUnique ? ",UNQ" : ""})`).join(", ");
-  const answer = await askLLM(
-    `HP ${Math.round(hpPct*100)}% with ${enemies.length} adjacent enemies: ${enemyStr}. Should I HEAL (use potion), FLEE (teleport away), or FIGHT (keep attacking)?`,
-    ctx
-  );
-  const up = answer.toUpperCase();
-  if (up.includes("HEAL")) return "heal";
-  if (up.includes("FLEE") || up.includes("TELEPORT") || up.includes("ESCAPE")) return "flee";
-  if (up.includes("FIGHT") || up.includes("ATTACK")) return "fight";
-  return null;
+async function llmHealOrFlee(state: any, enemies: any[], hpPct: number, rules: "heal" | "flee" | "fight" | null): Promise<"heal" | "flee" | "fight" | null> {
+  return (await decide("tactic", { state, enemies, hpPct, rules })) as "heal" | "flee" | "fight" | null;
 }
 
-// LLM判断: WoR帰還すべきか (深層で危険な状況)
-async function llmShouldRecall(state: any): Promise<boolean | null> {
-  if (!LLM_ENABLED) return null;
-  const ctx = gameContextString(state);
-  const answer = await askLLM(
-    `Should I use Word of Recall to return to town? Consider my HP, healing supplies, and the danger level at current depth. Low supplies or dangerous depth = YES.`,
-    ctx
-  );
-  if (answer.toUpperCase().startsWith("YES")) return true;
-  if (answer.toUpperCase().startsWith("NO")) return false;
-  return null;
+// LLM判断: WoR帰還すべきか (深層で危険な状況) (rules: 継続)
+async function llmShouldRecall(state: any, rules: "recall" | "continue" = "continue"): Promise<boolean | null> {
+  const choice = await decide("recall", { state, rules });
+  return choice === null ? null : choice === "recall";
 }
 
-// LLM判断: この階の探索を続けるべきか (レベリング vs 降下)
-async function llmShouldExploreMore(state: any, killsThisLevel: number, turnsOnLevel: number): Promise<boolean | null> {
-  if (!LLM_ENABLED) return null;
-  const ctx = gameContextString(state);
-  const answer = await askLLM(
-    `I've killed ${killsThisLevel} monsters and spent ${turnsOnLevel} turns on DL${state.depth}. Should I keep exploring this level for more XP/items (YES) or descend to the next level (NO)? Consider my CL vs DL ratio and equipment readiness.`,
-    ctx
-  );
-  if (answer.toUpperCase().startsWith("YES")) return true;
-  if (answer.toUpperCase().startsWith("NO")) return false;
-  return null;
+// LLM判断: この階の探索を続けるべきか (レベリング vs 降下) (rules: 降下)
+async function llmShouldExploreMore(state: any, killsThisLevel: number, turnsOnLevel: number, rules: "explore" | "descend" = "descend"): Promise<boolean | null> {
+  const choice = await decide("explore", { state, kills: killsThisLevel, turns: turnsOnLevel, rules });
+  return choice === null ? null : choice === "explore";
 }
 
 // ── 戦術判断 ──
@@ -818,6 +1247,61 @@ function findPhaseScroll(inventory: any[]): number | null {
     item.tval === TVAL.SCROLL && item.name.includes("Phase Door") && item.qty > 0
   );
   return scroll ? scroll.slot : null;
+}
+
+function findOilFlask(inventory: any[]): number | null {
+  const f = inventory.find((item: any) => item.tval === TVAL.FLASK && item.qty > 0);
+  return f ? f.slot : null;
+}
+
+// Bresenham でプレイヤー→目標の射線が通るか (中間タイルが全て通行可・扉閉でない)
+function hasLOS(tiles: any[], px: number, py: number, tx: number, ty: number): boolean {
+  const feats = new Map<number, number>();
+  for (const t of tiles) feats.set(t.y * 4096 + t.x, t.feat);
+  const dx = Math.abs(tx - px), dy = Math.abs(ty - py);
+  const sx = px < tx ? 1 : -1, sy = py < ty ? 1 : -1;
+  let err = dx - dy, x = px, y = py;
+  while (!(x === tx && y === ty)) {
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx) { err += dx; y += sy; }
+    if (x === tx && y === ty) break;
+    const f = feats.get(y * 4096 + x);
+    if (f === undefined || !PASSABLE_FEATS.has(f) || f === FEAT.PASS_RUBBLE) return false;
+  }
+  return true;
+}
+
+const THROW_RANGE = 8;
+
+// 既知の階段 (上り/下り) のうち最寄りへの BFS: 最初の一歩と歩数
+function nearestStair(tiles: any[], px: number, py: number): { dir: number; len: number } | null {
+  const passable = new Set<string>();
+  const stairs = new Set<string>();
+  for (const t of tiles) {
+    if (PASSABLE_FEATS.has(t.feat)) passable.add(`${t.x},${t.y}`);
+    if (t.feat === FEAT.UP_STAIR || t.feat === FEAT.DOWN_STAIR) stairs.add(`${t.x},${t.y}`);
+  }
+  if (stairs.size === 0) return null;
+  const offs: [number, number, number][] = [[-1, 1, 1], [0, 1, 2], [1, 1, 3], [-1, 0, 4], [1, 0, 6], [-1, -1, 7], [0, -1, 8], [1, -1, 9]];
+  const seen = new Set<string>([`${px},${py}`]);
+  let frontier: { x: number; y: number; dir: number }[] = [{ x: px, y: py, dir: 5 }];
+  for (let len = 1; frontier.length > 0 && len < 200; len++) {
+    const next: { x: number; y: number; dir: number }[] = [];
+    for (const c of frontier) {
+      for (const [dx, dy, d] of offs) {
+        const nx = c.x + dx, ny = c.y + dy, k = `${nx},${ny}`;
+        if (!passable.has(k) || seen.has(k)) continue;
+        if (!canMoveDiag(passable, c.x, c.y, dx, dy)) continue;
+        seen.add(k);
+        const dir = c.dir === 5 ? d : c.dir;
+        if (stairs.has(k)) return { dir, len };
+        next.push({ x: nx, y: ny, dir });
+      }
+    }
+    frontier = next;
+  }
+  return null;
 }
 
 function findTeleportScroll(inventory: any[]): number | null {
@@ -933,8 +1417,13 @@ function canMoveDiag(passableSet: Set<string>, fx: number, fy: number, dx: numbe
 }
 
 // ── BFS パスファインディング ──
-function bfsNextStep(
-  tiles: any[], px: number, py: number, tx: number, ty: number
+function bfsNextStep(tiles: any[], px: number, py: number, tx: number, ty: number): number | null {
+  // 動かない敵の隣を避ける経路が無ければ、隣を通る経路 (敵のマス自体は通らない)
+  return bfsNextStepCore(tiles, px, py, tx, ty, true) ?? (avoidSoft.size ? bfsNextStepCore(tiles, px, py, tx, ty, false) : null);
+}
+
+function bfsNextStepCore(
+  tiles: any[], px: number, py: number, tx: number, ty: number, avoidNear: boolean
 ): number | null {
   if (px === tx && py === ty) return null;
 
@@ -945,6 +1434,8 @@ function bfsNextStep(
       passableSet.add(`${t.x},${t.y}`);
     }
   }
+  for (const k of avoidHard) passableSet.delete(k);
+  if (avoidNear) for (const k of avoidSoft) if (k !== `${tx},${ty}`) passableSet.delete(k);
 
   const queue: { x: number; y: number; firstDir: number }[] = [];
   const visitedBFS = new Set<string>();
@@ -1005,6 +1496,7 @@ function dijkstraNextStepWithDigging(
     if (PASSABLE_FEATS.has(feat)) return 1;
     if (feat === FEAT.CLOSED_DOOR || feat === FEAT.SECRET) return 2;
     if (feat === FEAT.RUBBLE) return 3;
+    if (!canDigHard) return 9999; // 掘削具なし: 岩盤は掘れない
     if (feat === FEAT.MAGMA || feat === FEAT.MAGMA_K) return 5;
     if (feat === FEAT.QUARTZ || feat === FEAT.QUARTZ_K) return 5;
     if (feat === FEAT.GRANITE) return 10;
@@ -1068,8 +1560,12 @@ function dijkstraNextStepWithDigging(
 }
 
 // ── BFS: 最寄り未踏タイルへの最初の1歩 ──
-function bfsNextUnvisited(
-  tiles: any[], px: number, py: number, visited: Set<string>
+function bfsNextUnvisited(tiles: any[], px: number, py: number, visited: Set<string>): number | null {
+  return bfsNextUnvisitedCore(tiles, px, py, visited, true) ?? (avoidSoft.size ? bfsNextUnvisitedCore(tiles, px, py, visited, false) : null);
+}
+
+function bfsNextUnvisitedCore(
+  tiles: any[], px: number, py: number, visited: Set<string>, avoidNear: boolean
 ): number | null {
   const passableSet = new Set<string>();
   for (const t of tiles) {
@@ -1077,6 +1573,8 @@ function bfsNextUnvisited(
       passableSet.add(`${t.x},${t.y}`);
     }
   }
+  for (const k of avoidHard) passableSet.delete(k);
+  if (avoidNear) for (const k of avoidSoft) passableSet.delete(k);
 
   const queue: { x: number; y: number; firstDir: number }[] = [];
   const seen = new Set<string>();
@@ -1188,6 +1686,8 @@ function shouldKeepItem(item: any, equipment: any[]): boolean {
   if ([TVAL.SCROLL, TVAL.POTION, TVAL.FOOD].includes(item.tval)) return true;
   // 魔法書は保持
   if ([30, 31, 32, 33, 34].includes(item.tval)) return true;
+  // 掘削具は保持 (stuck 脱出用)
+  if (item.tval === TVAL.DIGGING) return true;
   // 装備品: 現装備より良いなら保持
   if (EQUIPPABLE_TVALS.has(item.tval)) {
     const currentEquip = equipment.find((e: any) => sameEquipCategory(e.tval, item.tval));
@@ -1257,10 +1757,10 @@ async function buySupplies(state: any) {
   // Shopping list: name match, valid tvals (to avoid buying staves/wands), store IDs
   // tval 25=scroll, 26=potion, 28=food
   const shoppingList = [
-    { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [3, 5] },
-    { name: "Phase Door", tvals: [25], target: 20, stores: [3, 5] },
-    { name: "Teleportation", tvals: [25], target: 12, stores: [3, 5, 6] },
-    { name: "Word of Recall", tvals: [25], target: 5, stores: [3, 5] },
+    { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [4, 5] },
+    { name: "Phase Door", tvals: [25], target: 20, stores: [4, 5] },
+    { name: "Teleportation", tvals: [25], target: 12, stores: [4, 5, 6] },
+    { name: "Word of Recall", tvals: [25], target: 5, stores: [4, 5] },
     { name: null as string | null, tvals: [28], target: 10, stores: [0] }, // any food (tval=28)
   ];
 
@@ -1358,6 +1858,7 @@ async function buyEquipment(state: any) {
     for (const stockItem of stock) {
       if (stockItem.price > currentGold || stockItem.price <= 0) continue;
       if (!EQUIPPABLE_TVALS.has(stockItem.tval)) continue;
+      if (stockItem.tval === TVAL.DIGGING) continue; // 掘削具は buyEarlyKit で購入
 
       // 現装備と比較
       const stockPower = itemPower(stockItem);
@@ -1426,6 +1927,16 @@ async function playGame() {
   }
 
   let state = await getState();
+  const rolloutStart = {
+    depth: state.depth, cl: state.player.level, exp: state.player.exp ?? 0,
+    hp: state.player.hp, maxHp: state.player.maxHp,
+    toNext: expToNextLevel(state.player),
+  };
+  if (state.depth > maxDepthReached) maxDepthReached = state.depth;
+  if (!ROLLOUT && state.depth === 0 && state.turn < 100) {
+    await buyEarlyKit();
+    state = await getState();
+  }
   let turnLimit = 500000;
   let actionCount = 0;
   let killsThisLevel = 0;
@@ -1449,17 +1960,21 @@ async function playGame() {
   // 初期フレーム録画
   recordFrame(state, "start");
 
-  while (!state.dead && !state.won && state.turn < turnLimit && actionCount < 100000) {
+  while (!state.dead && !state.won && state.turn < turnLimit && actionCount < MAX_ACTIONS
+         && !(ROLLOUT && (actionCount >= ROLLOUT_HORIZON || (!rolloutFired && actionCount >= ROLLOUT_MAX_WAIT)))) {
     actionCount++;
+    rolloutActions = actionCount;
     (globalThis as any).__lastState = state; // LLMキャッシュキー用
     // 録画 (10アクション毎 + イベント時)
     lastRecordedState = state;
     if (actionCount % 10 === 0) recordFrame(state);
     const p = state.player;
+    if (p.maxHp > 0) minHpFrac = Math.min(minHpFrac, p.hp / p.maxHp);
     const { x: px, y: py } = p;
     const tiles = state.map.tiles;
     const monsters = state.monsters;
     const inv = p.inventory;
+    canDigHard = playerHasDigger(p);
     const hpPct = p.hp / p.maxHp;
     // Player resistances from calcBonuses (race + equipment)
     const playerResists = new Set<string>();
@@ -1477,6 +1992,18 @@ async function playGame() {
       1: [-1, 1], 2: [0, 1], 3: [1, 1], 4: [-1, 0], 6: [1, 0],
       7: [-1, -1], 8: [0, -1], 9: [1, -1],
     };
+    setStationaryAvoid(monsters, p.level);
+    // 動かない敵から離れる1歩 (敵のいない、回避マスでない方向)
+    const stepAwayFromStationary = (): number | null => {
+      for (const d of ALL_DIRS) {
+        const [dx, dy] = dirOffsets[d]!;
+        const nx = px + dx, ny = py + dy;
+        if (!isPassable(tiles, nx, ny) || avoidSoft.has(`${nx},${ny}`)) continue;
+        if (monsters.some((m: any) => m.x === nx && m.y === ny)) continue;
+        return d;
+      }
+      return null;
+    };
 
     // === 装備最適化 (500ターンに1回 + 深度変更時) ===
     // equippedNames: 現在装備中のアイテム名セット。同名アイテムの再装備ループを防止
@@ -1491,6 +2018,7 @@ async function playGame() {
       for (const e of equip) { if (e?.name) equippedNames.add(e.name); }
       for (const invItem of inv) {
         if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
+        if (invItem.tval === TVAL.DIGGING) continue; // 掘削具は持ち物のまま (装備しない)
         // 既に装備したことのあるアイテムは無視 (ループ防止)
         if (equippedNames.has(invItem.name)) continue;
         const curEquip = equip.find((e: any) => sameEquipCategory(e.tval, invItem.tval));
@@ -1517,6 +2045,14 @@ async function playGame() {
       (globalThis as any).__herdFleeCount = 0;
       if (state.depth > maxDepthReached) maxDepthReached = state.depth;
       lastKnownDepth = state.depth;
+      if (savepointBank.enabled && !ROLLOUT) await savepointBank.onLevelEntry(state, gameIdOf(state), GAME_SEED === null ? null : Number(GAME_SEED), fetchSnapshotBody);
+
+      // 序盤の町帰還 (逃走で DL1→町 など): 残金で油/Phase/CLW を補充
+      if (state.depth === 0 && maxDepthReached < 5 && !ROLLOUT) {
+        if (RULEFIX.has("restock") && actionCount > 0) { await sellJunk(state); state = await getState(); }
+        await buyEarlyKit();
+        state = await getState();
+      }
 
       // Town: buy supplies before returning to dungeon
       if (state.depth === 0 && maxDepthReached >= 5) {
@@ -1650,6 +2186,48 @@ async function playGame() {
       // noProgressCountをインデックスとして使い、8方向を順番に試す
       const tryDirIndex = (noProgressCount - 100) % ALL_DIRS.length;
       const visStair = findTile(tiles, FEAT.DOWN_STAIR) ?? findTile(tiles, FEAT.UP_STAIR);
+      if (!canDigHard) {
+        // 掘削具なし: 花崗岩を掘っても無駄。スクロール > 歩ける方向 > 扉/瓦礫 の順で脱出を試みる
+        const teleSlot0 = findTeleportScroll(inv);
+        const phaseSlot0 = findPhaseScroll(inv);
+        if (noProgressCount % 20 === 0 && (teleSlot0 !== null || phaseSlot0 !== null)) {
+          addLesson(state.turn, state.depth, "停滞脱出(掘削具なし)", `${noProgressCount}回停滞。${teleSlot0 !== null ? "Teleport" : "Phase"}`);
+          state = await sendCommand({ type: CMD.READ, itemIndex: (teleSlot0 ?? phaseSlot0)! });
+          stuckCount = 0; noProgressCount = 60; visited.clear(); lastVisitedSize = 0;
+          continue;
+        }
+        if (noProgressCount >= 140 && state.depth > 0 && !(p.wordRecall > 0)) {
+          const recallSlot0 = findRecallScroll(inv);
+          if (recallSlot0 !== null) {
+            addLesson(state.turn, state.depth, "WoR脱出", `${noProgressCount}回停滞、掘削具なし。Word of Recall`);
+            state = await sendCommand({ type: CMD.READ, itemIndex: recallSlot0 });
+            noProgressCount = 100;
+            continue;
+          }
+        }
+        // 歩ける隣接マスを順に歩く (未訪問優先、なければ回転)、扉/瓦礫だけ掘る
+        const order = [...ALL_DIRS];
+        let moved = false;
+        for (let k = 0; k < order.length && !moved; k++) {
+          const d = order[(tryDirIndex + k) % order.length]!;
+          const [ddx, ddy] = dirOffsets[d] ?? [0, 0];
+          const tt = tiles.find((t: any) => t.x === px + ddx && t.y === py + ddy);
+          if (!tt) continue;
+          if (PASSABLE_FEATS.has(tt.feat) && !visited.has(`${tt.x},${tt.y}`)) {
+            state = await sendCommand({ type: CMD.WALK, direction: d }); moved = true;
+          } else if (SOFT_DIG_FEATS.has(tt.feat)) {
+            state = await sendCommand({ type: CMD.TUNNEL, direction: d }); moved = true;
+          }
+        }
+        if (!moved) {
+          const d = order[tryDirIndex]!;
+          const [ddx, ddy] = dirOffsets[d] ?? [0, 0];
+          const tt = tiles.find((t: any) => t.x === px + ddx && t.y === py + ddy);
+          if (tt && PASSABLE_FEATS.has(tt.feat)) state = await sendCommand({ type: CMD.WALK, direction: d });
+          else state = await sendCommand({ type: CMD.REST, turns: 1 } as any);
+        }
+        continue;
+      }
       let tunnelDir: number;
       if (visStair && noProgressCount < 150) {
         // 最初の50回は階段方向へ
@@ -1720,11 +2298,12 @@ async function playGame() {
           const pathTile = tiles.find((t: any) => t.x === px + sdx && t.y === py + sdy);
           if (pathTile && PASSABLE_FEATS.has(pathTile.feat)) {
             state = await sendCommand({ type: CMD.WALK, direction: stairDir });
-          } else {
+            continue;
+          } else if (pathTile && digWorthwhile(pathTile.feat)) {
             state = await sendCommand({ type: CMD.TUNNEL, direction: stairDir });
+            continue;
           }
-          // noProgressCountをリセットしない — 位置が変わればvisitedで自動リセット
-          continue;
+          // 掘れない壁: 他の脱出手段 (後段) に任せる
         }
       }
     }
@@ -1816,6 +2395,20 @@ async function playGame() {
       const status = isConfused ? "混乱" : isBlind ? "盲目" : "麻痺";
       const nearbyEnemies = monsters.filter((m: any) => m.distance <= 2);
       if (nearbyEnemies.length > 0 && p.timed.confused > 0) {
+        // 隣のキノコ (HP1-2、胞子で混乱させ続ける) は殴って倒す
+        const shroom = nearbyEnemies.find((m: any) => m.distance <= 1 && STATIONARY_RE.test(m.name ?? "") && !hurtsOnContact(m));
+        if (shroom) {
+          state = await sendCommand({ type: CMD.WALK, direction: directionTo(px, py, shroom.x, shroom.y) });
+          continue;
+        }
+        // 近くの敵が動かない敵だけなら、薬を使わず離れる
+        if (hpPct >= 0.4 && nearbyEnemies.every((m: any) => STATIONARY_RE.test(m.name ?? ""))) {
+          const away = stepAwayFromStationary();
+          if (away !== null) {
+            state = await sendCommand({ type: CMD.WALK, direction: away });
+            continue;
+          }
+        }
         // 混乱+敵が近い → ポーション飲む (混乱中でもquaffは可能)
         const healSlot = findHealingPotion(inv);
         if (healSlot !== null) {
@@ -1874,16 +2467,19 @@ async function playGame() {
 
     // === 優先度1.8: 補給帰還 (回復薬が危険域ならWoRで町へ) ===
     // supplyWoRUsed: 同じ階で1回のみ (ループ防止)
-    if (state.depth >= 10 && !(p.wordRecall > 0) && !supplyWoRUsedThisLevel
+    if ((state.depth >= 10 || (WIDE && state.depth >= 5)) && !(p.wordRecall > 0) && !supplyWoRUsedThisLevel
         && monsters.filter((m: any) => m.distance <= 3).length === 0) {
       const cureQty2 = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0)
         .reduce((s: number, i: any) => s + i.qty, 0);
       const minCureForDepth = state.depth >= 35 ? 15 : state.depth >= 25 ? 10 : state.depth >= 20 ? 8 : state.depth >= 15 ? 5 : 3;
       // ルール基準 OR LLM判断で帰還
-      let shouldRecall = cureQty2 < minCureForDepth;
+      let shouldRecall = state.depth >= 10 && cureQty2 < minCureForDepth;
       const llmRecallCd = (globalThis as any).__llmRecallCd ?? 0;
-      if (!shouldRecall && LLM_ENABLED && state.depth >= 15 && cureQty2 < minCureForDepth * 2
-          && state.turn - llmRecallCd >= 200) {
+      // ログモード: DL5+ でWoR所持時のみ、補給量に関係なく、1000ターンに1回
+      const recallAsk = WIDE
+        ? state.depth >= 5 && findRecallScroll(inv) !== null && state.turn - llmRecallCd >= 1000
+        : LLM_ENABLED && state.depth >= 15 && cureQty2 < minCureForDepth * 2 && state.turn - llmRecallCd >= 200;
+      if (!shouldRecall && recallAsk) {
         (globalThis as any).__llmRecallCd = state.turn;
         const llmRecall = await llmShouldRecall(state);
         if (llmRecall === true) shouldRecall = true;
@@ -1900,12 +2496,40 @@ async function playGame() {
       }
     }
 
+    // === 優先度1.9: 浅層の補給帰還 (回復薬切れ or Phase/油切れ → 上り階段で町へ) ===
+    if (RULEFIX.has("restock") && !ROLLOUT && state.depth >= 1 && state.depth <= 4 && p.level < 15) {
+      const cureN = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
+      const escN = inv.filter((i: any) => (i.name?.includes("Phase Door") || /Flask~? of oil/i.test(i.name ?? "")) && i.qty > 0)
+        .reduce((s: number, i: any) => s + i.qty, 0);
+      if (!restockTrip && (cureN === 0 || escN === 0) && p.gold >= 40) {
+        restockTrip = true;
+        addLesson(state.turn, state.depth, "補給帰還", `回復薬${cureN} Phase/油${escN}、${p.gold}G。上り階段で町へ`);
+      }
+      if (restockTrip && monsters.every((m: any) => m.distance > 4)) {
+        const onUp = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.UP_STAIR);
+        if (onUp) {
+          state = await sendCommand({ type: CMD.GO_UP });
+          continue;
+        }
+        const up = findTile(tiles, FEAT.UP_STAIR);
+        const dir = up ? bfsNextStep(tiles, px, py, up.x, up.y) : null;
+        if (dir !== null) {
+          state = await sendCommand({ type: CMD.WALK, direction: dir });
+          continue;
+        }
+        // 上り階段が未発見 → 通常の探索に任せる (降下は restockTrip 中は止める)
+      }
+    }
+    if (state.depth === 0) restockTrip = false;
+
     // === 優先度2: 緊急回復+逃走 (深層は閾値引き上げ) ===
     const isExtremeDeep = state.depth >= 20;
     const isVeryDeep = state.depth >= 15;
     const isDeep = state.depth >= 10;
-    const emergencyHpThreshold = isExtremeDeep ? 0.5 : isVeryDeep ? 0.4 : isDeep ? 0.35 : 0.3;
-    const fleeHpThreshold = isExtremeDeep ? 0.65 : isVeryDeep ? 0.55 : isDeep ? 0.5 : 0.3;
+    // 序盤 (CL<10, DL<=5) は 1-2 発で HP の 3 割が飛ぶ: 半分で逃げる/回復する
+    const lowCLEscape = RULEFIX.has("escape") && p.level < 10 && state.depth <= 5;
+    const emergencyHpThreshold = isExtremeDeep ? 0.5 : isVeryDeep ? 0.4 : isDeep ? 0.35 : lowCLEscape ? 0.5 : 0.3;
+    const fleeHpThreshold = isExtremeDeep ? 0.65 : isVeryDeep ? 0.55 : isDeep ? 0.5 : lowCLEscape ? 0.5 : 0.3;
 
     // HP危険域 → 敵がいれば逃走優先、敵がいなければ回復
     if (hpPct < emergencyHpThreshold) {
@@ -2210,8 +2834,24 @@ async function playGame() {
     let nearDangerous = monsters.filter((m: any) =>
       m.distance <= dangerDetectRange && isDangerousMonster(m, p.level, state.depth, playerResists) && !forceFightMonsters.has(m.name)
     );
+    // ログ/ロールアウトモード: 6マス以内に入った各モンスター個体を1回ずつ判断 (rules = ルール自身の分類)
+    const fkey = (m: any) => `${state.depth}:${m.midx}:${m.name}`;
+    if (WIDE) {
+      const seenMon = (globalThis as any).__logSeenMon ?? new Set<string>();
+      (globalThis as any).__logSeenMon = seenMon;
+      for (const m of monsters) {
+        if (m.distance > 6) continue;
+        const key = fkey(m);
+        if (seenMon.has(key)) continue;
+        seenMon.add(key);
+        let rulesChoice = rulesFightChoice(m, p.level, inv, tiles, px, py);
+        if (rulesChoice === "melee" && isDangerousMonster(m, p.level, state.depth, playerResists) && !forceFightMonsters.has(m.name)) rulesChoice = "flee";
+        const ch = await decideFight(state, m, rulesChoice);
+        if (ch) fightPlan.set(key, ch);
+      }
+    }
     // LLM判断: ルールでは安全だが怪しい敵にLLMに聞く（同名敵は1回だけ）
-    if (nearDangerous.length === 0 && LLM_ENABLED) {
+    if (nearDangerous.length === 0 && DECISION_ON && !WIDE) {
       const llmAskedMonsters = (globalThis as any).__llmAskedMonsters ?? new Set<string>();
       (globalThis as any).__llmAskedMonsters = llmAskedMonsters;
       const suspicious = monsters.filter((m: any) =>
@@ -2223,11 +2863,69 @@ async function playGame() {
       if (suspicious.length > 0) {
         const sus = suspicious[0];
         llmAskedMonsters.add(sus.name);
-        const shouldFight = await llmShouldFight(state, sus);
-        if (shouldFight === false) {
-          nearDangerous = [sus];
-        }
+        const ch = await decideFight(state, sus, "melee");
+        if (ch) fightPlan.set(fkey(sus), ch);
+        if (ch === "flee") nearDangerous = [sus];
       }
+    }
+    // === 序盤トルクキット: fight = {melee, throw, flee} の実行 ===
+    // 判断済み個体 (fightPlan) はそれに従う。未判断の序盤高速/強敵はルール分類 (油 > 逃走 > 殴る)
+    {
+      let acted = false;
+      const cands = monsters.filter((m: any) => m.distance <= 8)
+        .sort((a: any, b: any) => a.distance - b.distance);
+      for (const m of cands) {
+        const key = fkey(m);
+        let choice: FightChoice | null = fightPlan.get(key) ?? null;
+        const planned = choice !== null;
+        if (!choice) {
+          if (!lowCLDanger(m, p.level) && !meleeTooCostly(m, p)) continue;
+          choice = rulesFightChoice(m, p.level, inv, tiles, px, py);
+        }
+        if (choice === "throw") {
+          const flask = findOilFlask(inv);
+          const losKey = `${px},${py}>${m.x},${m.y}`;
+          if (flask !== null && m.distance <= THROW_RANGE && hasLOS(tiles, px, py, m.x, m.y) && !noThrowLOS.has(losKey)) {
+            const turnBefore = state.turn;
+            throwsMade++;
+            if (throwsMade <= 3 || throwsMade % 10 === 0) addLesson(state.turn, state.depth, "投擲", `${m.name}(Lv${m.level},spd${m.speed},dist${m.distance})へ油を投擲 (#${throwsMade})`);
+            state = await sendCommand({ type: CMD.THROW, target: { x: m.x, y: m.y }, itemIndex: flask });
+            {
+              // サーバーの投擲メッセージ ("Your flask of oil hits/kills/misses ...") から命中/撃破を数える
+              const tm = ((state.messages ?? []) as any[]).slice(-3).map((x: any) => String(x));
+              if (tm.some(x => /^Your .* (hits|kills) /.test(x))) throwHits++;
+              if (tm.some(x => /^Your .* and kills it/.test(x))) throwKills++;
+            }
+            if (state.turn !== turnBefore) {
+              acted = true;
+              break;
+            }
+            // サーバが拒否 (ターン経過なし): hasLOS とサーバの射線判定がずれる地点は覚えて殴る
+            throwsMade--;
+            noThrowLOS.add(losKey);
+          }
+          choice = "melee"; // 油なし/射線なし → 殴る
+        }
+        if (choice === "flee") {
+          const fleeN = (fleeSteps.get(key) ?? 0) + 1;
+          fleeSteps.set(key, fleeN);
+          const fl = fleeN > 60 ? null : earlyFleeCommand(tiles, px, py, inv, m, actionCount); // 同一個体から60手逃げても振り切れない → 諦めて殴る
+          if (fl) {
+            earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
+            if (fl.kind === "stairs") earlyFleeStairs++;
+            if (fl.kind === "phase") phasesRead++;
+            if (earlyFleeActions <= 3 || fl.kind !== "walk") addLesson(state.turn, state.depth, "序盤逃走", `${m.name}(Lv${m.level},spd${m.speed},dist${m.distance})から${fl.kind}`);
+            state = await sendCommand(fl.cmd);
+            acted = true;
+            break;
+          }
+          // 逃走手段なし → 計画済みなら既存の逃走処理へ、ルール分類なら殴る
+          if (planned && !nearDangerous.includes(m)) nearDangerous.push(m);
+          else if (!planned) choice = "melee";
+        }
+        if (choice === "melee") nearDangerous = nearDangerous.filter((x: any) => x !== m);
+      }
+      if (acted) continue;
     }
     if (nearDangerous.length > 0 && nearDangerous[0].distance <= dangerFleeRange) {
       const dangerMon = nearDangerous[0];
@@ -2402,7 +3100,16 @@ async function playGame() {
     }
 
     // === 優先度4: 隣接敵との戦闘 ===
-    const adjacentMonsters = monsters.filter((m: any) => m.distance <= 1);
+    // 低CLでは動かない敵 (キノコ/ゼリー/カビ/浮遊眼) を殴らない: 胞子/接触/麻痺で CL1 が死ぬ (経験値より危険)
+    const adjacentMonsters = monsters.filter((m: any) => m.distance <= 1 && !(p.level < 12 && hurtsOnContact(m)));
+    // 殴らない動かない敵の隣にいる → 1歩離れる (直後の BFS は隣接マスを避ける)
+    if (adjacentMonsters.length === 0 && p.level < 12 && monsters.some((m: any) => m.distance <= 1 && hurtsOnContact(m))) {
+      const away = stepAwayFromStationary();
+      if (away !== null) {
+        state = await sendCommand({ type: CMD.WALK, direction: away });
+        continue;
+      }
+    }
     if (adjacentMonsters.length > 0) {
       // ターゲット選択: 召喚/ブレス持ちを優先排除、次に最弱
       const target = adjacentMonsters.sort((a: any, b: any) => {
@@ -2590,12 +3297,21 @@ async function playGame() {
       const combatHealThreshold = isExtremeDeep ? 0.65 : isVeryDeep ? 0.55 : isDeep ? 0.5 : 0.4;
       // LLM戦闘判断: HP40-70%の微妙な範囲でLLMに聞く (50ターンに1回、コスト制限)
       const llmCombatCooldown = (globalThis as any).__llmCombatCd ?? 0;
-      if (LLM_ENABLED && state.depth >= 15 && hpPct >= 0.3 && hpPct < 0.7 && adjacentMonsters.length >= 1
-          && state.turn - llmCombatCooldown >= 50) {
+      // ログモード: 隣接敵あり & HP<90%、20プレイヤーターン(=200ゲームターン)に1回
+      const tacticAsk = WIDE
+        ? state.depth >= 1 && hpPct < 0.9 && adjacentMonsters.length >= 1 && state.turn - llmCombatCooldown >= 200
+        : LLM_ENABLED && state.depth >= 15 && hpPct >= 0.3 && hpPct < 0.7 && adjacentMonsters.length >= 1
+          && state.turn - llmCombatCooldown >= 50;
+      let skipHealThisTurn = false;
+      if (tacticAsk) {
         (globalThis as any).__llmCombatCd = state.turn;
-        const llmAction = await llmHealOrFlee(state, adjacentMonsters, hpPct);
+        // ルールの次手: 回復手段があれば回復、なければ殴る (逃走は上で処理済み)
+        const rulesHeal = hpPct < combatHealThreshold && adjacentMonsters.length <= 2 &&
+          ((canCastSpells && findBestHealSpell(spells, p.level, sp, true) !== null) || findTieredHealingPotion(inv, hpPct) !== null);
+        const llmAction = await llmHealOrFlee(state, adjacentMonsters, hpPct, rulesHeal ? "heal" : "fight");
         if (llmAction === "flee") {
-          const teleSlotLlm = findTeleportScroll(inv);
+          // Teleport if held, else Phase Door (early vanilla characters rarely have Teleportation)
+          const teleSlotLlm = findTeleportScroll(inv) ?? findPhaseScroll(inv);
           if (teleSlotLlm !== null) {
             fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
             addLesson(state.turn, state.depth, "LLM逃走判断",
@@ -2606,13 +3322,25 @@ async function playGame() {
           }
         }
         // llmAction === "fight" → 回復せずに殴る (DPS高いなら有効)
-        if (llmAction === "fight" && hpPct >= 0.4) {
-          // skip healing, fall through to attack
-        } else if (llmAction === "heal" || llmAction === null) {
-          // heal → 通常のヒーリングロジックへ
+        if (llmAction === "fight") {
+          skipHealThisTurn = true;
+        } else if (llmAction === "heal") {
+          // heal → HPしきい値に関係なく今回復する (スペル優先、なければポーション)
+          const healSpellLlm = canCastSpells ? findBestHealSpell(spells, p.level, sp, true) : null;
+          if (healSpellLlm) {
+            spellsUsed++; healingsUsed++;
+            state = await sendCommand({ type: CMD.CAST, spellIndex: healSpellLlm.index, direction: 5 });
+            continue;
+          }
+          const healSlotLlm = findTieredHealingPotion(inv, hpPct) ?? findHealingPotion(inv);
+          if (healSlotLlm !== null) {
+            healingsUsed++;
+            state = await sendCommand({ type: CMD.QUAFF, itemIndex: healSlotLlm });
+            continue;
+          }
         }
       }
-      if (hpPct < combatHealThreshold && adjacentMonsters.length <= 2) {
+      if (!skipHealThisTurn && hpPct < combatHealThreshold && adjacentMonsters.length <= 2) {
         // 回復スペルがあればスペル優先
         if (canCastSpells) {
           const healSpell = findBestHealSpell(spells, p.level, sp, true);
@@ -2692,12 +3420,20 @@ async function playGame() {
             state = await sendCommand({ type: CMD.EQUIP, itemIndex: invItem.slot });
             break;
           }
+          const eqLogSeen: Set<string> = (globalThis as any).__logEquipSeen ?? ((globalThis as any).__logEquipSeen = new Set<string>());
+          const eqLogKey = `${invItem.name}|${currentEquip2?.slot}`;
+          const eqLogFirst = LOGLIKE && !!currentEquip2 && !eqLogSeen.has(eqLogKey);
+          if (eqLogFirst && invPower2 <= itemPower(currentEquip2)) {
+            eqLogSeen.add(eqLogKey);
+            await llmChooseEquipment(state, currentEquip2, invItem, "keep"); // ログのみ: ルールは交換しない
+          }
           if (currentEquip2 && invPower2 > itemPower(currentEquip2)) {
             // LLM装備判断: 武器(blowsリスク)と耐性付き防具(トレードオフ)
             let doSwap = true;
             const hasResists = (invItem.resists ?? []).some((r: any) => r.level > 0);
             const currentHasResists = (currentEquip2.resists ?? []).some((r: any) => r.level > 0);
-            if (LLM_ENABLED && (WEAPON_TVALS.has(invItem.tval) || hasResists || currentHasResists)) {
+            if (LOGLIKE ? eqLogFirst : DECISION_ON && (WEAPON_TVALS.has(invItem.tval) || hasResists || currentHasResists)) {
+              if (eqLogFirst) eqLogSeen.add(eqLogKey);
               const llmOk = await llmChooseEquipment(state, currentEquip2, invItem);
               if (llmOk === false) {
                 doSwap = false;
@@ -2834,7 +3570,8 @@ async function playGame() {
     })();
     // 低探索率フロア早期降下: 探索率<15%で1500ターン以上 → 小部屋/孤立フロアなので降りる
     // 探索率が極端に低い場合はkillsもCLも待たない (そのフロアで稼げない)
-    const lowExplorationEarlyDescent = currentExplorationPct < 15 && turnsOnLevel > 1500 && state.depth > 0;
+    const lowExplorationEarlyDescent = currentExplorationPct < 15 && turnsOnLevel > 1500 && state.depth > 0
+      && (state.depth > 3 || p.level >= state.depth + 2 || turnsOnLevel > 8000); // 序盤は CL ゲートを回避させない
 
     // If overleveled, skip kill requirement — rush deeper
     // DL20でCL22+, DL10でCL15+でオーバーレベル判定
@@ -2881,7 +3618,9 @@ async function playGame() {
     const minClRatio = state.depth >= 30 ? 0.8 : state.depth >= 20 ? 0.75 : state.depth >= 10 ? 0.7 : 0.5;
     // 絶対最低CL: DL10→CL8, DL15→CL12, DL20→CL16, DL25→CL20, DL30→CL25
     const absoluteMinCl = state.depth >= 30 ? 25 : state.depth >= 25 ? 20 : state.depth >= 20 ? 16 : state.depth >= 15 ? 12 : state.depth >= 10 ? 8 : 0;
-    const clOk = (p.level >= Math.floor(state.depth * minClRatio) && p.level >= absoluteMinCl) || state.depth <= 3;
+    // 序盤 (DL1-3) は CL >= DL+2 まで降りない (CL1 の 12HP で DL2-4 に潜って Fang/Grip/ゼリーに殺される対策)。長期滞在 (veryLongOnLevel) では緩和
+    const clOk = (p.level >= Math.floor(state.depth * minClRatio) && p.level >= absoluteMinCl && (state.depth > 3 || state.depth === 0 || p.level >= state.depth + 2))
+      || (state.depth >= 1 && state.depth <= 3 && p.level >= state.depth + 2);
 
     // === 装備品質ゲート (v9: CLだけでなく装備の準備状況もチェック) ===
     // DL15+: blows >= 2 (最低限の火力)
@@ -2910,16 +3649,19 @@ async function playGame() {
     const equipCheck = equipmentReady || veryLongOnLevel;
     // 耐性ソフトゲート: 不足分×3000ターン追加滞在で降下許可
     const resistCheck = resistOk || turnsOnLevel > resistPenaltyTurns;
-    const readyToDescend = hpPct >= 0.7 && healingOk && escapeOk && resistCheck && equipCheck &&
+    const readyToDescend = !restockTrip && hpPct >= 0.7 && healingOk && escapeOk && resistCheck && equipCheck &&
       ((clCheck && (enoughKills || explorationStalled || tooLongOnLevel || overleveled)) || lowExplorationEarlyDescent);
 
     // LLM降下判断: DL15+でLLMに確認（深度ごとに最大2回まで）
     let llmDescentVeto = false;
-    if (readyToDescend && LLM_ENABLED && state.depth >= 15) {
+    if (readyToDescend && DECISION_ON && (state.depth >= 15 || (WIDE && state.depth >= 1))) {
       const vetoCountKey = `descent_veto_count_${state.depth}`;
+      const approvedKey = `descent_approved_${state.depth}`; // 承認済みなら階段まで毎ターン聞き直さない
       const vetoCount = (globalThis as any)[vetoCountKey] ?? 0;
-      if (vetoCount < 2) { // 同じ深度で最大2回までLLMに聞く
+      if (vetoCount < 2 && !(globalThis as any)[approvedKey]) { // 同じ深度で最大2回までLLMに聞く
         const llmOk = await llmShouldDescend(state);
+        if (LOGLIKE) await llmShouldExploreMore(state, killsThisLevel, turnsOnLevel); // ログのみ (ルールは降下)
+        if (llmOk !== false) (globalThis as any)[approvedKey] = true;
         if (llmOk === false) {
           const llmExplore = await llmShouldExploreMore(state, killsThisLevel, turnsOnLevel);
           if (llmExplore === true || llmExplore === null) {
@@ -2996,10 +3738,12 @@ async function playGame() {
             const targetT = tiles.find((t: any) => t.x === px + sdx && t.y === py + sdy);
             if (targetT && PASSABLE_FEATS.has(targetT.feat)) {
               state = await sendCommand({ type: CMD.WALK, direction: stairDir });
-            } else {
+              continue;
+            } else if (targetT && digWorthwhile(targetT.feat)) {
               state = await sendCommand({ type: CMD.TUNNEL, direction: stairDir });
+              continue;
             }
-            continue;
+            // 掘れない (掘削具なし): 探索を続ける
           }
         }
       } else if (tooLongOnLevel || overleveled) {
@@ -3233,6 +3977,31 @@ async function playGame() {
     console.log(`  LLM: ${LLM_BACKEND} 呼出${llmCallCount}回 (平均${llmCallCount > 0 ? Math.round(llmTotalMs / llmCallCount) : 0}ms)`);
   }
 
+  if (finalState.dead && !ROLLOUT) savepointBank.onDeath(deathCause);
+
+  if (ROLLOUT) {
+    // ロールアウト結果: 1行だけ stdout に出す (録画/wisdom/レポートは書かない)
+    const result = {
+      decision_fired: rolloutFired,
+      forced: ROLLOUT_FORCE,
+      dead: !!finalState.dead,
+      death_cause: finalState.dead ? deathCause : null,
+      actions: actionCount,
+      hp: fp.hp, max_hp: fp.maxHp,
+      min_hp_frac: finalState.dead ? 0 : Math.min(minHpFrac, fp.maxHp > 0 ? fp.hp / fp.maxHp : 1),
+      depth_start: rolloutStart.depth, depth_end: finalState.depth,
+      cl_start: rolloutStart.cl, cl_end: fp.level,
+      exp_start: rolloutStart.exp, exp_end: fp.exp ?? 0,
+      exp_to_next_level_at_start: rolloutStart.toNext, // 推定値 (player JSON に無い場合) — 種族 expfact × player_exp 表
+      exp_to_next_source: "estimated",
+      won: !!finalState.won,
+      throws: throwsMade, throw_hits: throwHits, throw_kills: throwKills, flees: earlyFleeActions,
+    };
+    console.log(`ROLLOUT_RESULT ${JSON.stringify(result)}`);
+    return result;
+  }
+  console.log(`  序盤キット: 投擲${throwsMade}回(命中${throwHits}/撃破${throwKills}) 逃走行動${earlyFleeActions}回(階段${earlyFleeStairs}, Phase${phasesRead})`);
+
   // 最終フレーム + 録画保存
   recordFrame(finalState, finalState.dead ? `死亡: ${deathCause}` : "生存");
   await flushRecording();
@@ -3280,7 +4049,7 @@ async function playGame() {
     console.log(`  [WISDOM] 教訓保存: ${wisdom.lesson.slice(0, 80)}`);
   }
 
-  const reportPath = "/tmp/busho-play-report.json";
+  const reportPath = `${BUSHO_TMP}/busho-play-report.json`;
   const fs = await import("node:fs");
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
   console.log(`\n  レポート保存: ${reportPath}`);

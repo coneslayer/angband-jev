@@ -57,6 +57,8 @@ import {
   createStartObject,
 } from "../game/bootstrap.js";
 import { calcBonuses, calcMana } from "../player/calcs.js";
+import { capturePristine, snapshotState, decodeSnapshot } from "./snapshot.js";
+import type { TemplateLists, PristineTemplates, SnapshotData } from "./snapshot.js";
 
 // Reuse JSON loader from remote-server
 import * as fs from "node:fs";
@@ -663,6 +665,7 @@ function serializeStores(state: GameState) {
       tval: item.kind?.tval ?? 0,
       sval: item.kind?.sval ?? 0,
       price: storeGetPrice(store, item, false),
+      number: item.number ?? 1,
       ...serializeItemExtra(item),
     })),
   }));
@@ -735,6 +738,11 @@ class AIServer {
   private httpServer: http.Server | null = null;
   private gameLoopPromise: Promise<void> | null = null;
   private objectKinds: readonly ObjectKind[] = [];
+  // Static data lists + their pristine contents (for /snapshot, /restore)
+  private templates: TemplateLists = {};
+  private pristine: PristineTemplates = {};
+  private commandInFlight = false;
+  private restoring = false;
 
   constructor(
     private port: number,
@@ -779,22 +787,36 @@ class AIServer {
 
     const races = raceData.map((r, i) => raceFromJSON(r, i));
     const classes = classData.map((c, i) => classFromJSON(c, i));
+    // Template state (monster curNum, kind.aware, ...) is mutated during play and lives outside
+    // GameState; capture pristine contents now (before birth) so snapshots can store diffs.
+    this.templates = {
+      races, classes, monsterRaces, objectKinds, artifacts, egoItems, brands, slays,
+    } as unknown as TemplateLists;
+    this.pristine = capturePristine(this.templates, new RNG());
 
     const actualSeed = this.seed ?? (Date.now() & 0xffffffff);
     const rng = new RNG();
     rng.quick = false;
     rng.stateInit(actualSeed);
 
-    // ランダム種族・職業選択
-    // Force Human Warrior for consistent AI performance (melee-oriented, high HP)
-    const race = races.find(r => r.name === "Human") ?? races[0]!;
-    const cls = classes.find(c => c.name === "Warrior") ?? classes[0]!;
+    // 種族・職業選択: RACE / CLASS env (name or "random", seeded); default Human Warrior
+    // for consistent AI performance (melee-oriented, high HP)
+    const pick = <T extends { name: string }>(list: T[], wanted: string, envName: string): T => {
+      if (wanted.toLowerCase() === "random") return list[rng.randint0(list.length)]!;
+      const found = list.find(x => x.name.toLowerCase() === wanted.toLowerCase());
+      if (!found) throw new Error(`Unknown ${envName} "${wanted}"; known: ${list.map(x => x.name).join(", ")}`);
+      return found;
+    };
+    const race = pick(races, process.env.RACE ?? "Human", "RACE");
+    const cls = pick(classes, process.env.CLASS ?? "Warrior", "CLASS");
     console.log(`[AI-Server] Race: ${race.name}, Class: ${cls.name}`);
 
     const player = createPlayer("Agent", race, cls, rng);
     // Ensure minimum stats for combat viability (STR 17+, DEX 16+, CON 15+)
-    // Warrior base stats can roll low; this ensures consistent performance
-    const minStats: Record<number, number> = { [Stat.STR]: 17, [Stat.DEX]: 16, [Stat.CON]: 15 };
+    // Warrior base stats can roll low; this ensures consistent performance.
+    // STAT_FLOOR=0 keeps the birth roll as-is (vanilla).
+    const minStats: Record<number, number> = process.env.STAT_FLOOR === "0" ? {}
+      : { [Stat.STR]: 17, [Stat.DEX]: 16, [Stat.CON]: 15 };
     for (const [s, minVal] of Object.entries(minStats)) {
       const si = Number(s);
       if ((player.statMax[si] ?? 10) < minVal) {
@@ -810,10 +832,11 @@ class AIServer {
     }
     autoEquipStartingItems(player);
 
-    // Add Pick to inventory AFTER auto-equip (so it stays in inventory, not weapon slot)
+    // Add Pick to inventory AFTER auto-equip (so it stays in inventory, not weapon slot).
+    // Not part of any vanilla kit, so VANILLA=1 skips it.
     const cleanName = (n: string) => n.replace(/^& /, "").replace(/~/, "").trim().toLowerCase();
     const pickKind = objectKinds.find(k => k.tval === 6 && cleanName(k.name) === "pick");
-    if (pickKind) {
+    if (pickKind && !vanillaMode) {
       const pickObj = createStartObject(pickKind, 1);
       (player as Player & { inventory: ObjectType[] }).inventory.push(pickObj);
     }
@@ -882,6 +905,54 @@ class AIServer {
         return;
       }
 
+      // ── /snapshot — full game snapshot (only while the loop waits for a command) ──
+      if (url.pathname === "/snapshot" && req.method === "GET") {
+        if (!this.state) { res.writeHead(503); res.end("Game not ready"); return; }
+        if (this.commandResolver === null || this.commandInFlight || this.restoring || this.state.dead) {
+          res.writeHead(409, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Not waiting for a command" }));
+          return;
+        }
+        try {
+          const save = snapshotState(this.state, this.templates, this.pristine);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ turn: this.state.turn, depth: this.state.depth, save }));
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: String(err) }));
+        }
+        return;
+      }
+
+      // ── /restore — replace the live game with a snapshot, optionally reseeding the RNG ──
+      if (url.pathname === "/restore" && req.method === "POST") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+        req.on("end", () => {
+          const fail = (code: number, error: string) => {
+            res.writeHead(code, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error }));
+          };
+          if (!this.state) { fail(503, "Game not ready"); return; }
+          if (this.commandInFlight || this.restoring) { fail(409, "Busy"); return; }
+          let parsed: { save?: SnapshotData; seed?: unknown };
+          try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf-8")); } catch { fail(400, "Invalid JSON"); return; }
+          const seedArg = parsed.seed;
+          if (seedArg !== undefined && (typeof seedArg !== "number" || !Number.isInteger(seedArg) || seedArg < 0 || seedArg > 0xffffffff)) {
+            fail(400, "seed must be a uint32"); return;
+          }
+          this.restoring = true;
+          this.restoreSnapshot(parsed.save as SnapshotData, seedArg as number | undefined)
+            .then(() => {
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify(serializeState(this.state!)));
+            })
+            .catch((err) => fail(400, `restore failed: ${err instanceof Error ? err.message : String(err)}`))
+            .finally(() => { this.restoring = false; });
+        });
+        return;
+      }
+
       // ── /buy endpoint — buy items from stores (only at depth 0) ──
       if (url.pathname === "/buy" && req.method === "POST") {
         let body = "";
@@ -893,7 +964,7 @@ class AIServer {
             res.end(JSON.stringify({ error: "Must be in town (depth 0) to buy" }));
             return;
           }
-          let parsed: { storeType: number; itemIndex: number };
+          let parsed: { storeType: number; itemIndex: number; quantity?: number };
           try { parsed = JSON.parse(body); } catch {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Invalid JSON" }));
@@ -905,7 +976,11 @@ class AIServer {
             res.end(JSON.stringify({ error: `Invalid store type: ${parsed.storeType}` }));
             return;
           }
-          const result = storeBuy(store, this.state.player, parsed.itemIndex);
+          const quantity = parsed.quantity === undefined ? 1 : parsed.quantity;
+          const result = storeBuy(store, this.state.player, parsed.itemIndex, quantity, {
+            kinds: this.state.objectKinds,
+            rng: this.state.rng,
+          });
           res.writeHead(result.success ? 200 : 400, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ...result, state: serializeState(this.state) }));
         });
@@ -983,8 +1058,14 @@ class AIServer {
           const depthBefore = this.state!.depth;
 
           // Resolve the command → game loop executes it
+          if (this.restoring) {
+            res.writeHead(409, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Restore in progress" }));
+            return;
+          }
           const resolver = this.commandResolver;
           this.commandResolver = null;
+          this.commandInFlight = true;
           resolver(cmd);
 
           // Wait until game loop requests next command (= current command fully processed)
@@ -1001,6 +1082,7 @@ class AIServer {
               resupplyOnDescent(this.state!.player, this.objectKinds);
               upgradeEquipmentOnDescent(this.state!.player, this.objectKinds);
             }
+            this.commandInFlight = false;
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify(serializeState(this.state!)));
           };
@@ -1022,13 +1104,44 @@ class AIServer {
     };
 
     const loopOpts: GameLoopOptions = { maxIdleIterations: 50000 };
-    this.gameLoopPromise = runGameLoop(this.state!, inputProvider, loopOpts)
+    const st = this.state!;
+    this.gameLoopPromise = runGameLoop(st, inputProvider, loopOpts)
       .then(() => {
-        console.log(`[AI-Server] Game ended. dead=${this.state!.dead} won=${this.state!.won} turn=${this.state!.turn}`);
+        console.log(`[AI-Server] Game ended. dead=${st.dead} won=${st.won} turn=${st.turn}`);
       })
       .catch((err) => {
         console.error(`[AI-Server] Game loop error:`, err);
       });
+  }
+
+  /**
+   * Replace the live game with a snapshot.  The running loop closes over the old GameState,
+   * so: decode the new state first (nothing mutated if it fails), stop the old loop (mark the
+   * old player dead + answer its pending getCommand with null), apply template/RNG state to the
+   * live shared objects, then start a fresh loop on the restored state.
+   */
+  private async restoreSnapshot(save: SnapshotData, seed?: number): Promise<void> {
+    const old = this.state!;
+    const dec = decodeSnapshot(save, old, this.templates, this.pristine);
+    const oldLoop = this.gameLoopPromise;
+    const resolver = this.commandResolver;
+    this.commandResolver = null;
+    if (resolver) {
+      old.player.isDead = true; // makes the old loop break right after the null command
+      resolver(null);
+    }
+    if (oldLoop) await oldLoop;
+    dec.commit();
+    if (seed !== undefined) {
+      // full reseed independent of the saved state_i
+      old.rng.setState({ STATE: new Uint32Array(32), state_i: 0 });
+      old.rng.stateInit(seed);
+    }
+    this.state = dec.state;
+    this.startGameLoop();
+    for (let i = 0; i < 2000 && this.commandResolver === null && !this.state.dead; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
   }
 
   private waitForCommand(): Promise<GameCommand | null> {
