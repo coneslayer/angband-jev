@@ -97,24 +97,32 @@ export class Perception {
   private races: readonly MonsterRace[] = [];
   private raceByName = new Map<string, MonsterRace>();
   private raceById = new Map<number, MonsterRace>();
+  private updates = 0;
 
   /** Fold the current game state into what the player knows. Safe to call more than once per turn. */
   update(state: GameState): void {
     const chunk = state.chunk;
+    let full = this.updates++ % 200 === 0; // mapping effects MARK squares anywhere: sweep the whole level now and then
     if (chunk !== this.chunkRef) {
       // A new level (or the first look at one): map and monster memory start over
       if (this.chunkRef !== null || this.depth !== state.depth) { this.map.clear(); this.monsters.clear(); }
       this.chunkRef = chunk;
       this.depth = state.depth;
+      full = true;
     }
     this.indexRaces(state);
     const p = state.player;
 
-    // Map memory
-    for (let y = 0; y < chunk.height; y++) {
+    // Map memory. SEEN is only ever set within the view radius (20), so a window around the
+    // player suffices on most calls; this runs every game turn (see AIServer), so runs and
+    // other multi-step commands are remembered square by square.
+    const R = 21;
+    const y0 = full ? 0 : Math.max(0, p.grid.y - R), y1 = full ? chunk.height - 1 : Math.min(chunk.height - 1, p.grid.y + R);
+    const x0 = full ? 0 : Math.max(0, p.grid.x - R), x1 = full ? chunk.width - 1 : Math.min(chunk.width - 1, p.grid.x + R);
+    for (let y = y0; y <= y1; y++) {
       const row = chunk.squares[y];
       if (!row) continue;
-      for (let x = 0; x < chunk.width; x++) {
+      for (let x = x0; x <= x1; x++) {
         const sq = row[x];
         if (!sq || sq.feat === 0) continue;
         if (sq.info.has(SquareFlag.SEEN)) this.map.set(y * chunk.width + x, [sq.feat, sq.obj != null]);
@@ -319,7 +327,7 @@ export class Perception {
     if (!sq || !sq.info.has(SquareFlag.VIEW)) return false;
     const p = state.player;
     const d = Math.max(Math.abs(mon.grid.x - p.grid.x), Math.abs(mon.grid.y - p.grid.y));
-    const byLight = d < (p.state?.curLight ?? 1) || sq.light > 0;
+    const byLight = d <= (p.state?.curLight ?? 1) || sq.light > 0;
     const byInfra = d <= (p.state?.seeInfra ?? 0) && !race.flags.has(MonsterRaceFlag.COLD_BLOOD);
     if (!byLight && !byInfra) return false;
     return !race.flags.has(MonsterRaceFlag.INVISIBLE) || seeInvis;

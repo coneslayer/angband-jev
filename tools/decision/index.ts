@@ -8,6 +8,8 @@
  */
 
 export const DECISION_FORMAT_VERSION = 2; // v2: fight = {melee, throw, flee}
+// v3: the same questions, with the state drawn only from what the UI shows (/state?view=player)
+export const DECISION_FORMAT_VERSION_PLAYER = 3;
 
 export type DecisionType = "fight" | "tactic" | "recall" | "descend" | "explore" | "equip";
 export const DECISION_TYPES: DecisionType[] = ["fight", "tactic", "recall", "descend", "explore", "equip"];
@@ -122,7 +124,22 @@ function describeItem(item: any): string {
   return `${cleanName(item.name)}${bits.length ? " " + bits.join(" ") : ""} resists: ${itemResists(item)}${fl.length ? " flags: " + fl.join(",") : ""}`;
 }
 
+/** A monster as the player knows it: health words, speed, and only what lore has learned. */
+function playerMonsterLine(m: any): string {
+  const t: string[] = [m.health ?? "?", m.levelKnown ? `Lv${m.level}` : "Lv?", `spd${m.speed ?? "?"}`, `dist${m.distance}`];
+  if (m.isUnique) t.push("UNIQUE");
+  if (m.asleep) t.push("asleep");
+  if (m.afraid) t.push("afraid");
+  const blows = (m.blowsSeen ?? []).map((b: any) => `${b.method}:${b.effect}${b.dice ? ":" + b.dice : ""}`);
+  if (blows.length) t.push("blows:" + blows.join("/"));
+  if ((m.spellsSeen ?? []).length) t.push("seen casting:" + m.spellsSeen.join("/"));
+  if ((m.kinds ?? []).length) t.push(m.kinds.join("/"));
+  if (m.kills) t.push(`killed${m.kills}`);
+  return `${m.name}(${t.join(",")})`;
+}
+
 function monsterLine(m: any): string {
+  if (m.health !== undefined) return playerMonsterLine(m);
   const t: string[] = [`Lv${m.level}`, `HP${m.hp}/${m.maxhp}`, `spd${m.speed}`, `dist${m.distance}`];
   if (m.isUnique) t.push("UNIQUE");
   if (m.breathElements?.length) t.push("BREATH:" + m.breathElements.join("/"));
@@ -169,10 +186,16 @@ export function buildStateText(state: any): string {
     `Heals:${heals} Phase:${phase} Teleport:${tele} WoR:${wor} Speed:${speed} Oil:${oil}${p.wordRecall > 0 ? " (recall active)" : ""}`,
     `Resists: ${resists.length > 0 ? resists.join(",") : "none"}`,
     `Abilities: ${abil.length > 0 ? abil.join(",") : "none"}`,
-    `Status: ${status.length > 0 ? status.join(",") : "normal"} food:${timed.food ?? "?"}`,
+    `Status: ${status.length > 0 ? status.join(",") : "normal"} ${p.hunger ? p.hunger : `food:${timed.food ?? "?"}`}`,
     `Equipment: ${equip.map(e => cleanName(e.name)).join(", ") || "none"}`,
     `Nearby monsters: ${nearby.map(monsterLine).join(", ") || "none"}`,
   ];
+  if (state.view === "player") {
+    // Monsters seen alive on this level and out of sight now: what the player remembers
+    const mem = (state.rememberedMonsters ?? []).slice().sort((a: any, b: any) => a.turnsAgo - b.turnsAgo).slice(0, 5)
+      .map((m: any) => `${m.name}(${Math.round(m.turnsAgo / 10)} turns ago, last seen dist${m.distance}${m.isUnique ? ",UNIQUE" : ""})`);
+    lines.push(`Seen recently on this level: ${mem.join(", ") || "none"}`);
+  }
   return lines.join("\n");
 }
 

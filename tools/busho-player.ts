@@ -7,12 +7,16 @@
  */
 
 import {
-  DECISION_FORMAT_VERSION, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision,
+  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision,
 } from "./decision/index.js";
 import type { DecisionType, DecisionRequest } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
+import { adaptPlayerView } from "./honest-view.js";
 
 const API = process.env.API ?? "http://localhost:3000";
+// PLAYER_VIEW=1: play from what the UI shows (/state?view=player), as a human player would
+const PLAYER_VIEW = process.env.PLAYER_VIEW === "1";
+const VIEW_QS = PLAYER_VIEW ? "?view=player" : "";
 
 // ── 方向定数 (numpad) ──
 const DIR = { SW: 1, S: 2, SE: 3, W: 4, STAY: 5, E: 6, NW: 7, N: 8, NE: 9 };
@@ -45,9 +49,16 @@ function playerHasDigger(p: any): boolean {
   }
   return false;
 }
+// Digging skill (the /state player.digging). As in vanilla, magma needs skill > 10, quartz > 20 and granite > 40;
+// below that, tunnelling only ever "chips away futilely", even with a shovel.
+let diggingSkill = 0;
+const DIG_SKILL_NEEDED: Record<number, number> = { 17: 10, 19: 10, 18: 20, 20: 20, 21: 40 }; // MAGMA(_K), QUARTZ(_K), GRANITE
+function canDigFeat(feat: number): boolean {
+  return canDigHard && diggingSkill > (DIG_SKILL_NEEDED[feat] ?? 0);
+}
 /** この地形を掘る価値があるか (掘削具なしだと扉/瓦礫のみ) */
 function digWorthwhile(feat: number): boolean {
-  return canDigHard ? DIGGABLE_FEATS.has(feat) : SOFT_DIG_FEATS.has(feat);
+  return SOFT_DIG_FEATS.has(feat) || (DIGGABLE_FEATS.has(feat) && canDigFeat(feat));
 }
 const DIGGABLE_FEATS = new Set([FEAT.CLOSED_DOOR, FEAT.SECRET, FEAT.RUBBLE, FEAT.MAGMA, FEAT.QUARTZ, FEAT.MAGMA_K, FEAT.QUARTZ_K, FEAT.GRANITE]);
 
@@ -511,6 +522,8 @@ async function flushRecording() {
 
 // ── HTTP ヘルパー ──
 let cmdDebug = false;
+const CMD_DEBUG_AFTER = Number(process.env.CMD_DEBUG_AFTER ?? "") || Infinity; // debugging: log every command after this many commands
+let commandsSent = 0;
 let lastKnownState: any = null; // 直前のstate (confused検出用)
 async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
   // 混乱中のREAD/CASTは必ず失敗する → RESTに差し替えて無限ループ防止
@@ -518,9 +531,9 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     console.log(`  [CMD-GUARD] confused中のREAD/CASTをRESTに差し替え`);
     cmd = { type: CMD.REST };
   }
-  if (cmdDebug) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
+  if (cmdDebug || ++commandsSent >= CMD_DEBUG_AFTER) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
   for (let retry = 0; retry < 5; retry++) {
-    const res = await fetch(`${API}/command`, {
+    const res = await fetch(`${API}/command${VIEW_QS}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cmd),
@@ -537,8 +550,8 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
       lastKnownState = s;
       return s;
     }
-    lastKnownState = data;
-    return data;
+    lastKnownState = adaptPlayerView(data);
+    return lastKnownState;
   }
   // All retries failed — return refreshed state, don't loop
   const s = await getState();
@@ -547,8 +560,8 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
 }
 
 async function getState(): Promise<any> {
-  const res = await fetch(`${API}/state`);
-  return res.json();
+  const res = await fetch(`${API}/state${VIEW_QS}`);
+  return adaptPlayerView(await res.json());
 }
 
 // ── LLM戦略判断 ──
@@ -1010,7 +1023,7 @@ async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionReques
     }
     const snapshot = await takeSnapshot(decisionGameId, st.turn, type);
     const rec = {
-      format_version: DECISION_FORMAT_VERSION,
+      format_version: PLAYER_VIEW ? DECISION_FORMAT_VERSION_PLAYER : DECISION_FORMAT_VERSION,
       game_id: decisionGameId,
       seed: GAME_SEED === null ? null : Number(GAME_SEED),
       race: st.player.race,
@@ -1442,6 +1455,18 @@ function canMoveDiag(passableSet: Set<string>, fx: number, fy: number, dx: numbe
   return cardH || cardV; // 少なくとも1つが通行可能ならOK
 }
 
+// PLAYER_VIEW: squares the player hasn't seen may well be open. Paths to a target (stairs) go through them
+// optimistically, and are replanned as they are seen; exploration targets stay the known frontier.
+const knownKeyCache = new WeakMap<any[], Set<string>>();
+function unknownOpen(tiles: any[], x: number, y: number): boolean {
+  if (!PLAYER_VIEW) return false;
+  const w = lastKnownState?.map?.width ?? 198, h = lastKnownState?.map?.height ?? 66;
+  if (x <= 0 || y <= 0 || x >= w - 1 || y >= h - 1) return false;
+  let known = knownKeyCache.get(tiles);
+  if (!known) { known = new Set(tiles.map((t: any) => `${t.x},${t.y}`)); knownKeyCache.set(tiles, known); }
+  return !known.has(`${x},${y}`);
+}
+
 // ── BFS パスファインディング ──
 function bfsNextStep(tiles: any[], px: number, py: number, tx: number, ty: number): number | null {
   // 動かない敵の隣を避ける経路が無ければ、隣を通る経路 (敵のマス自体は通らない)
@@ -1478,7 +1503,7 @@ function bfsNextStepCore(
     const nx = px + dx;
     const ny = py + dy;
     const key = `${nx},${ny}`;
-    if (!passableSet.has(key)) continue;
+    if (!passableSet.has(key) && !unknownOpen(tiles, nx, ny)) continue;
     if (visitedBFS.has(key)) continue;
     if (!canMoveDiag(passableSet, px, py, dx, dy)) continue;
     if (nx === tx && ny === ty) return dir;
@@ -1492,7 +1517,7 @@ function bfsNextStepCore(
       const nx = cur.x + dx;
       const ny = cur.y + dy;
       const key = `${nx},${ny}`;
-      if (!passableSet.has(key)) continue;
+      if (!passableSet.has(key) && !unknownOpen(tiles, nx, ny)) continue;
       if (visitedBFS.has(key)) continue;
       if (!canMoveDiag(passableSet, cur.x, cur.y, dx, dy)) continue;
       if (nx === tx && ny === ty) return cur.firstDir;
@@ -1522,7 +1547,7 @@ function dijkstraNextStepWithDigging(
     if (PASSABLE_FEATS.has(feat)) return 1;
     if (feat === FEAT.CLOSED_DOOR || feat === FEAT.SECRET) return 2;
     if (feat === FEAT.RUBBLE) return 3;
-    if (!canDigHard) return 9999; // 掘削具なし: 岩盤は掘れない
+    if (!canDigFeat(feat)) return 9999; // 掘削具なし or 技能不足: 岩盤は掘れない
     if (feat === FEAT.MAGMA || feat === FEAT.MAGMA_K) return 5;
     if (feat === FEAT.QUARTZ || feat === FEAT.QUARTZ_K) return 5;
     if (feat === FEAT.GRANITE) return 10;
@@ -2001,6 +2026,7 @@ async function playGame() {
     const monsters = state.monsters;
     const inv = p.inventory;
     canDigHard = playerHasDigger(p);
+    diggingSkill = p.digging ?? 0;
     const hpPct = p.hp / p.maxHp;
     // Player resistances from calcBonuses (race + equipment)
     const playerResists = new Set<string>();
@@ -3613,7 +3639,9 @@ async function playGame() {
 
     // 深層では回復薬を十分持っていないと降下しない
     const minHealingForDescent = state.depth >= 40 ? 15 : state.depth >= 30 ? 10 : state.depth >= 15 ? 6 : state.depth >= 12 ? 4 : state.depth >= 8 ? 2 : 1;
-    const healingOk = totalHealingQty >= minHealingForDescent;
+    // No potions and too poor to restock (restock needs 40 gold): on shallow levels, don't wait forever
+    const healingOk = totalHealingQty >= minHealingForDescent
+      || (state.depth < 8 && p.gold < 40 && turnsOnLevel > 2 * tooLongThreshold);
 
     // 逃走手段チェック (深層では必須)
     const phaseCount = inv.filter((item: any) => item.tval === TVAL.SCROLL && item.name.includes("Phase Door") && item.qty > 0)
@@ -3677,6 +3705,7 @@ async function playGame() {
     const resistCheck = resistOk || turnsOnLevel > resistPenaltyTurns;
     const readyToDescend = !restockTrip && hpPct >= 0.7 && healingOk && escapeOk && resistCheck && equipCheck &&
       ((clCheck && (enoughKills || explorationStalled || tooLongOnLevel || overleveled)) || lowExplorationEarlyDescent);
+    if (process.env.DESCENT_DEBUG && actionCount % 200 === 0) console.log(`  [DESCENT?] ready=${readyToDescend} restock=${restockTrip} hp=${hpPct.toFixed(2)} heal=${healingOk} escape=${escapeOk} resist=${resistCheck} equip=${equipCheck} cl=${clCheck} kills=${enoughKills} stalled=${explorationStalled} tooLong=${tooLongOnLevel} over=${overleveled} lowEarly=${lowExplorationEarlyDescent} stair=${!!findTile(tiles, FEAT.DOWN_STAIR)}`);
 
     // LLM降下判断: DL15+でLLMに確認（深度ごとに最大2回まで）
     let llmDescentVeto = false;

@@ -863,7 +863,33 @@ honest prompt from the start):**
          known after 1 sighting, and level stayed unknown before any kill.
      - Not yet covered: detection effects, mimics, item rune and flavour knowledge, sightings
        during multi-turn commands (run/rest), and unit tests.
-2. **Rules player on `view=player`** (`tools/busho-player.ts`, ~4,100 lines):
+2. **Rules player on `view=player`** (`tools/busho-player.ts`, ~4,100 lines).
+   - **Status (2026-10-15 afternoon):** `PLAYER_VIEW=1` makes the rules player fetch
+     `?view=player`. `tools/honest-view.ts` adapts that view to the fields the rules code
+     reads, using only the view plus generic priors, never per-monster data:
+     - an unknown monster level counts as the dungeon level;
+     - max HP comes from one power law over all monsters (1.7·L^1.48; uniques 7.5·L^1.5),
+       and current HP from the health word's band;
+     - spells, breaths and summons count only once seen;
+     - a race counts as a breeder once six or more are seen on the level;
+     - immunities and PASS_WALL count as unknown, which the code treats as false;
+     - only visible monsters go into `monsters`; remembered ones go into
+       `rememberedMonsters`;
+     - hunger words map back to representative food values.
+
+     Exploration needed no change. The honest map only has seen squares, so walking to
+     unvisited known floor already explores frontier-first.
+   - **Decision prompts in honest mode** (format v3): monsters show as health, `Lv?` until
+     learned, speed, distance, UNIQUE, asleep/afraid, blows and spells seen, and kinds and
+     kills once known. A "Seen recently on this level" line lists remembered monsters with
+     their age. Status shows the hunger word.
+   - **Known remaining leak: item knowledge.** Inventory and equipment names and properties
+     come from the object kind even when it is unaware, and runes are not checked. The port
+     sets `kind.aware` only in `identifyObject`, so honest item names would also need
+     learn-on-use and store awareness. The consumables the rules player relies on (CLW,
+     Phase, oil, WoR) are store-bought and therefore known in vanilla, so the leak is mostly
+     floor items. Deferred.
+   - Original plan for this step:
    - Audit every use of the map, monsters and items.
    - Exploration becomes frontier-based, because it can no longer path to unseen stairs.
    - Threat estimates use health words and lore instead of exact HP and race flags; unknown
@@ -884,6 +910,79 @@ honest prompt from the start):**
    - A leak test: an invisible monster, a monster behind a wall and an unexplored stair must
      not appear in `view=player`.
    - A replay check: the omniscient view is unchanged when the parameter is absent.
+
+## Session 4: honest play (planned 2026-10-15)
+
+Everything in this session sees only what the UI shows: games, rollouts and every tournament arm
+run with `PLAYER_VIEW=1`. This is a new era. Session 1–3 data, models and verdicts aren't
+mixed in, because they were made with an omniscient prompt and an omniscient rules player.
+Driver: `tools/overnight/driver4.py`.
+
+### Honest rules player: shake-down before the run
+Three bugs were found and fixed by playing 8 matched seeds (omniscient vs. honest rules,
+900 s / 20,000 actions):
+1. **Map memory only updated per command**, so RUN left gaps in remembered corridors.
+   Perception now runs on every game-loop REFRESH, scanning a radius-21 window around the
+   player plus a full sweep every 200 turns.
+2. **No frontier.** The explorer only targets known unvisited squares, so it stalled in pockets
+   whose exits were doors or dark edges (e.g. after a Phase Door). The adapter now offers each
+   unknown square next to known floor or a door as unvisited floor.
+3. **Paths to known stairs went only through known squares**, so with no known route the
+   player dug futilely at granite. In player-view mode, `bfsNextStep` now treats unknown
+   in-bounds squares as passable, as a human assumes, and replans as they're seen.
+4. **Light radius off by one in the port** (`cave/view.ts` `determineSeen`): a light-r source
+   lit distance < r, where vanilla lights ≤ r. A torch showed only the 3×3 around the player,
+   and light 1 showed nothing beyond the player's own square. This is fixed. Only the renderer
+   and the perception layer read SEEN; monster AI uses VIEW, which is unchanged.
+5. **Descent deadlock (pre-existing):** with no healing potions and under 40 gold, the rules
+   player neither restocked nor descended. On DL < 8 it may now descend after twice the
+   too-long-on-level time.
+6. **Futile digging (pre-existing):** with any digger, it assumed granite was diggable. Digging
+   now follows vanilla's skill thresholds (magma > 10, quartz > 20, granite > 40), both for
+   `digWorthwhile` and for the digging pathfinder's costs.
+
+| Batch | Stall resets in honest games | Honest total depth / deaths | Omniscient total depth / deaths |
+|---|---|---|---|
+| ab1 (before fixes) | up to 24 per game | 36 / 3 | 25 / 4 |
+| ab3 (fixes 1–2) | 4 and 9 in two games | 39 / 5 | 25 / 4 |
+| ab4 (fixes 1–3) | 1 and 3 in two games | 31 / 4 | 28 / 4 |
+| ab5 (fixes 1–5) | 17 in one game (fixed by 6), 1 in two | 46 / 6 | 29 / 2 |
+
+The honest rules player is not weaker on these 8 seeds; it dives sooner, because "explored"
+is measured over what it has seen, and it dies more. That makes it a different baseline, not a
+broken one. The omniscient numbers move between batches too, because fixes 4–6 change the
+shared code. collectD reports stall resets so this can be watched at scale.
+
+### Stages (21 h, 13 slots)
+| Stage | Budget | What |
+|---|---|---|
+| collectD | 1.5 h | honest rules acting, decisions logged in format v3, 40% of games from bank savepoints (DL ≥ 5, restored with empty map memory and lore, a recorded approximation) |
+| labelD | 9.0 h | rollouts on collectD, utility v2, danger-first order, K = 8, honest continuation policy |
+| trainD | 1.0 h | laya from the base model on labelD only, 4 epochs |
+| finalD | 7.5 h | 5 arms × 96 starts (72 fresh, 24 bank): rules, D (model + oil/potion guards), D-gate (same, but acting only at confidence ≥ 0.3), rules+ (caution +1), rules− (caution −1) |
+
+### Pre-committed decision rules
+- **Score and promotion:** the same as session 3 (depth − 3 per death; promote if W > L and
+  deaths ≤ rules + 2), reported for fresh starts, bank starts and both together.
+- **Robustness:** the death-penalty sweep (0, 1, 2, 3, 6, 20) with a better / worse / trade-off
+  verdict, and deaths per level reached.
+- **Frontier:** a least-squares line through rules, rules+ and rules− in (deaths, mean depth).
+  A model arm is "above the frontier" if its mean depth beats the line at its death count. If
+  the three rules points have no spread in deaths, the frontier is undefined and reported as
+  such.
+- **"Clearly better play"** needs all of: p < 0.05 at −3 per death, the "better" verdict
+  across the sweep, and above the frontier.
+- **Confidence gating:** D-gate against D head to head. If D-gate is better or a trade-off with
+  fewer deaths, then gating becomes the default for the next session.
+- **Canaries:**
+  - collectD: errors ≤ 10%, every decision in format v3, and ≥ 500 fight/tactic decisions.
+  - labelD: ≥ 300 labels, split-half ≥ 65%, all-tie ≤ 25%, run errors ≤ 2%.
+  - trainD: accuracy > majority.
+  - finalD: ≥ 75% of starts complete; D identical to rules ≤ 50% (not D-gate); consulted
+    ≥ 0.9; throws ≤ 100.
+
+### Run log
+(none yet)
 
 ## Evaluating against hosted Jev (TypeSafe), plan
 

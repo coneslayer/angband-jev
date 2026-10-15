@@ -747,6 +747,7 @@ class AIServer {
   private restoring = false;
   // What the player could know from the UI (served with ?view=player)
   private perception = new Perception();
+  private perceptionHooked = false;
 
   constructor(
     private port: number,
@@ -1108,6 +1109,13 @@ class AIServer {
   }
 
   private startGameLoop(): void {
+    if (!this.perceptionHooked) {
+      // Every game-loop iteration, right after the field of view is updated: remember what the player sees
+      this.state!.eventBus.on(GameEventType.REFRESH, () => {
+        try { if (this.state && !this.restoring) this.perception.update(this.state); } catch (err) { console.error("[perception]", err); }
+      });
+      this.perceptionHooked = true;
+    }
     const inputProvider: CommandInputProvider = {
       getCommand: () => this.waitForCommand(),
     };
