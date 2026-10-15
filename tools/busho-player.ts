@@ -289,6 +289,9 @@ const MON_BLOW_AVG: Map<string, number> = (() => {
   } catch { /* gamedata なし: danger 判定は無効 */ }
   return m;
 })();
+// RULES_CAUTION=-1..1 (既定0=無効): ルールの fight/tactic 判断の慎重さを1つのつまみで動かす (Session 3 対照群)
+// +1 で慎重 (高い回復閾値、格下でも油/逃走、殴り合いの許容ダメージ半減)、-1 で大胆
+const RULES_CAUTION = Math.max(-1, Math.min(1, Number(process.env.RULES_CAUTION ?? "0") || 0));
 // 殴り合いの見積もり: 倒すまでに受けるダメージが現HPの半分以上なら殴らない (CL<15)
 function meleeTooCostly(m: any, p: any): boolean {
   if (!RULEFIX.has("danger") || p.level >= 15 || !MON_BLOW_AVG.size) return false;
@@ -300,7 +303,7 @@ function meleeTooCostly(m: any, p: any): boolean {
   const speedRatio = Math.max(0.5, ((m.speed ?? 110) - 100) / Math.max(5, (p.speed ?? 110) - 100));
   const theirDmg = blowAvg * 0.7 * speedRatio;
   const turnsToKill = Math.ceil((m.hp ?? m.maxhp ?? 1) / myDmg);
-  return theirDmg * turnsToKill >= 0.5 * p.hp;
+  return theirDmg * turnsToKill >= 0.5 * (1 - 0.5 * RULES_CAUTION) * p.hp;
 }
 let restockTrip = false; // 浅層で消耗品切れ → 上り階段で町へ (着いたら補充して解除)
 
@@ -321,7 +324,7 @@ function lowCLDanger(mon: { level: number; speed: number; isUnique?: boolean; na
   if (playerLevel >= 10) return false;
   // 動かない敵 (ゼリー/カビ/キノコ等は speed120 だが追って来ない。サーバに NEVER_MOVE が出ないので名前で除外)
   if (mon.name && STATIONARY_RE.test(mon.name)) return false;
-  return mon.speed >= 120 && (!!mon.isUnique || mon.level >= playerLevel + 2);
+  return mon.speed >= 120 && (!!mon.isUnique || mon.level >= playerLevel + Math.round(2 - 2 * RULES_CAUTION));
 }
 
 // ── モンスター脅威度評価 ──
@@ -838,6 +841,27 @@ function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
   }
 }
 
+// MODEL_GUARD=oil,potion,flee: モデル方策で消耗品を使い切る/逃走を覆す答えをルールの選択に戻す (Session 3)
+const MODEL_GUARD = new Set((process.env.MODEL_GUARD ?? "").split(",").map((t) => t.trim()).filter(Boolean));
+const itemCount = (inv: any[], pred: (it: any) => boolean): number =>
+  inv.filter((it: any) => it && pred(it)).reduce((n: number, it: any) => n + (it.qty ?? 1), 0);
+/** 発動したガード名 (null なら通す) */
+function modelGuard(type: DecisionType, c: DecideCtx, choice: string): string | null {
+  if (!MODEL_GUARD.size || choice === c.rules) return null;
+  const p = c.state?.player ?? {};
+  const inv = p.inventory ?? [];
+  if (MODEL_GUARD.has("flee") && c.rules === "flee" && (choice === "throw" || choice === "melee" || choice === "fight")) return "flee";
+  if (MODEL_GUARD.has("oil") && type === "fight" && choice === "throw") {
+    const flasks = itemCount(inv, (it) => it.tval === TVAL.FLASK);
+    if (flasks <= 3 && !(c.monster && meleeTooCostly(c.monster, p))) return "oil";
+  }
+  if (MODEL_GUARD.has("potion") && type === "tactic" && choice === "heal") {
+    const cures = itemCount(inv, (it) => it.tval === TVAL.POTION && String(it.name ?? "").includes("Cure"));
+    if (cures <= 2 && (c.hpPct ?? 1) >= 0.5) return "potion";
+  }
+  return null;
+}
+
 // 返り値はオプション名。null ならルールに任せる。
 async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> {
   if (ROLLOUT) {
@@ -869,8 +893,10 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
         modelChoice = await decideText(type, c); // 自由文バックエンドは確信度なし
       }
     }
-    const useModel = modelChoice !== null && (modelConfidence === null || modelConfidence >= DECISION_MIN_CONFIDENCE);
-    await logDecision(type, c, req, { model_choice: modelChoice, model_confidence: modelConfidence, acted: useModel ? "model" : "rules" });
+    let useModel = modelChoice !== null && (modelConfidence === null || modelConfidence >= DECISION_MIN_CONFIDENCE);
+    const guard = useModel ? modelGuard(type, c, modelChoice!) : null;
+    if (guard) useModel = false;
+    await logDecision(type, c, req, { model_choice: modelChoice, model_confidence: modelConfidence, acted: useModel ? "model" : "rules", ...(guard ? { guard } : {}) });
     return useModel ? modelChoice : null;
   }
   if (!LLM_ENABLED) return null;
@@ -3294,7 +3320,7 @@ async function playGame() {
       }
 
       // 戦闘中回復: HP低下時にLLMに戦術判断を仰ぐ (DL15+)
-      const combatHealThreshold = isExtremeDeep ? 0.65 : isVeryDeep ? 0.55 : isDeep ? 0.5 : 0.4;
+      const combatHealThreshold = (isExtremeDeep ? 0.65 : isVeryDeep ? 0.55 : isDeep ? 0.5 : 0.4) + 0.15 * RULES_CAUTION;
       // LLM戦闘判断: HP40-70%の微妙な範囲でLLMに聞く (50ターンに1回、コスト制限)
       const llmCombatCooldown = (globalThis as any).__llmCombatCd ?? 0;
       // ログモード: 隣接敵あり & HP<90%、20プレイヤーターン(=200ゲームターン)に1回
@@ -3974,6 +4000,7 @@ async function playGame() {
   console.log(`  死亡: ${finalState.dead ? `はい (${deathCause})` : "いいえ"}`);
   console.log(`  行動回数: ${actionCount}`);
   if (LLM_ENABLED) {
+    if (RULES_CAUTION) console.log(`  RULES_CAUTION: ${RULES_CAUTION}`);
     console.log(`  LLM: ${LLM_BACKEND} 呼出${llmCallCount}回 (平均${llmCallCount > 0 ? Math.round(llmTotalMs / llmCallCount) : 0}ms)`);
   }
 

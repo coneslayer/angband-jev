@@ -59,6 +59,8 @@ import {
 import { calcBonuses, calcMana } from "../player/calcs.js";
 import { capturePristine, snapshotState, decodeSnapshot } from "./snapshot.js";
 import type { TemplateLists, PristineTemplates, SnapshotData } from "./snapshot.js";
+import { Perception } from "./perception.js";
+import type { PerceptionData } from "./perception.js";
 
 // Reuse JSON loader from remote-server
 import * as fs from "node:fs";
@@ -743,6 +745,8 @@ class AIServer {
   private pristine: PristineTemplates = {};
   private commandInFlight = false;
   private restoring = false;
+  // What the player could know from the UI (served with ?view=player)
+  private perception = new Perception();
 
   constructor(
     private port: number,
@@ -901,7 +905,7 @@ class AIServer {
       if (url.pathname === "/state" && req.method === "GET") {
         if (!this.state) { res.writeHead(503); res.end("Game not ready"); return; }
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify(serializeState(this.state)));
+        res.end(JSON.stringify(this.stateFor(url)));
         return;
       }
 
@@ -914,7 +918,9 @@ class AIServer {
           return;
         }
         try {
-          const save = snapshotState(this.state, this.templates, this.pristine);
+          this.perception.update(this.state);
+          const save: SnapshotData & { perception?: PerceptionData } = snapshotState(this.state, this.templates, this.pristine);
+          save.perception = this.perception.toJSON(this.state);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ turn: this.state.turn, depth: this.state.depth, save }));
         } catch (err) {
@@ -944,8 +950,10 @@ class AIServer {
           this.restoring = true;
           this.restoreSnapshot(parsed.save as SnapshotData, seedArg as number | undefined)
             .then(() => {
+              this.perception.load((parsed.save as { perception?: PerceptionData } | undefined)?.perception, this.state!);
+              this.perception.update(this.state!);
               res.writeHead(200, { "Content-Type": "application/json" });
-              res.end(JSON.stringify(serializeState(this.state!)));
+              res.end(JSON.stringify(this.stateFor(url)));
             })
             .catch((err) => fail(400, `restore failed: ${err instanceof Error ? err.message : String(err)}`))
             .finally(() => { this.restoring = false; });
@@ -1083,8 +1091,9 @@ class AIServer {
               upgradeEquipmentOnDescent(this.state!.player, this.objectKinds);
             }
             this.commandInFlight = false;
+            this.perception.update(this.state!);
             res.writeHead(200, { "Content-Type": "application/json" });
-            res.end(JSON.stringify(serializeState(this.state!)));
+            res.end(JSON.stringify(this.stateFor(url)));
           };
           waitForNextTurn();
         });
@@ -1142,6 +1151,14 @@ class AIServer {
     for (let i = 0; i < 2000 && this.commandResolver === null && !this.state.dead; i++) {
       await new Promise((r) => setTimeout(r, 5));
     }
+  }
+
+  /** /state, or with ?view=player only what the player could know from the UI. */
+  private stateFor(url: URL): unknown {
+    const full = serializeState(this.state!);
+    if (url.searchParams.get("view") !== "player") return full;
+    this.perception.update(this.state!);
+    return this.perception.render(full, this.state!);
   }
 
   private waitForCommand(): Promise<GameCommand | null> {

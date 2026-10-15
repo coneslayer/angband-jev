@@ -54,11 +54,33 @@ const HORIZON: Record<string, number> = { ...DEFAULT_HORIZON };
 for (const kv of (opt("horizon", "HORIZON", "") ?? "").split(",").filter(Boolean)) { const [t, h] = kv.split("="); HORIZON[t] = Number(h); }
 
 const costs = new CostTable(path.join(GAMEDATA, "object.json"));
+// --utility v2: also charge the share of each scarce supply used (flasks, Cure potions, Phase/teleport scrolls).
+// Counts are stored per run (meta.runs[].sup = start/end), so the weights can be re-tuned offline.
+const UTILITY = opt("utility", "ROLLOUT_UTILITY", "v1")!;
+const SCARCE_W: Record<string, number> = { flask: 0.15, cure: 0.25, escape: 0.15 };
+for (const kv of (opt("scarce-w", "ROLLOUT_SCARCE_W", "") ?? "").split(",").filter(Boolean)) { const [c, w] = kv.split("="); SCARCE_W[c] = Number(w); }
+type Supply = { flask: number; cure: number; escape: number };
+function supplies(inv: any[]): Supply {
+  const s: Supply = { flask: 0, cure: 0, escape: 0 };
+  for (const it of inv ?? []) {
+    const n = String(it?.name ?? "").toLowerCase(), q = it?.qty ?? 1;
+    if (it?.tval === 27) s.flask += q;
+    else if (it?.tval === 26 && n.includes("cure")) s.cure += q;
+    else if (it?.tval === 25 && (n.includes("phase door") || n.includes("teleport"))) s.escape += q;
+  }
+  return s;
+}
+function scarcity(a: Supply, b: Supply): number {
+  let t = 0;
+  for (const c of Object.keys(SCARCE_W) as (keyof Supply)[]) if (a[c] > 0) t += SCARCE_W[c] * Math.min(1, Math.max(0, a[c] - b[c]) / a[c]);
+  return t;
+}
 
 interface Rec { idx: number; raw: any; type: string; options: string[]; }
 interface Run {
   opt: string; k: number; fired: boolean; dead: boolean; u: number | null;
   hp_term?: number; hp_min?: number; xp_term?: number; cons_term?: number; cons_used?: number; actions?: number;
+  sup0?: Supply; sup1?: Supply | null; scarce_term?: number;
   depth_end?: number; error?: string; restore_ms?: number; player_ms?: number; total_ms?: number; death_cause?: string | null;
 }
 
@@ -162,7 +184,9 @@ function runPlayer(api: string, type: string, option: string, horizon: number): 
   });
 }
 
-function utility(res: any, s0: any, s1: any): { u: number; hp: number; hpMin: number; xp: number; cons: number; used: number } {
+function utility(res: any, s0: any, s1: any): { u: number; hp: number; hpMin: number; xp: number; cons: number; used: number; sup0: Supply; sup1: Supply | null; scarce: number } {
+  const sup0 = supplies(s0.player.inventory), sup1 = s1?.player?.inventory ? supplies(s1.player.inventory) : null;
+  const scarce = sup1 ? scarcity(sup0, sup1) : 0; // end inventory unknown: no scarcity charge
   const startCons = costs.consumables(s0.player.inventory);
   const endCons = costs.consumables(s1?.player?.inventory ?? []);
   const used = CostTable.used(startCons, endCons);
@@ -173,9 +197,10 @@ function utility(res: any, s0: any, s1: any): { u: number; hp: number; hpMin: nu
   const xp = toNext > 0 ? Math.min(1, Math.max(0, gain / toNext)) : (gain > 0 ? 1 : 0);
   const hp = res.max_hp > 0 ? Math.max(0, res.hp / res.max_hp) : 0;
   const hpMin = typeof res.min_hp_frac === "number" ? Math.max(0, Math.min(hp, res.min_hp_frac)) : hp;
-  if (res.dead) return { u: -1, hp, hpMin, xp, cons, used };
+  if (res.dead) return { u: -1, hp, hpMin, xp, cons, used, sup0, sup1, scarce };
   // Lowest HP during the horizon measures how close a call it was; end HP alone is nearly always full.
-  return { u: 0.35 * hpMin + 0.25 * hp + 0.4 * xp - 0.3 * cons, hp, hpMin, xp, cons, used };
+  const u = 0.35 * hpMin + 0.25 * hp + 0.4 * xp - 0.3 * cons - (UTILITY === "v2" ? scarce : 0);
+  return { u, hp, hpMin, xp, cons, used, sup0, sup1, scarce };
 }
 
 async function oneRun(server: string, rec: Rec, option: string, k: number): Promise<Run> {
@@ -195,7 +220,8 @@ async function oneRun(server: string, rec: Rec, option: string, k: number): Prom
       death_cause: result.death_cause ?? null, restore_ms: restoreMs, player_ms: ms };
     if (run.fired) {
       const x = utility(result, s0, s1);
-      Object.assign(run, { u: x.u, hp_term: x.hp, hp_min: x.hpMin, xp_term: x.xp, cons_term: x.cons, cons_used: x.used });
+      Object.assign(run, { u: x.u, hp_term: x.hp, hp_min: x.hpMin, xp_term: x.xp, cons_term: x.cons, cons_used: x.used,
+        sup0: x.sup0, sup1: x.sup1, scarce_term: x.scarce });
     }
     run.total_ms = Date.now() - t0;
     return run;
@@ -211,7 +237,7 @@ function finish(rec: Rec, runs: Run[]): { labelled: boolean; line: any } {
   const meta0 = {
     game_id: rec.raw.game_id, seed: rec.raw.seed, turn: rec.raw.turn, decision_type: rec.type, depth: rec.raw.depth,
     player_level: rec.raw.player_level, race: rec.raw.race, class: rec.raw.class, rules_choice: rec.raw.rules_choice, model_choice: rec.raw.model_choice ?? null, acted: rec.raw.acted ?? null,
-    format_version: rec.raw.format_version, K, danger: danger(rec.raw), horizon: HORIZON[rec.type] ?? 150, options: rec.options,
+    format_version: rec.raw.format_version, K, danger: danger(rec.raw), horizon: HORIZON[rec.type] ?? 150, options: rec.options, utility: UTILITY,
   };
   const firedBy: Record<string, number> = {}, errBy: Record<string, number> = {};
   for (const o of rec.options) {
@@ -243,7 +269,8 @@ function finish(rec: Rec, runs: Run[]): { labelled: boolean; line: any } {
   meta.all_tie = allTie(rows(seeds));
   meta.split_half = { first: toObj(probs(h1)), second: toObj(probs(h2)) };
   meta.runs = Object.fromEntries(rec.options.map((o) => [o, runs.filter((r) => r.opt === o).sort((a, b) => a.k - b.k).map((r) =>
-    r.fired ? { k: r.k, dead: r.dead, hp: r3(r.hp_term ?? 0), hpmin: r3(r.hp_min ?? 0), xp: r3(r.xp_term ?? 0), cons: r3(r.cons_term ?? 0), act: r.actions, dl: r.depth_end, ...(r.dead ? { cause: r.death_cause } : {}) }
+    r.fired ? { k: r.k, dead: r.dead, hp: r3(r.hp_term ?? 0), hpmin: r3(r.hp_min ?? 0), xp: r3(r.xp_term ?? 0), cons: r3(r.cons_term ?? 0), act: r.actions, dl: r.depth_end,
+      ...(r.sup0 ? { sup: [r.sup0.flask, r.sup0.cure, r.sup0.escape, ...(r.sup1 ? [r.sup1.flask, r.sup1.cure, r.sup1.escape] : [])], scarce: r3(r.scarce_term ?? 0) } : {}), ...(r.dead ? { cause: r.death_cause } : {}) }
       : { k: r.k, fired: false, ...(r.error ? { error: r.error.slice(0, 120) } : {}) })]));
   return { labelled: true, line: { state: rec.raw.state, questions: rec.raw.questions,
     gold: { decision: { probabilities: toObj(p) } }, meta } };

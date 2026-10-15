@@ -442,6 +442,549 @@ one after the other.
 - Morning deliverable: `REPORT.md` with the promotion verdicts, the depth/death tables, the
   label stats, and what to try next.
 
+## Session 3: 23-hour autonomous improvement (planned 2026-10-14)
+
+### What session 2 taught us
+- trainB (two DAgger rounds) roughly matches the improved rules. evalB plus the final, 88
+  pairs: 36–27, deaths 19 against 20, depth 2.65 against 2.47, sign test p ≈ 0.16. It is not
+  yet clearly better.
+- **Its failure mode is supply exhaustion.** At the last logged decision before death:
+  - 49 of 52 dead model games had no oil, and 11 of 52 had no potions.
+  - For the rules' dead games those figures are 20 of 32 and 1 of 32.
+  - Even surviving model games end with a median of 1 flask, against 8 for the rules.
+- **The rollout utility can't see this.** Its supply term is
+  `cons = gold value used / (gold + consumable value)`. A flask is worth about 3 gold, so
+  throw runs actually score *lower* cons than melee runs (0.065 against 0.070). Reweighting
+  cons offline over the stored runs (0.3 → 4.0) mostly removes "heal" labels and barely moves
+  "throw". The labels need a scarcity term (the share of the flasks, potions and Phase scrolls
+  on hand that a run used), and the stored runs don't have the counts for one.
+- Eval power is the other limit. A two-arm eval finished only 37–45 clean pairs in 1.6 h,
+  because the rules arm had 6 of the 13 slots and its games run longer. Shallow games (mean
+  max depth about 2.5) also mean midgame decisions are barely tested.
+
+### Goals, in order
+1. Stop the model wasting supplies, first cheaply with **policy guards** and then properly with
+   **scarcity-aware labels** (one DAgger round).
+2. Settle, with enough paired games, whether the best model+guard policy beats the rules on
+   both fresh DL1 starts and midgame (bank) starts.
+3. Leave behind faster, fairer evaluation tooling: a multi-arm tournament with seeds
+   interleaved and a bank suite.
+
+### Phase 0: harness work (agent, about 2.5 h, before the driver starts)
+- [x] **busho `MODEL_GUARD`** (comma list). When a guard fires, the rules' choice is used and
+  the decision log gets `guard: <name>`.
+  - `oil`: the model may choose `throw` only if flasks > 3, or `meleeTooCostly(target)`, or
+    the rules also chose throw.
+  - `potion`: the model may choose `heal` only if potions > 2, or HP < 50%, or the rules also
+    chose heal.
+  - `flee`: the model may not override a rules `flee` with `throw` or `melee`.
+- [x] **Rollout utility v2** (`--utility v2` in `tools/rollout/run.ts`). Each run records
+  start and end counts for flasks, Cure potions and Phase/teleport scrolls. The utility adds
+  `− Σ_c w_c · min(1, used_c / max(1, start_c))`, with w = 0.15 (flask), 0.25 (potion) and
+  0.15 (escape). The old `cons` stays at 0.3 (the potion and escape terms overlap with it
+  partly; both are kept for continuity).
+  - The counts are stored per run, so the weights can be re-tuned offline later.
+  - A unit check on 3 labelled records: the u of a throw run falls when flasks run low.
+- [x] **Tournament eval** (`stage_tournament` in a new `driver3.py`):
+  - N arms share one seed list. Jobs are interleaved by seed (seed 1 for every arm, then
+    seed 2, and so on) on one shared slot pool, so every arm finishes the same seeds.
+  - Each arm is (checkpoint or rules, busho env). Arms that use the same checkpoint share one
+    laya server, so there is never more than one server on the GPU.
+  - Report: paired test of each arm against rules, pairwise against the best arm, and deaths
+    with zero supplies.
+- [x] **Bank suite.** Paired starts from bank savepoints at DL≥5 with a fixed seed per start.
+  Every arm restores the same savepoint and seed. Cap 600 s.
+- [x] Smoke run of driver3 (about 25 min), with each stage and canary exercised.
+
+#### Phase 0 notes (2026-10-14)
+- The guards and utility v2 are implemented. busho and run.ts typecheck. Utility v2 was tested
+  live on 3 records: supply counts are recorded, and a run that used all 5 flasks and 12
+  potions got a scarcity charge of 0.4.
+- **Finding:** in session-2 fight labels, `throw` plays out exactly like `melee` on 1,211 of
+  2,543 records. 503 of those have `Oil:0`, where the throw option can only fall back to melee.
+  The other 708 most likely lacked line of sight. So many "melee+throw" ties are artefacts.
+  This is harmless in game, because busho falls back to melee, but it inflates the model's
+  p(throw).
+- **One laya server for several checkpoints:** `LAYA_EXTRA_MODELS={name: ckpt, ...}`,
+  `LAYA_MODELS=<names>` preloads them, and requests pick a checkpoint by `model`. The default
+  model has to be a bundled one (`english`), but it doesn't need preloading. Two checkpoints
+  peaked at about 6.9 GB GPU total (2.2 GB of that from other processes), the same as session
+  2's eval server.
+- `driver3.py` implements the stages. The trainC canary uses session 2's mixed held-out set
+  (v1 and v2 records), not v2 only. That is simpler, and the deviation is noted here.
+
+### Schedule (23 h; about 3 h slack)
+| Stage | Budget | What |
+|---|---|---|
+| Phase 0 | 2.5 h | agent work above, then launch the driver |
+| T1 tournament | 4.5 h | arms: rules, B, B+`oil,potion`, B+`oil,potion,flee`. 48 fresh seeds + 24 bank starts, 288 games |
+| collectC | 1.25 h | the T1 winner (model + guards) acting, 40% bank branches |
+| labelC | 5.0 h | utility v2, disagreement-first, on collectC. Then old session-2 records where v1 said throw or heal won, re-rolled with v2 |
+| trainC | 0.75 h | from base: v2 labels plus v1 labels for records that weren't re-rolled (v2 replaces v1 per record) |
+| final | 7.5 h | arms: rules, T1 winner, C + the winner's guards, rules-adj (added 18:50, see below). 90 fresh seeds + 30 bank starts, 480 games |
+| slack | 1.5 h | reruns after canary failures, or extra final seeds |
+
+### Run log (`runs/session3/2026-10-14`, launched 17:34, deadline 14:34 on 10-15)
+- **Smoke run (`runs/session3/smoke`, 17:23–17:34):**
+  - Every stage ran. The guards fired: oil 4 times in B-op; oil 3, flee 2 and potion 2 in
+    B-opf. The winner rule picked the fewest-guard arm on a tie.
+  - labelC failed split-half (5–6 labels) and the final failed "identical to rules" (2 of 3
+    starts, 240 s games). Both are expected on samples this small.
+  - Utility v2 changed the argmax on 18% of the smoke labels.
+- **T1 (17:34–21:32, finished early):** all 72 starts complete. No errors, no deadline cuts, and
+  the canaries passed. **Every model arm lost to the rules:**
+
+  | Arm | W–L | Mean diff (80% CI) | Deaths (model/rules) | Depth (model/rules) | Fresh W–L | Bank W–L | Sweep verdict |
+  |---|---|---|---|---|---|---|---|
+  | B | 18–37 | −1.07 (−1.53, −0.65) | 35/24 | 4.22/4.83 | 11–28 | 7–9 | worse |
+  | B-op | 25–32 | −0.54 (−1.04, −0.04) | 25/24 | 4.33/4.83 | 18–23 | 7–9 | trade-off (29–29 at a penalty of 20) |
+  | B-opf | 25–34 | −0.58 (−1.11, −0.08) | 25/24 | 4.29/4.83 | 15–25 | 10–9 | worse |
+
+  - Deaths per level reached: rules 0.069, B 0.115, B-op 0.080, B-opf 0.081. The guards fired
+    a lot: B-op had oil 379 and potion 34; B-opf had oil 364, flee 108 and potion 53.
+  - In 33 of B's 35 deaths the character had no oil, against 23 of 24 for the rules.
+  - **Not a wall-clock artefact:** where both arms were alive at the cap, the model had
+    reached the same game turn as the rules (median ratio 0.94–1.01).
+  - **Why this differs from session 2 is not yet explained.** These are not the causes:
+    - **Code:** the frozen rules are identical apart from the default-off guard code.
+    - **Caps:** session 2's evals also used 900 s / 20,000 actions.
+    - **The served checkpoint:** B's choice mix matches session 2's evalB and final. Melee
+      was overridden to throw 28% of the time here against 35–37%, and to flee 19% against
+      12–18%.
+    - **Time-cap bias:** in session 2 the model's games got further in game turns than the
+      rules' (median ratio 1.28).
+
+    Session 2's +0.18 (p≈0.16) was never significant. On fresh starts alone, this is 11–28,
+    with deaths 20 against 10. The best reading of everything so far is that B is no better
+    than the rules on fresh starts and probably worse, because it spends oil it later needs.
+    The guards recover about half of the gap.
+  - **Winner by the pre-committed rule: B-op.** No arm passes promotion. B-op (−0.542) and
+    B-opf (−0.583) are within 0.05, and B-op has fewer guards. So collectC and the final use
+    B-op, and the rules-adj sign will be −1 (bold), because B-op died once more than the
+    rules (25 against 24). The rule was fixed before T1, and I'm keeping it even though the
+    one-death gap is noise.
+- **collectC (21:32–22:47):** B-op played 65 games, 26 of them bank branches, with 0 errors.
+  - 2,471 decisions: fight 1,862, tactic 277, descend 154, explore 154, recall 19, equip 5.
+  - The model was consulted on every trained-type decision (2,139), and the guards fired
+    476 times (oil 435, potion 41).
+  - 28 deaths. The deepest depth was DL19, and no game made more than 22 throws.
+  - Canaries passed. labelC began at 22:47 with a 5 h budget.
+- **labelC (22:47–03:47):** used the whole 5 h budget, with no run errors.
+  - 932 records were labelled with utility v2: 615 new collectC decisions (fight 791 and tactic
+    141 across both sources) and 317 re-rolled session-2 records. Disagreement-first ordering
+    means the 615 are the decisions where the rules and the model differed most, not a random
+    sample of the 2,139.
+  - The training set totals 4,648 records, with 3,716 v1 records kept.
+  - Canaries passed: split-half agreement 79.4% (tactic) and 85.0% (fight), all-tie 14–15%,
+    and v2 changed the argmax on 22.4% of re-rolled v1 records (the threshold was ≥ 5%).
+  - trainC began at 03:47. handoff_final touched STOP at 03:47:28, so the driver will stop
+    after trainC and relaunch for the 4-arm final.
+- **trainC (03:47–04:51):** took 1.07 h, over its 0.75 h budget by 20 min. That came out of slack.
+  - 3,519 training items, 433 held out, 4 epochs. Canaries passed.
+  - Held-out accuracy 0.570 (majority 0.381, rules 0.411, base laya 0.393). Brier 0.172.
+  - By type: tactic 0.565 (n 177), fight 0.574 (n 256).
+  - This held-out set mixes v1 and v2 labels, so it can't be compared directly with trainB's
+    0.606 on the v1 set. Offline accuracy also didn't predict play in T1.
+- **Hand-off (04:51):** the driver stopped after trainC. handoff_final put the RULES_CAUTION
+  build of busho-player.ts into the frozen source (old copy kept at
+  `src/busho-player.ts.before-final`) and relaunched driver3 at 04:51:26.
+  - The final began at 04:51 with 4 arms: rules, W (B-op: trainB + oil/potion guards),
+    C (trainC + the same guards), and rules-adj at `RULES_CAUTION=-1.0`.
+  - It uses one laya server with both checkpoints. Its budget runs to about 12:21, inside the
+    14:34 global deadline.
+- **Final (04:51–12:05):** all 120 starts done for each of the 4 arms (90 fresh, 30 bank). No
+  errors and no deadline cuts. Canaries passed.
+
+  | Arm vs rules | W–L | Mean diff (CI80) | Deaths (model/rules) | Depth (model/rules) | Deaths per level | Sweep verdict | Replacement cost W–L, mean |
+  |---|---|---|---|---|---|---|---|
+  | W (trainB + guards) | 23–53 | −0.717 (−0.99, −0.46) | 46/33 | 4.01/4.40 | 0.096 vs 0.063 | worse | 22–41, −14.9k |
+  | C (trainC + guards) | 33–50 | −0.475 (−0.84, −0.11) | 26/33 | 3.75/4.40 | 0.058 vs 0.063 | trade-off | 26–40, −7.6k |
+  | rules-adj (caution −1) | 35–32 | 0.000 (−0.21, +0.21) | 33/33 | 4.40/4.40 | 0.063 vs 0.063 | trade-off | 33–26, +2.3k |
+
+  - **C against W:** 45–36, +0.242 (p = 0.19). C died far less (26 against 46) and went
+    slightly shallower. The verdict is a trade-off: W wins with no death penalty, and C wins
+    at a penalty of 2 or more.
+  - **C fresh/bank:** fresh starts 24–37 (−0.256, deaths 11 against 15); bank starts 9–13
+    (−1.133, deaths 15 against 18).
+  - **rules-adj matched the rules exactly in total:** 528 levels and 33 deaths each. This is
+    a coincidence, not a bug: 67 of the 120 pairs had different outcomes, and the logs differ.
+    So caution −1 moves individual games but not the aggregate. The frontier line is
+    degenerate (both points coincide), so the frontier check gives no answer for C. A
+    cautious control (+1) would have been the informative one for C. The sign was fixed by
+    W's T1 death count before C existed.
+  - **By the pre-committed rules:**
+    - No model arm passes promotion.
+    - Neither model is "clearly better play".
+    - **W is worse than the rules** at every death penalty, confirming T1.
+    - **C trades depth for safety:** 21% fewer deaths, 15% less depth, and slightly fewer
+      deaths per level reached (0.058 against 0.063). It still loses to the rules at every
+      penalty up to 6 and on replacement cost.
+    - **C improves on W**, which is the first sign that utility v2 labels moved behaviour in
+      the intended direction (it is now spending less oil and dying less). That improvement
+      isn't significant on its own.
+  - **Session 3 conclusion:** the fine-tuned model doesn't yet play better than the rules.
+    The labelling objective changes *how* it plays (C is more cautious than W), which is
+    evidence that the pipeline responds to the objective, but neither model beats the rules
+    on the measures fixed in advance. Session 4 begins with the honest-play change below,
+    which resets the baselines anyway.
+
+### Pre-committed decision rules
+- **Score** per game = max depth − 3 if dead. **Arm vs. rules:** promote if wins > losses and
+  deaths ≤ rules + 2, on fresh and bank starts **combined** (each start is one pair).
+- **T1 winner:** the arm with the highest mean paired diff against rules among those passing
+  the promotion rule. If none pass, the arm with the highest mean diff. If two are within 0.05
+  of each other, the one with fewer guards (simpler) wins.
+- **labelC canaries:** the same as session 2 (split-half ≥ 65%, all-tie ≤ 25%, errors ≤ 2%),
+  plus "v2 changed the argmax on ≥ 5% of re-rolled v1 records". Otherwise the scarcity term
+  has no effect, so the cause is investigated before training.
+- **trainC canary:** acc > majority on v2 held-out records. If it fails, the final runs with
+  only the rules and the T1 winner.
+- **Final verdict:** report every arm against the rules and C against the T1 winner, with a
+  bootstrap 80% CI and a sign test. "Clearly better" means p < 0.05 one-sided on the pooled
+  pairs.
+- **Skill or risk tuning? (added 2026-10-14 18:50, during T1, at the user's request.)** The
+  "−3 per death" score is itself a risk/reward setting, and a model can win at one death price
+  and lose at another. Rescoring session 2 (97 pairs) under death penalties 0–20 gives wins at
+  0–6 but a negative mean at 20 (survival first). Deaths per level reached were 0.085 (rules)
+  and 0.088 (model), so session 2's gain fits slightly bolder play at least as well as better
+  play. From now on:
+  - Every paired comparison also reports a **death-penalty sweep** (0, 1, 2, 3, 6, 20) with W–L,
+    mean diff and sign p, plus **deaths per dungeon level reached**. Verdict "better" means it
+    wins (W > L and mean diff > 0) at every penalty, "worse" means it loses at every one, and
+    anything else is a "trade-off".
+  - **rules-adj control arm in the final:** the rules with `RULES_CAUTION` = ±1. That one knob
+    moves only the rules' own fight and tactic decisions, which are what the model controls:
+    the combat heal threshold ±0.15, the level margin for fleeing or throwing at fast enemies
+    2 ∓ 2, and the melee damage budget 0.5·(1 ∓ 0.5) of HP. Its sign is fixed by W's T1 result
+    against the rules:
+    - more deaths → bolder (−1);
+    - fewer deaths → more cautious (+1);
+    - equal deaths → bolder if W went deeper, else more cautious.
+
+    The final reports W and C against rules-adj. It also reports a **frontier** check: the
+    rules' depth at the model's death count, on the line through rules and rules-adj.
+  - **"Clearly better play"** now needs all three: p < 0.05 at the −3 score, the "better"
+    verdict across the sweep, and W (or C) above the rules frontier or "better" against
+    rules-adj. A model that wins at −3 but is a "trade-off" across the sweep is reported as a
+    different risk tuning, not as better play.
+  - **Mechanics:** `tools/overnight/handoff_final.py` runs detached. When trainC begins it
+    touches `STOP`. train.py only watches `trainC/STOP`, so training still finishes, and the
+    driver then stops before the final. The helper then copies the new `busho-player.ts` into
+    the run's frozen source (the old copy is kept as `src/busho-player.ts.before-final`) and
+    relaunches driver3, whose final has the 4th arm and 7.5 h. `RULES_CAUTION` defaults to 0, so
+    the rules, W and C arms play exactly as before. If trainC is skipped instantly (labelC
+    failed), the helper may lose the race and the final then runs as originally planned.
+- **Never restart the driver mid-stage.** For changes between stages, stop it while it is idle
+  between stages (`STOP` file), edit `state.json`, and relaunch (lesson from session 2).
+
+### Guardrails (unchanged)
+- Native mode, 13 slots, throttle to 9 on WSL memory > 16 GB or Windows event 2004. At most
+  one laya server on the GPU, and no greedy VRAM probes. Retry on VRAM spikes from the
+  user's containers.
+- Don't touch the user's containers. Process cleanup goes by PID list, never by `pkill -f`.
+- Background stage-boundary waiters, never long foreground waits. At each boundary: read the
+  canaries, act only by the rules above, and update the run log and `REPORT.md`.
+
+## Roadmap after session 3 (recorded 2026-10-14)
+
+Session 3's T1 showed the trained model (B) losing to the rules over long games: 18–37,
+with 35 deaths against 24, mostly after its oil ran out. Session 2's small edge did not hold
+up. The bottleneck is the labels and the evaluation, not model capacity. In order:
+
+1. **One stated objective, used everywhere.** Labels (rollout utility), the tournament score
+   (−3 per death) and the robustness sweep currently disagree, and every hand-set weight is
+   an accidental caution setting. Define one objective: the chance of surviving to a horizon
+   plus depth reached, at a stated exchange rate. Use it for labels, training choices and
+   verdicts, and keep the death-penalty sweep and the rules-adj frontier as checks.
+   - **Proposed form (user's idea, 2026-10-14): price a death at its replacement cost.**
+     - **Definition:** C(d) is the expected game turns for a fresh character to first reach
+       DL d, counting every death and restart on the way. Recursively,
+       C(d+1) = (C(d) + τ_d) / p_d, where p_d is the chance of getting from d to d+1 and τ_d
+       is the mean turns spent at d.
+     - **Score:** a game is worth C(final depth) if the character is alive and 0 if it dies,
+       with turns spent optionally subtracted. Everything is then in one unit (turns of
+       effort). Deaths cost more the deeper the character is, as a careful human plays
+       (protective of a high-level character), and characters alive at the cap get credit
+       for the effort they embody.
+     - **The optimal policy** minimises the expected time to reach a target depth under
+       permadeath.
+     - **First estimate,** from 225 fresh rules games over sessions 2 and 3:
+
+       | First reach | DL2 | DL3 | DL4 | DL5 | DL6 | DL7 | DL8 | DL9 |
+       |---|---|---|---|---|---|---|---|---|
+       | C (game turns) | 16k | 39k | 75k | 94k | 120k | 151k | 156k | 199k |
+
+       So a death at DL3 costs about 1–2 levels of progress at the current pace, and one at
+       DL8 about 4–5. The fixed −3 is too harsh early and too lenient later. DL5+ rests on
+       9–25 games.
+     - **T1 rescored by C:**
+       - B: 12–28, −20k turns per game.
+       - B-op: 24–25, −11k.
+       - B-opf: 22–27, **+3k**. Its edge comes from fewer deaths on the deep bank starts:
+         10 against 14.
+       - Session 2's B: 38–34, +1k.
+     - **Next steps:**
+       - Define C by a fixed reference policy (the rules) so it's a stable yardstick.
+       - Extend it deeper with the bank starts.
+       - Bootstrap the score, since a few deep deaths dominate it.
+       - Later, replace C(depth) with the value function V(state) (item 3), so character
+         level and gear count too.
+       - Use the same C as the rollout terminal value, so labels and verdicts share the
+         objective.
+   - **Guarding against paralysis (user, 2026-10-14).** A pure "death costs C(d)" score lets
+     a deep character stall safely forever. If C were re-estimated from that slower policy,
+     C would grow, and the policy would grow more cautious still: a spiral. The defences,
+     in order:
+     1. **Charge for time.** Score a game segment as `C(d_end) − C(d_start) − turns` if the
+        character is alive, and `−C(d_start) − turns` if it dies. Both terms are in turns, so
+        the exchange rate is 1. This is the standard way of turning "maximise the long-run
+        progress rate" into a per-game score. A positive score means building characters
+        faster than the reference policy does on average, deaths included. Stalling scores
+        −turns, so paralysis is never optimal.
+     2. **Fix the yardstick.** Within a session, C comes from a fixed reference (the rules).
+        Re-estimate it only between sessions, from the promoted policy, and damp the update
+        (for example a 50/50 mix with the previous table) so it can't spiral.
+     3. **Soften explicitly, as a stated design choice, if play still looks timid.** Options
+        are a concave price (C^α, α<1), a cap of k levels' worth of effort, or a per-turn
+        discount. Pace is a playability requirement, so it can also be a constraint: minimise
+        deaths subject to median turns per level ≤ X.
+     4. **Measure timidity.** Every tournament reports turns per level, time in town, flee and
+        recall rates, and stalls (no new depth or experience for N turns), next to the
+        robustness sweep.
+2. **Act only when confident.** In T1, B overrode the rules 1,165 times with a median
+   confidence of 0.012. Only 7% of its overrides had confidence of 0.1 or more, because
+   training set `DECISION_MIN_CONFIDENCE=0`. Add tournament arms with thresholds (for example
+   0.05, 0.1 and 0.2), or a predicted-advantage-over-rules gate. This is cheap and likely to
+   help.
+3. **A value function for long horizons.** Train V(state) → eventual outcome from the
+   finished games and snapshots we already have. Rollouts then end with V(state) as their
+   value, so delayed costs (oil, potions, pace) are visible without hand-made scarcity terms.
+4. **A scenario suite.** Hundreds of short, fixed situations from the savepoint bank, for
+   example "fast unique at range 4, 2 flasks, 60% HP". They give low-variance, cheap answers
+   per decision type. Full-game tournaments, with the rules-adj control, remain the final check.
+5. **More decision types,** ordered by how cheaply each can be labelled and how directly it
+   hits observed failures. Each one gets its own `DECISION_MODEL_TYPES` switch and its own
+   A/B test before they are combined:
+   1. **Supplies:** how much oil and how many potions to buy, and when to go back to town to
+      restock. This is new, and it targets the main way the model dies.
+   2. **Equipment:** label with simulated fights.
+   3. **Pace (descend, explore, recall):** this needs item 3 first, because short rollouts
+      can't see the consequences, and it needs the frontier control because pace *is* the
+      risk/reward axis.
+6. **Depth:** grow the savepoint bank with the best policy and report results by depth band
+   (1–4, 5–9, 10–19, 20+).
+
+Rough order:
+- **Session 4:** items 1, 2 and 4, plus Jev phase J1.
+- **Session 5:** item 3, the supplies decision type, and Jev phase J2.
+- **Session 6:** the pace decisions.
+
+### Principle: the prompt shows only what the player's UI shows (user, 2026-10-15)
+The decision model's state text may contain only information a human player could see on
+screen: the map as seen, visible monsters, the health bar of the tracked monster, the status
+line, the inventory and equipment as identified, and monster recall as far as lore allows.
+Knowledge the player brings from experience or spoilers belongs in the model's weights, not
+in the prompt. Rollout labels may still use the true game state: they measure what actually
+happens, which is how a player learns from experience.
+
+**How far the current prompt is from this** (`tools/decision/index.ts`, `buildStateText` and
+`monsterLine`):
+- **Monster selection.** `/state` returns every living monster on the level. The game server
+  runs in "omniscient mode", and `buildStateText` filters by distance ≤ 6 only. Monsters behind
+  walls, out of light and invisible ones all appear. One held-out record lists Sméagol, who is
+  invisible, next to a CL2 Elf Warrior without See Invisible.
+- **Monster details from race data.** The prompt shows exact HP, level, exact speed, breath
+  and spell elements, spell frequency, evil/undead and other kinds, immunities, BREEDER and
+  PASSWALL. In the UI, HP is a health bar for the tracked monster only, and the rest is monster
+  recall, which depends on lore. The port has `monster/lore.ts`, but nothing in the game loop
+  calls it.
+- **Status.** The prompt shows `food:13782`, where the UI shows Hungry/Fed/Full.
+- **Items.** `describeItem` shows resists and flags without checking rune knowledge; this only
+  affects the 5 equip decisions so far.
+- **The rules player is omniscient too.** It uses the full map and every monster for the ~90%
+  of decisions it makes, and for choosing when to ask the model. The tournaments are fair
+  between arms, because every arm shares the same rules player, but no arm plays from the UI.
+  This principle covers the prompt; whether it should also cover the rules player is open.
+
+**Plan (start of session 4, before any other prompt change, so new models train on the
+honest prompt from the start):**
+1. **A visibility function:** a monster is shown only if its square is in view (`updateView`
+   already runs in the game loop) and it is lit or within infravision, and it isn't
+   INVISIBLE unless the player has See Invisible. Telepathy and detection count when active.
+2. **Health bar instead of HP:** in 10% steps, as the UI draws it.
+3. **Recall from lore:** decide whether lore starts empty per character or uses a fixed
+   "veteran" lore file, as vanilla carries lore across characters. Then wire up `lore.ts`.
+4. **Food as the UI's words**, and item properties only as known runes.
+5. **Re-render the existing records:** every decision kept a full snapshot (2,353 in collectC
+   alone), so states can be re-rendered without new rollouts, and the labels can be kept.
+   Retrain on the honest prompt and compare it with the leaky one in held-out accuracy and in
+   play, to measure how much the model relied on hidden information.
+6. **Monster knowledge from documentation and tables** then becomes the legitimate route for
+   what the player "knows": synthetic recall questions generated from the tables, or training
+   on documentation. This replaces the earlier idea of putting full table lines in the prompt.
+
+**Decisions (user, 2026-10-15):**
+- **Lore starts empty** for every character and is learned only by observation: seeing a
+  monster, its attacks and spells hitting you, and kills. No veteran lore file.
+- **The rules player is limited to the UI too, for fairness.** It must see what the model
+  sees. That supersedes the open question above, and it changes what follows.
+
+**Revised plan (session 4 becomes "honest play"):**
+1. **A perception layer in the game server.** `/state?view=player` returns the same schema,
+   filtered to what the UI shows:
+   - **Map memory:** a square is known once it has been SEEN; lit rooms are remembered when
+     seen. Mapping and detection effects already set MARK. Memory is lost on a level change.
+     The game loop currently never marks seen squares, though the renderer draws SEEN|MARK.
+   - **Monsters:** only those on SEEN squares. Infravision counts only warm-blooded monsters
+     (it currently counts any monster). INVISIBLE monsters are hidden without See Invisible.
+     Telepathy and detection count while active.
+   - **Remembered monsters (user, 2026-10-15):** the prompt may say "you saw a live X
+     recently on this level". The view keeps, per level, the monsters the player has seen and
+     not seen die, with where and how many turns ago they were last seen. Entries are dropped
+     on a level change, or once the player sees the monster die. This is what a player
+     remembers; it is not a live position.
+   - **Monster health:** the look command's words (unhurt … almost dead) instead of exact HP.
+   - **Lore:** wire `monster/lore.ts` into the game loop (on sight, attack, spell and kill),
+     store it per character in the save, and expose only known fields. Level, speed, blows,
+     spells and flags are unknown until learned.
+   - **Objects:** floor objects only when seen; item properties only as known runes and
+     flavours.
+   - **Food** as Hungry/Weak/Fed/Full.
+   - **Status (2026-10-15 morning):** first version done in
+     `packages/@angband/core/src/borg/perception.ts` and wired into `ai-server.ts`.
+     - `/state`, `/command` and `/restore` take `?view=player`; without it nothing changes.
+     - Lore and map memory travel inside `/snapshot` saves as `save.perception`; older saves
+       restore with them empty.
+     - Smoke-tested on two saves:
+       - DL3 dark corridor: the omniscient view had 13,068 squares, Sméagol (invisible) and a
+         green ooze. The player view had 9 squares and no monsters.
+       - Fight with a cutpurse: the view showed "badly wounded", then "wounded". Lore learned
+         HIT:HURT (dice after 10 hits) and TOUCH:EAT_GOLD from the message log. Speed was
+         known after 1 sighting, and level stayed unknown before any kill.
+     - Not yet covered: detection effects, mimics, item rune and flavour knowledge, sightings
+       during multi-turn commands (run/rest), and unit tests.
+2. **Rules player on `view=player`** (`tools/busho-player.ts`, ~4,100 lines):
+   - Audit every use of the map, monsters and items.
+   - Exploration becomes frontier-based, because it can no longer path to unseen stairs.
+   - Threat estimates use health words and lore instead of exact HP and race flags; unknown
+     monsters get a depth-based prior.
+   - Expect the honest rules player to be weaker (more deaths, slower descent). It is a new
+     baseline, not a regression to fix at all costs.
+3. **Rollouts use the honest rules player** as the continuation policy, so labels measure what
+   an honest player would get. They still start from the true snapshot, because the outcome is
+   real.
+4. **Data:** old records can't be re-rendered faithfully, because the snapshots carry no lore
+   or map memory. Session 1–3 data and models count as the "omniscient" era: kept for
+   reference, not mixed with the new data. Savepoints in the bank stay usable as starting
+   states, with lore and map memory empty on restore (recorded as a known approximation).
+5. **Baselines reset:** a fresh honest-rules baseline (T0), then collect, label and train as
+   before. Session 3's verdicts stand only for the omniscient setting.
+6. **Jev J1** waits for honest held-out data, so both models get the same honest prompts.
+7. **Canaries:**
+   - A leak test: an invisible monster, a monster behind a wall and an unexplored stair must
+     not appear in `view=player`.
+   - A replay check: the omniscient view is unchanged when the parameter is absent.
+
+## Evaluating against hosted Jev (TypeSafe), plan
+
+**Setup (2026-10-14):** the user funded $10, and the key is `TYPESAFE_API_KEY` in `.env`,
+which is gitignored. Never print or log the key. busho already reads it:
+`SYSTEMONE_API_KEY` falls back to `TYPESAFE_API_KEY`. A model list call returned
+`jev-latest` and `jev-preview`. Per the docs, `jev-latest` is `jev-1.13.0`, and `jev-preview`
+is `jev-1.14.0`, released 2026-10-14.
+
+**Cost:**
+- **Price:** $0.042 per million input tokens; output is free.
+- **Request size:** our fight and tactic requests are about 870 characters (median), 1,225
+  at most, which is about 250–400 tokens, or about $0.000015 per decision. $10 is about
+  600,000 decisions, so money is not the constraint. Rate limits and latency are.
+- **Spending cap anyway:** every Jev call goes through a ledger
+  (`runs/jev/spend.jsonl`: tokens from the response's `usage` when present, otherwise
+  characters ÷ 3). The tooling stops itself at **$1 per phase** and **$5 overall**, which
+  leaves at least half the funding untouched.
+
+**Fairness rules:**
+- **Pin versions:** use `jev-1.13.0` and `jev-1.14.0` explicitly, never `jev-latest`, and
+  log the `model` each response reports.
+- **Same inputs:** the same `state` string and question criteria our models get, as is.
+  A second, "enriched" variant with clearer option descriptions may be added, and is reported
+  separately.
+- **Same gating:** `DECISION_MIN_CONFIDENCE=0`, like the local models, plus the confidence
+  threshold variants from roadmap item 2.
+- **Wall-clock caps:** network latency slows games, and under a 900 s wall cap a slower arm
+  plays fewer turns. That biases it toward fewer deaths and less depth. Jev arms are capped
+  by actions and game turns only, and every comparison reports the matched-progress ratio.
+- **Count fallbacks:** timeouts, 429s and errors fall back to the rules, which would quietly
+  weaken the arm. Count them. **Canary:** fallbacks ≤ 2% of trained-type decisions, otherwise
+  the arm is invalid.
+- **Concurrency:** start at ≤ 4 concurrent games on the Jev arm. Raise it only after
+  checking the organization's rate limits in the TypeSafe console.
+
+**Phases:**
+- **J1, offline benchmark** (session 4, about $0.20).
+  - **Data:** the session-3 held-out labelled decisions (v2 utility), plus the session-2
+    held-out set.
+  - **Policies compared:** the rules, majority, base Kev-0.8B, base Laya, trainB, trainC,
+    Jev 1.13 and Jev 1.14.
+  - **Metrics:**
+    - agreement with the rollout argmax;
+    - **regret**: the rollout utility of the best option minus that of the chosen option,
+      which is the headline;
+    - Brier score against the soft labels;
+    - a per-type and per-depth-band breakdown.
+  - **Tool:** new `tools/overnight/jev_bench.py`, with ledger, retries and a resumable output.
+- **J2, tournament arm** (session 5, about $0.10–0.30). Jev, using whichever version did
+  better in J1, plays as an arm next to the rules, rules-adj and the best local model, on the
+  same fresh and bank starts. It reports:
+  - the robustness sweep;
+  - deaths per level reached;
+  - the frontier check;
+  - fallbacks;
+  - matched progress.
+
+  It runs only after J1 shows Jev is competitive offline, or if the user asks.
+- **J3 (optional):** Jev as a teacher. Where its confidence is high and it disagrees with the
+  rollout label, re-roll that record with more rollouts, which finds label noise cheaply.
+  Distil only from labels the re-rolls confirm.
+- **Fine-tuning Jev:** not documented. If it isn't available, the comparison is Jev zero-shot
+  (or with a few examples in context) against our fine-tuned local model, and the report
+  says so.
+
+**Probe (2026-10-14 22:04, during session 3; `tools/overnight/jev_probe.py`, output in
+`runs/jev/probe-2026-10-14/`).**
+- **Works with our requests as is.**
+  - Answers come back in busho's format (`choice`, `confidence` and `probabilities`).
+  - The `model` field in each response confirms the pinned version.
+  - `usage.input_tokens` is reported: about 576 tokens per decision, or about $0.000024.
+    That is higher than the 250–400 estimated above, so $10 is about 400,000 decisions.
+  - About 900 calls cost **$0.018**.
+- **Latency:** p50 is 200–230 ms and p90 260–540 ms, with a maximum of 2.3 s. busho's 10 s
+  timeout is never close. A game's ~30 trained-type decisions add about 6–10 s of wall time,
+  which is small against the 900 s cap. Still check matched progress.
+- **Rate limits:** there were no 429s up to 16 requests in flight, at 26–31 requests a
+  second. The response headers show no rate-limit fields, only `x-typesafe-request-id`, so
+  the real limits are in the console. A 13-slot tournament arm is well within what we saw.
+- **Zero-shot score on the session-2 held-out set** (393 records, v1 utility labels, the
+  same set trainB was scored on):
+
+  | Policy | Accuracy | Brier | Regret (u_mean) |
+  |---|---|---|---|
+  | rules | 0.397 | 0.852 | 0.110 |
+  | majority | 0.382 | | |
+  | **jev-1.13.0** | **0.473** | 0.262 | **0.080** |
+  | jev-1.14.0 | 0.430 | 0.306 | 0.090 |
+  | laya base (zero-shot) | 0.387 | 0.325 | |
+  | trainB (fine-tuned laya) | 0.606 | 0.169 | |
+
+  - Zero-shot Jev 1.13 beats the rules and zero-shot laya offline, but trails our fine-tuned model by 13 points.
+    Jev 1.14 is worse than 1.13 here.
+  - **Caveat:** these labels are v1 (short-horizon). trainB's offline lead didn't turn into
+    better play in T1, so this table ranks label agreement, not play.
+  - J1 should rescore on the v2 (labelC) held-out set and add regret for trainB and trainC.
+
+**Not before:** session 3 finishes (about 12:00 on 10-15, deadline 14:34). J1 needs no game
+slots and only a little CPU, but it waits so session 3's timings stay clean.
+
 ## Risks
 
 - **Docker Desktop crash (happened 2026-10-12 ~22:31).** A deliberate GPU-memory spike test
