@@ -92,13 +92,15 @@ def stage_label(run, name, deadline):
     D.rm_containers(servers)
     urls = []
     for i in range(run.slots):
-        D.start_server(run, f"{servers}{i}", 4300 + i, {"VANILLA": "1"}, 1)
-        urls.append(f"http://127.0.0.1:{4300 + i}")
+        # TS: one long-lived server per worker, restored per rollout. C: run.ts starts a C game per rollout on the port.
+        port = 4300 + i + D.PORT_OFFSET
+        if D.ENGINE != "c": D.start_server(run, f"{servers}{i}", port, {"VANILLA": "1"}, 1)
+        urls.append(f"http://127.0.0.1:{port}")
     script = ["tools/rollout/run.ts", "--decisions", dec, "--dir", run.path, "--out", out, "--servers", ",".join(urls),
               "--workers", str(run.slots), "--types", D2.MODEL_TYPES, "--k", "4" if run.smoke else "8", "--k-min", "4",
               "--order", "danger", "--utility", "v2"]
     if run.smoke: script += ["--max-records", "40"]
-    env = {"BUSHO_TMP": run.d(name, "tmp", "x")[:-2], **HONEST}  # the continuation policy plays honestly too
+    env = {"BUSHO_TMP": run.d(name, "tmp", "x")[:-2], "ANGBAND_C": D.C_BIN, **HONEST}  # the continuation policy plays honestly too
     text, timed_out = D.run_node(run, f"ovn-{name}-orch", script, env, max(60, int(deadline - time.time())), heap_mb=0)
     D.rm_containers(servers)
     open(run.d(name, "orchestrator.tail.log"), "w").write(("stopped at deadline\n" if timed_out else "") + text[-3000:])
@@ -244,7 +246,9 @@ def main():
     run = D.Run(a.run, a.hours, a.smoke, a.slots)
     run.prior = os.path.abspath(a.prior)
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
-    run.log(f"driver4 start (smoke={a.smoke}, slots={a.slots}); prior={run.prior}; app={D.app_dir(run)}")
+    cbin = D.freeze_c(run) if D.ENGINE == "c" else None
+    run.log(f"driver4 start (smoke={a.smoke}, slots={a.slots}, engine={D.ENGINE}, c_bin={cbin}); prior={run.prior}; "
+            f"app={D.app_dir(run)}")
     threading.Thread(target=D2.watchdog, args=(run,), daemon=True).start()
     try:
         for name, kind, hours in STAGES:

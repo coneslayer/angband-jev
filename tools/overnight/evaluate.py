@@ -35,7 +35,7 @@ def venv_bin(tool):
 class LayaServer:
     """laya-serve in a container with one extra checkpoint registered as NAME."""
 
-    def __init__(self, ckpt, port=8010, container="ovn-laya-eval"):
+    def __init__(self, ckpt, port=8010 + int(os.environ.get("OVN_PORT_OFFSET", "0")), container="ovn-laya-eval"):
         self.ckpt, self.port, self.container = os.path.abspath(ckpt), port, container
         self.url = f"http://localhost:{port}"
 
@@ -127,7 +127,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--heldout", required=True); ap.add_argument("--ckpt", required=True)
     ap.add_argument("--train"); ap.add_argument("--base", default="english")
-    ap.add_argument("--out"); ap.add_argument("--port", type=int, default=8010)
+    ap.add_argument("--out"); ap.add_argument("--port", type=int, default=8010 + int(os.environ.get("OVN_PORT_OFFSET", "0")))
     a = ap.parse_args()
     records = [json.loads(l) for l in open(a.heldout) if l.strip()]
     result = {"heldout": len(records)}

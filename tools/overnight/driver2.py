@@ -10,7 +10,7 @@ agent's rule pass, and a memory watchdog. Resumable via RUN/state.json; `touch R
 Usage: driver2.py --run runs/session2/<name> --prior runs/overnight/2026-10-13 [--hours 20]
                   [--smoke] [--slots 13]   (always native; Docker is left alone)
 """
-import argparse, collections, concurrent.futures as cf, glob, json, os, random, re, shutil, signal
+import argparse, gzip, collections, concurrent.futures as cf, glob, json, os, random, re, shutil, signal
 import subprocess, sys, threading, time  # noqa: E401
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -88,9 +88,18 @@ def stage_gate(run, name, deadline):
     return {"refrozen": True, "agent_note": open(flag).read()[-2000:]}
 
 
+def savepoint_engine(path):
+    """"c" for a C Angband savepoint, else "ts" (peeks at the start of the gzip JSON)."""
+    try:
+        with gzip.open(path, "rt") as f: head = f.read(400)
+    except OSError: return "ts"
+    return "c" if '"c-savefile-1"' in head else "ts"
+
+
 def bank_files(run):
     files = glob.glob(os.path.join(run.path, "bank", "*.json.gz")) + glob.glob(os.path.join(run.prior, "bank", "*.json.gz"))
-    return sorted(f for f in files if (m := re.search(r"-DL(\d+)-", os.path.basename(f))) and int(m.group(1)) >= 5)
+    deep = sorted(f for f in files if (m := re.search(r"-DL(\d+)-", os.path.basename(f))) and int(m.group(1)) >= 5)
+    return [f for f in deep if savepoint_engine(f) == D.ENGINE]  # a C game can't load a TS savepoint, nor vice versa
 
 
 def stage_collect(run, name, deadline):

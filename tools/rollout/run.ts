@@ -15,7 +15,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as zlib from "node:zlib";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { CostTable } from "./cost";
 import { winShares, allTie } from "./labels";
 
@@ -50,6 +50,10 @@ const DEPTH_MAX = Number(opt("depth-max", "DEPTH_MAX", "9999"));
 const MAX_WAIT = opt("max-wait", "ROLLOUT_MAX_WAIT", "5")!;
 const PLAYER_CMD = opt("player-cmd", "PLAYER_CMD", "node_modules/.bin/tsx tools/busho-player.ts")!.split(/\s+/);
 const GAMEDATA = opt("gamedata", "GAMEDATA", "packages/@angband/core/gamedata")!;
+// C Angband engine: records whose snapshot is a C savefile ("c-savefile-1") are restored by starting a fresh
+// C game process per run on the worker's port (--load <savefile> --seed k; ~80 ms), instead of POST /restore.
+const C_BIN = opt("c-bin", "ANGBAND_C", "/home/mph/src/angband-c/build-rd/game/angband")!;
+const C_TMP = opt("c-tmp", "ROLLOUT_C_TMP", path.join(path.dirname(path.resolve(OUT)), "c-rollout-tmp"))!;
 const HORIZON: Record<string, number> = { ...DEFAULT_HORIZON };
 for (const kv of (opt("horizon", "HORIZON", "") ?? "").split(",").filter(Boolean)) { const [t, h] = kv.split("="); HORIZON[t] = Number(h); }
 
@@ -156,6 +160,47 @@ function saveJson(rec: Rec): string {
   return s;
 }
 
+/** The record's snapshot as a C savefile (+ monster lore), or null for a TS snapshot. */
+const cSaveCache = new Map<number, { data: Buffer; lore: Buffer } | null>();
+function cSave(rec: Rec): { data: Buffer; lore: Buffer } | null {
+  if (cSaveCache.has(rec.idx)) return cSaveCache.get(rec.idx)!;
+  const save = JSON.parse(saveJson(rec));
+  const v = save?.format === "c-savefile-1" ? { data: Buffer.from(save.data, "base64"), lore: Buffer.from(save.lore ?? "", "base64") } : null;
+  cSaveCache.set(rec.idx, v);
+  return v;
+}
+
+/** Start a C game on `server`'s port from the record's savefile, reseeded with k. Resolves once /health answers. */
+async function startC(server: string, rec: Rec, k: number): Promise<ChildProcess> {
+  const port = new URL(server).port;
+  const udir = path.join(C_TMP, `w${port}`);
+  fs.mkdirSync(udir, { recursive: true });
+  const c = cSave(rec)!;
+  const sav = path.join(udir, "rollout.sav");
+  fs.writeFileSync(sav, c.data);
+  fs.writeFileSync(path.join(udir, "lore.txt"), c.lore); // read at start-up: the character's monster memory
+  const child = spawn(C_BIN, ["-mhttp", `-duser=${udir}`, "--", "--port", port, "--load", sav, "--seed", String(k)],
+    { cwd: path.dirname(C_BIN), stdio: "ignore" });
+  for (let i = 0; i < 250; i++) {
+    if (child.exitCode !== null) break; // e.g. the port is taken: never fall back to whatever answers there
+    try {
+      const r = await fetch(`${server}/health`);
+      if (r.ok && (await r.json()).engine === "c" && child.exitCode === null) return child;
+    } catch { /* not up yet */ }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  child.kill("SIGKILL");
+  throw new Error(`C game did not start on ${server}`);
+}
+
+async function stopC(server: string, child: ChildProcess) {
+  try { await fetch(`${server}/quit`, { method: "POST", body: "{}" }); } catch { /* already gone */ }
+  if (child.exitCode === null) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (child.exitCode === null) child.kill("SIGKILL");
+  }
+}
+
 async function http(url: string, method: string, body?: string): Promise<any> {
   const r = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body });
   const t = await r.text();
@@ -206,11 +251,17 @@ function utility(res: any, s0: any, s1: any): { u: number; hp: number; hpMin: nu
 async function oneRun(server: string, rec: Rec, option: string, k: number): Promise<Run> {
   const t0 = Date.now();
   const base: Run = { opt: option, k, fired: false, dead: false, u: null };
+  let cGame: ChildProcess | null = null;
   try {
-    const body = `{"save":${saveJson(rec)},"seed":${k}}`;
     let s0: any;
-    try { s0 = await http(`${server}/restore`, "POST", body); }
-    catch { await new Promise((r) => setTimeout(r, 500)); s0 = await http(`${server}/restore`, "POST", body); }
+    if (cSave(rec)) {
+      cGame = await startC(server, rec, k);
+      s0 = await http(`${server}/state`, "GET");
+    } else {
+      const body = `{"save":${saveJson(rec)},"seed":${k}}`;
+      try { s0 = await http(`${server}/restore`, "POST", body); }
+      catch { await new Promise((r) => setTimeout(r, 500)); s0 = await http(`${server}/restore`, "POST", body); }
+    }
     const restoreMs = Date.now() - t0;
     const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150);
     if (!result) return { ...base, error: err, restore_ms: restoreMs, player_ms: ms, total_ms: Date.now() - t0 };
@@ -227,6 +278,8 @@ async function oneRun(server: string, rec: Rec, option: string, k: number): Prom
     return run;
   } catch (e) {
     return { ...base, error: String(e), total_ms: Date.now() - t0 };
+  } finally {
+    if (cGame) await stopC(server, cGame);
   }
 }
 
@@ -320,7 +373,7 @@ async function main() {
         const { labelled, line } = finish(u.rec, arr);
         fs.writeSync(labelled ? outFd : unlFd, JSON.stringify(line) + "\n");
         if (labelled) nLab++; else nUnl++;
-        saveCache.delete(u.rec.idx); results.delete(u.rec.idx);
+        saveCache.delete(u.rec.idx); cSaveCache.delete(u.rec.idx); results.delete(u.rec.idx);
         const el = (Date.now() - t0) / 1000;
         console.error(`[${((el / 60)).toFixed(1)}m] record ${u.rec.idx + 1}/${recs.length} ${u.rec.type} DL${u.rec.raw.depth} ${labelled ? "labelled " + JSON.stringify(line.gold.decision.probabilities) : "UNLABELLED " + line.meta.unlabelled_reason}  (${nRuns} runs, ${(el / nRuns).toFixed(1)} s/run wall)`);
       }

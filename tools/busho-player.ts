@@ -1712,6 +1712,12 @@ function getAreaHash(tiles: any[], px: number, py: number): string {
 
 // ── 退避モード (逃走後のHP回復優先) ──
 let retreatMode = false;        // 退避中フラグ
+// 見えない攻撃者: HP が減り、隣に見える敵がいず、直近メッセージが "It ... you" のときの actionCount
+let unseenHits: number[] = [];
+let prevHpUnseen = -1;
+let lastUnseenPhase = -100;
+// "It bites you." / "You are hit by something!" / bumping into it: "You hit the monster" (TS), "You hit it." (C)
+const UNSEEN_ATTACK_RX = /^(It|Something) [a-z' ]*\byou\b|hit by something|^You (hit|miss) (the monster|it)\b/;
 let retreatStartTurn = 0;       // 退避開始ターン
 const RETREAT_HP_THRESHOLD = 0.8; // HP80%以上で退避解除
 const RETREAT_MAX_TURNS = 30;    // 最大30ターンで強制解除
@@ -1734,7 +1740,7 @@ const SELL_STORE_FOR_TVAL: Record<number, number[]> = {
 // 保持すべきアイテムかチェック (消耗品 or 現装備より良い装備)
 function shouldKeepItem(item: any, equipment: any[]): boolean {
   // 消耗品は常に保持
-  if ([TVAL.SCROLL, TVAL.POTION, TVAL.FOOD].includes(item.tval)) return true;
+  if ([TVAL.SCROLL, TVAL.POTION, TVAL.FOOD, TVAL.FLASK].includes(item.tval)) return true; // 油は投擲武器
   // 魔法書は保持
   if ([30, 31, 32, 33, 34].includes(item.tval)) return true;
   // 掘削具は保持 (stuck 脱出用)
@@ -2028,6 +2034,15 @@ async function playGame() {
     canDigHard = playerHasDigger(p);
     diggingSkill = p.digging ?? 0;
     const hpPct = p.hp / p.maxHp;
+    {
+      // 見えない攻撃者の検知 (メッセージ窓は直近20件で重複はまとめられるので、HP 減少と組み合わせる)
+      const recent = ((state.messages ?? []) as any[]).slice(-4).map((x: any) => String(x));
+      if (prevHpUnseen >= 0 && p.hp < prevHpUnseen && recent.some(x => UNSEEN_ATTACK_RX.test(x))
+          && !monsters.some((m: any) => m.distance <= 1)) unseenHits.push(actionCount);
+      prevHpUnseen = p.hp;
+      unseenHits = unseenHits.filter(a => actionCount - a <= 20);
+    }
+    const unseenThreat = unseenHits.length > 0;
     // Player resistances from calcBonuses (race + equipment)
     const playerResists = new Set<string>();
     currentPlayerResists = new Set<number>(); // itemPower用の数値版
@@ -2087,6 +2102,7 @@ async function playGame() {
 
     // Detect level change (WoR, stairs, etc.) and reset exploration state
     if (state.depth !== lastKnownDepth) {
+      unseenHits = [];
       console.log(`  [深度変更] DL${lastKnownDepth} → DL${state.depth} (WoR/階段)`);
       visited.clear(); lastVisitedSize = 0; noProgressCount = 0; stuckCount = 0;
       killsThisLevel = 0; levelEntryTurn = state.turn; explorationRateWindow = [];
@@ -2367,6 +2383,54 @@ async function playGame() {
     const canCastSpells = spells.length > 0 && sp > 0;
     const newSpellSlots = p.newSpells ?? 0;
 
+    // === 見えない攻撃者: 回復/離脱。脅威が続く間は休まない (下の REST は unseenThreat で止める) ===
+    if (unseenThreat && !monsters.some((m: any) => m.distance <= 1) && !p.timed.blind && !p.timed.confused) {
+      const n = unseenHits.length;
+      const tele = findTeleportScroll(inv), phase = findPhaseScroll(inv);
+      if (hpPct < 0.5) {
+        const healSpell = canCastSpells ? findBestHealSpell(spells, p.level, sp, true) : null;
+        if (healSpell) {
+          spellsUsed++; healingsUsed++;
+          state = await sendCommand({ type: CMD.CAST, spellIndex: healSpell.index, direction: 5 });
+          continue;
+        }
+        const healSlot = findStrongHealingPotion(inv);
+        if (healSlot !== null && hpPct >= 0.25) {
+          healingsUsed++;
+          state = await sendCommand({ type: CMD.QUAFF, itemIndex: healSlot });
+          continue;
+        }
+      }
+      // 階段の上なら階を変える (速い透明の敵は Phase Door で振り切れない)
+      const here = tiles.find((t: any) => t.x === px && t.y === py);
+      if (n >= 3 && (here?.feat === FEAT.UP_STAIR || here?.feat === FEAT.DOWN_STAIR)) {
+        fleeAttempts++;
+        addLesson(state.turn, state.depth, "見えない攻撃者", `見えない敵に${n}回攻撃された。階段で離脱`);
+        state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+        unseenHits = [];
+        continue;
+      }
+      // Phase Door は 8 行動に 1 回まで (HP 35% 未満を除く)
+      const phaseOk = hpPct < 0.35 || actionCount - lastUnseenPhase > 8;
+      const escape = (hpPct < 0.25 || n >= 5) && tele !== null ? tele
+        : (hpPct < 0.5 || n >= 3) && phaseOk ? (phase ?? tele) : null;
+      if (escape !== null) {
+        if (escape === phase) lastUnseenPhase = actionCount;
+        fleeAttempts++;
+        addLesson(state.turn, state.depth, "見えない攻撃者",
+          `HP${Math.round(hpPct*100)}%、見えない敵に${n}回攻撃された。${escape === tele ? "Teleport" : "Phase Door"}で離脱`);
+        state = await sendCommand({ type: CMD.READ, itemIndex: escape });
+        if (escape === tele) { unseenHits = []; stuckCount = 0; noProgressCount = 0; visited.clear(); lastVisitedSize = 0; }
+        continue;
+      }
+      // 逃げる手段なし (or Phase Door 待ち): 既知の階段へ歩く。着いたら上の階段ルールで階を変える
+      const st = n >= 2 ? nearestStair(tiles, px, py) : null;
+      if (st && st.len <= 80) {
+        state = await sendCommand({ type: CMD.WALK, direction: st.dir });
+        continue;
+      }
+    }
+
     // === 退避モード管理 ===
     if (retreatMode) {
       const retreatTurns = state.turn - retreatStartTurn;
@@ -2408,7 +2472,7 @@ async function playGame() {
           continue;
         }
         // 回復手段なし → REST（敵が近くにいなければ）
-        if (monsters.filter((m: any) => m.distance <= 4).length === 0) {
+        if (monsters.filter((m: any) => m.distance <= 4).length === 0 && !unseenThreat) {
           state = await sendCommand({ type: CMD.REST, turns: 5 });
           continue;
         }
@@ -2807,7 +2871,7 @@ async function playGame() {
         continue;
       }
       // 回復薬なし → RESTで自然回復 (MPも回復)
-      if (hpPct < 0.5) {
+      if (hpPct < 0.5 && !unseenThreat) {
         state = await sendCommand({ type: CMD.REST, turns: 10 });
         continue;
       }
@@ -2944,9 +3008,11 @@ async function playGame() {
             state = await sendCommand({ type: CMD.THROW, target: { x: m.x, y: m.y }, itemIndex: flask });
             {
               // サーバーの投擲メッセージ ("Your flask of oil hits/kills/misses ...") から命中/撃破を数える
-              const tm = ((state.messages ?? []) as any[]).slice(-3).map((x: any) => String(x));
-              if (tm.some(x => /^Your .* (hits|kills) /.test(x))) throwHits++;
-              if (tm.some(x => /^Your .* and kills it/.test(x))) throwKills++;
+              // (C Angband follows the hit with "The X dies.", "You have N Flasks of oil", "The Flask of oil breaks.")
+              const tm = ((state.messages ?? []) as any[]).slice(-6).map((x: any) => String(x));
+              const hit = tm.some(x => /^Your .* (hits|kills) /.test(x));
+              if (hit) throwHits++;
+              if (tm.some(x => /^Your .* and kills it/.test(x)) || (hit && tm.some(x => /^The .* (dies|is destroyed)\.$/.test(x)))) throwKills++;
             }
             if (state.turn !== turnBefore) {
               acted = true;
@@ -3641,7 +3707,9 @@ async function playGame() {
     const minHealingForDescent = state.depth >= 40 ? 15 : state.depth >= 30 ? 10 : state.depth >= 15 ? 6 : state.depth >= 12 ? 4 : state.depth >= 8 ? 2 : 1;
     // No potions and too poor to restock (restock needs 40 gold): on shallow levels, don't wait forever
     const healingOk = totalHealingQty >= minHealingForDescent
-      || (state.depth < 8 && p.gold < 40 && turnsOnLevel > 2 * tooLongThreshold);
+      || (state.depth < 8 && p.gold < 40 && turnsOnLevel > 2 * tooLongThreshold)
+      // Too poor to buy one (vanilla starts with ~150 gold and pays nothing for sales): shallow levels go on without
+      || (state.depth < 3 && p.gold < 20);
 
     // 逃走手段チェック (深層では必須)
     const phaseCount = inv.filter((item: any) => item.tval === TVAL.SCROLL && item.name.includes("Phase Door") && item.qty > 0)
@@ -4011,7 +4079,8 @@ async function playGame() {
   if (finalState.dead) {
     // 死因分析
     const lastMsgs = finalState.messages;
-    deathCause = lastMsgs.find((m: string) => m.includes("killed") || m.includes("die")) || "不明";
+    deathCause = fp.diedFrom ? `You have died. (${fp.diedFrom})` // C Angband: player->died_from
+      : lastMsgs.find((m: string) => m.includes("killed") || m.includes("die")) || "不明";
     addLesson(finalState.turn, finalState.depth, "死亡",
       `DL${finalState.depth}でCL${fp.level}が死亡。HP${fp.hp}/${fp.maxHp}。死因: ${deathCause}`);
   }

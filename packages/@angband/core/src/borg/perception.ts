@@ -313,9 +313,13 @@ export class Perception {
 
   private raceVisible(state: GameState, race: MonsterRace): boolean {
     for (const r of this.monsters.values()) if (r.visible && r.ridx === race.ridx) return true;
-    // The attacker may have just come into view this turn
+    // The attacker may have just come into view this turn (but an invisible one never does)
+    const p = state.player;
+    const seeInvis = p.state?.flags?.has(ObjectFlag.SEE_INVIS) || (p.timed[TimedEffect.SINVIS] ?? 0) > 0;
+    const blind = (p.timed[TimedEffect.BLIND] ?? 0) > 0;
+    if (blind || (race.flags.has(MonsterRaceFlag.INVISIBLE) && !seeInvis)) return false;
     return (state.chunk.monsters ?? []).some(m => m && m.hp > 0 && m.race.ridx === race.ridx
-      && Math.max(Math.abs(m.grid.x - state.player.grid.x), Math.abs(m.grid.y - state.player.grid.y)) <= 1
+      && Math.max(Math.abs(m.grid.x - p.grid.x), Math.abs(m.grid.y - p.grid.y)) <= 1
       && state.chunk.squares[m.grid.y]?.[m.grid.x]?.info.has(SquareFlag.SEEN));
   }
 

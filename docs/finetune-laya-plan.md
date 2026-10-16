@@ -982,7 +982,272 @@ shared code. collectD reports stall resets so this can be watched at scale.
     ≥ 0.9; throws ≤ 100.
 
 ### Run log
-(none yet)
+- **Launch:** `driver4.py --run runs/session4/2026-10-15 --prior runs/session3/2026-10-14
+  --hours 21 --slots 13`, started 2026-10-15 14:13 (PID 38878) from commit `359ee6e`.
+  - The global deadline is about 11:13 on 10-16. The stage budgets sum to 19 h.
+  - The smoke run before it passed every stage. Gating changed who acts: D acted on 29/29
+    fight/tactic decisions, D-gate on 4/19.
+  - Early bank starts die fast (e.g. a CL5 Paladin restored on DL8 meets Wormtongue). These
+    are genuine and shared by all arms.
+- **collectD (14:13–15:44):** 139 games (56 bank), 0 errors, 9,038 decisions, all format v3.
+  - By type: fight 5,538, tactic 1,752, recall 707, descend 515, explore 515, equip 11.
+  - Canaries passed. labelD began at 15:44.
+  - **Deaths are high: 111 of 139** (fresh 66/83, mean depth 5.5; bank 45/56, mean depth 11.3).
+    Session 3's model-led collectC lost 28 of 65.
+  - **Sméagol is the top killer (11).** Two causes, neither changed mid-session:
+    1. **Port fidelity bug:** TS `EAT_GOLD` is "simplified". The thief steals but never
+       teleports away as vanilla's does (`mon-blows.c`: the thief blinks after stealing).
+       Invisible and fast, Sméagol keeps attacking. `EAT_ITEM` is a stub too.
+    2. **Honest rules player gap:** it has no response to an unseen attacker. It walks into
+       him ("You hit the monster"), doesn't heal or Phase, and dies at full kit.
+  - **Message scrub leak:** `perception.ts` `raceVisible` treats an adjacent monster on a SEEN
+    square as visible even when it is INVISIBLE, so some messages still name Sméagol.
+  - Stall resets: 283, mostly in ten games (11–36 each). Most games have none.
+  - For session 5: fix 1 (or move to C, where it's right already), add unseen-attacker
+    handling to the rules player, fix the scrub, and investigate the remaining stall games.
+- **labelD contamination (17:07):** two C smoke tests collided with labelD's rollout servers
+  (ports 4300–4303) between 16:10–16:18 and 16:52–17:00. 175 of the first 400 labels were
+  quarantined (see "C Angband engine: spike", Incident); trainD uses the rest.
+- **labelD (15:44–00:44):** 2,823 clean labels (tactic 1,285, fight 1,538), plus 175
+  quarantined and 62 unlabelled. Run errors 0.0%.
+  - Split-half agreement: tactic 83.8% and fight 82.9%. Excluding all-tie records, it is 79.8%
+    and 81.2%.
+  - All-option ties: tactic 19.8% and fight 9.2%. Canaries passed.
+  - Every gate passes (≥ 300 labels, split-half ≥ 65%, all-tie ≤ 25%, errors ≤ 2%).
+  - Argmax spread is broad. Fight: throw 420, flee 364, melee 336, plus mixed ties. Tactic:
+    fight 403, flee+fight 227, heal 155, flee 106, plus ties.
+  - trainD began at 00:44.
+- **trainD (00:44–01:27):** 2,308 training items, 118 held out, 4 epochs. Canaries passed.
+  - Held-out accuracy 0.703 (majority 0.458, rules 0.492, base laya 0.458). Brier 0.137
+    (base laya 0.252).
+  - By type: fight 0.718 (n 78), tactic 0.675 (n 40).
+  - This is a different label era (honest view, utility v2), so it isn't directly comparable
+    with trainC's 0.570, and offline accuracy hasn't predicted play before.
+  - finalD began at 01:27 (7.5 h budget, so it ends about 08:57).
+- **finalD (01:27–06:34, done early):** 96/96 starts complete for all five arms. No errors, no
+  deadline cuts, canaries passed. The rules died in 73 of 96 starts, mean depth 6.45.
+
+  | Arm vs rules | W–L | Mean diff (CI80) | Deaths | Mean depth | Sweep verdict | Sign p |
+  |---|---|---|---|---|---|---|
+  | D | 33–43 | −0.40 (−0.96, 0.14) | 72 vs 73 | 6.02 vs 6.45 | worse | 0.90 |
+  | D-gate | 10–8 | +0.03 (−0.20, 0.27) | 72 vs 73 | 6.45 vs 6.45 | trade-off | 0.41 |
+  | rules+ (caution +1) | **46–32** | **+0.73 (0.19, 1.27)** | **67 vs 73** | **6.99 vs 6.45** | **better** | 0.07 |
+  | rules− (caution −1) | 33–27 | −0.08 (−0.54, 0.37) | 63 vs 73 | 6.05 vs 6.45 | trade-off | 0.26 |
+
+  - **D:**
+    - Fresh starts: 27–35, −0.50.
+    - Bank starts: 6–8, −0.08.
+    - Identical to rules in 3/96 games; consulted 1.0.
+    - The oil guard overrode the model 156 times, the potion guard once.
+    - Deaths per level reached: 0.125 vs the rules' 0.118.
+  - **D-gate:**
+    - It matched the rules in 75/96 games, because at confidence ≥ 0.3 the model rarely acted.
+    - Its "promote" flag (W > L, deaths ≤ rules + 2) is technically true, but it rests on 18
+      differing games with a +0.03 mean.
+  - **Frontier:** the three rules points (73, 6.45), (67, 6.99) and (63, 6.05) don't lie on a
+    trade-off curve. rules+ beats the rules on both axes, and rules− has fewer deaths but less
+    depth. The fitted line is nearly flat (+0.03 depth per death).
+    - D and D-gate are both below it: 6.02 and 6.45 against the line's 6.63.
+    - Given the spread, the frontier says little this session.
+  - **Pre-committed verdicts:**
+    - **No arm shows "clearly better play".** That needs p < 0.05, "better" across the sweep and
+      above the frontier.
+    - **D is worse than the rules.** The model trained on honest labels plays worse than the
+      honest rules player that labelled it, as W and C did in session 3.
+    - **D-gate is not a meaningful promotion.** It is the rules player 78% of the time, and its
+      edge is noise.
+    - **Gating becomes the default for session 5.** D-gate beat D head to head: 43–33, +0.43,
+      verdict "better", deaths 72 vs 72. That meets the rule ("better, or a trade-off with
+      fewer deaths").
+  - **Finding, not pre-committed:** under the honest view, raising the rules' caution by +1
+    helped on every measure. It had 6 fewer deaths and +0.54 mean depth, the sweep was "better"
+    at every penalty, and the CI80 excludes 0.
+    - In session 3, with the full view, the caution change was a wash.
+    - Honest play means less information, so more caution pays.
+    - p = 0.07, so this needs confirming before it becomes the baseline. Session 5 should
+      include rules+ as an arm or as the new baseline candidate.
+
+## C Angband engine: spike (2026-10-15)
+
+The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
+during session 4, at low priority.
+
+**Starting point.** `yuukiishikawa/angband` is a fork of angband/angband at 4.2.6 (the version
+the TS port targets). Its changes are front-end and borg only (`main-borg.c`, `main-http.c`,
+`ui-game.c` hooks); gameplay is unchanged. The original `main-http.c` was a proof of concept:
+- its command codes don't match our `CommandType`;
+- it has no throw, attack or fire, no seed, no snapshot and no shops;
+- it replied from the refresh hook, and hung on the first `/command` in testing.
+
+Its birth path was the borg's auto-birth, which isn't vanilla: forced Human Warrior and every
+modifier rune known.
+
+**What was built** (clone at `~/src/angband-c`, branch `jev-http`, uncommitted): a new
+`src/main-http.c`, plus two hooks in `ui-game.c`.
+- **Protocol:** the TS server's (`/health`, `/state`, `/command` with our TS `CommandType`
+  codes and arguments). Each reply goes out when the game next asks for a command, i.e. after
+  the previous one has fully run.
+- **Birth:** vanilla, through the birth commands, with `--seed`, `--race` and `--class`.
+- **State built from C's own player knowledge.** It uses the same schema as the TS player view,
+  so `tools/honest-view.ts` and the rules player work unchanged:
+  - the remembered map (`player->cave`);
+  - visible monsters with `look_mon_desc` health words;
+  - recall from lore (level, speed and kinds always, as vanilla recall shows them; blows and
+    spells only as observed);
+  - item names from `object_desc` with the player's knowledge, so unaware flavours show as
+    flavours;
+  - the known state (AC, to-hit and resistances as the player knows them);
+  - the hunger grade name, the message log, and monsters seen recently on the level.
+- **Branching:** `/fork {port, seed}` forks the whole game process; the child serves the same
+  game on a new port, reseeded. `/quit` exits.
+- **Death and lore:** after death it answers the last command and keeps serving `/state`.
+  Nothing is ever saved, so lore starts empty with a fresh user directory.
+
+**Measurements** (same machine and load, with session 4 running):
+
+| | TS server | C server |
+|---|---|---|
+| Walk round trip in town (300 commands) | 12.3 ms (omniscient), 13.7 ms (player view) | 1.7 ms |
+| State reply | 100 KB / 91 KB | 57 KB |
+| Honest rules player, 3,000 actions | 94 s wall (server 73 s CPU, player 24 s) | 25 s wall |
+| Branching a game for a rollout | snapshot restore (session-3 rollouts: 0.9 s/run wall at 13 workers ≈ 12 s worker time per run, including a fresh tsx player per run) | 2 ms per `fork` |
+
+In TS the game server, not the rules player, is the bottleneck: about 24 ms of server CPU per
+action in the dungeon. C cuts whole-game time by about 3.7×. Rollouts should gain at least
+that, plus the restore cost.
+
+**Fidelity differences found:**
+- **Starting gold:** vanilla Human Warrior 149, TS port 330 for a Warrior. That roughly doubles
+  early potion purchases in TS.
+- **Monster recall:** vanilla shows level, speed and racial kind on first sight
+  (`mon-lore.c` `lore_append_movement`). The TS perception layer hides level until a kill and
+  kinds until 10 sightings; it should follow vanilla.
+- **Light radius:** fixed earlier today in TS (`cave/view.ts`).
+
+**Still missing before C can replace TS:**
+1. **`/buy` and `/sell`.** The rules player won't leave town without a healing potion; it
+   stayed in town for 3,000 actions in the test.
+2. **Rollouts by fork.** The orchestrator (`tools/rollout/run.ts`) would branch with `/fork`
+   instead of `/snapshot` + `/restore`, ideally with one persistent rules-player process
+   rather than one tsx spawn per run.
+3. **Decision snapshots and the savepoint bank** as C savefiles, with save at a decision and
+   load at start.
+4. **Fixes in the C front end:** quiver handling for fire and throw, and a check of every
+   command against the rules player's use (spells and targeting).
+5. **An era reset:** new baselines, as with honest play.
+
+**Recommendation:** worth doing at a session boundary. It brings vanilla fidelity, the player's
+knowledge model for free (including items, the remaining honest-view gap) and about 3–4× more
+games and labels per hour. Estimated 2–3 days for items 1–4, then a shake-down like session
+4's.
+
+**Progress (2026-10-15 afternoon, user: "Continue the C work").** C front end commits
+`4e2d838b9`, `c1fd47073` and `47ab01e90` (local, branch `jev-http`). In angband-jev:
+`driver.py` `OVN_ENGINE=c`, `run.ts` C rollouts, an engine-aware bank, and rules-player fixes.
+1. **Shops:** `/buy` and `/sell` work as remote shopping, plus a `stores` listing in town.
+   Vanilla 4.2.6 defaults to `birth_no_selling`, so a sale pays 0 gold; the TS port pays.
+   Names: `name` is the kind name once the player knows the kind (as the TS server sends it),
+   and `desc` is the full description.
+2. **Snapshots:** `GET /snapshot` returns a base64 C savefile plus the character's lore. A
+   server started with `--load` and `--seed` continues it, about 80 ms to `/health`. A
+   snapshot loaded into a fresh server matched the original state exactly.
+3. **Rollouts:** C snapshots are detected by format. Each run starts a fresh C process from the
+   savefile on the worker's port; no fork is needed at that start-up cost. A test labelled
+   6/6 records with 0 errors, at 5.1 s of worker time per run, against about 11.7 s for TS
+   in session 3. Most of the remainder is starting a tsx rules player per run.
+4. **Driver:**
+   - `start_server` starts C games (fresh user directory, `--race` and `--class` unless
+     random, `--load` for bank savepoints).
+   - `bank_files` only offers savepoints of the current engine.
+   - driver4's labeller doesn't pre-start servers in C mode.
+5. **Bug found and fixed: the headless birth crashed for spellcasting classes.**
+   `character_generated` wasn't cleared, so `calc_spells` read an unallocated array. It
+   looked `-O3`-specific because it depended on memory contents. All 9 classes now pass
+   (36/36 births). The binary is the RelWithDebInfo (`-O2 -g`) build in `build-rd`, which
+   includes a SIGSEGV backtrace handler.
+6. **Rules player on vanilla:**
+   - it keeps Flasks of oil (it used to sell them);
+   - DL0–2 no longer require a healing potion when the character can't afford one (< 20 gold);
+   - the throw-hit counter handles C's message order;
+   - the death cause comes from C's `died_from`.
+
+   A 20,000-action game on C took 164 s, reached DL3, survived, and had no stalls.
+7. **C pipeline smoke** (OVN_ENGINE=c driver4 --smoke):
+   - collect: 58 games, 0 errors, 1,268 decisions;
+   - final: 0 errors.
+   - labelling: all forced decisions fire once the port collision below was removed (3/3
+     records labelled, 36/36 runs fired).
+8. **Vanilla starting gold by class:** Warrior 146, Mage 331, Druid 385, Priest 91,
+   Necromancer 360–363, Paladin 301, Rogue 201, Ranger 122–132, Blackguard 145. TS gives
+   Warrior 330, Priest 190, Rogue 410, Blackguard 70.
+
+**Incident: port collision with the running session 4 (my error).** The two C smoke runs
+labelled on ports 4300–4303, which session 4's labelD servers use (16:10–16:18 and
+16:52–17:00):
+- the C games failed to bind;
+- `run.ts` accepted the TS server that answered `/health`;
+- so smoke rules players sent commands into session 4's rollout games.
+
+The affected session-4 records can't be identified exactly (the servers log no timestamps). The
+label lines that completed in or just after those windows, estimated from the 5.6/min rate
+with margins, were moved to `labelD/labels.quarantined-port-collision.jsonl`: 175 of 400 at
+17:07. The original is in `labels.before-quarantine.jsonl`, and trainD trains on the rest.
+
+Fixes:
+- `run.ts` C rollouts only accept a server whose `/health` says `engine: "c"` from the
+  process they just started;
+- `OVN_PORT_OFFSET` shifts every game, labeller and laya port (driver, evaluate.py), so test
+  runs can't collide with a session.
+
+**Progress (2026-10-16 night, during session 4's trainD and finalD).** Test runs use ports 5300+.
+1. **Rollout cost.** The rules player isn't the bottleneck, so a persistent player process isn't
+   worth the refactor.
+   - Startup is 0.3 s on tsx and 0.09 s pre-bundled with esbuild.
+   - A 300-action rollout on an idle machine took 1.0 s of wall time, about 3 ms per action.
+   - The 3.1 s per 150-action run measured earlier was mostly contention with session 4's 13
+     slots.
+   - Bundling (`PLAYER_CMD="node <bundle>.mjs"`) would save about 0.2 s per run. It is optional.
+2. **The C game is frozen per run.** `driver.freeze_c` copies the binary and `lib/` (34 MB) into
+   `RUN/src/c-game`, records the angband-c HEAD and diff, and points `C_BIN` at the copy.
+   driver4 calls it at start in C mode, so a rebuild during the night can't change a session.
+3. **Unaware items.**
+   - C now names an unaware flavour in the singular ("Blue Potion"), so its key doesn't
+     change with quantity.
+   - The rollout cost table values unaware flavours at a generic prior: the median cost of
+     that type's kinds at level ≤ 15 (potion 75, scroll 57.5, mushroom 80, food 3).
+   - Limitation: a flavour identified during a rollout renames its stack, so the whole stack
+     counts as used.
+4. **Session-5 fixes from collectD:**
+   - **The rules player now handles unseen attackers.** A hit is: HP fell since the last
+     step, no visible monster is adjacent, and a recent message reads "It … you" or "hit by
+     something". It keeps a 20-action window of hits.
+     A bump ("You hit the monster" on TS, "You hit it." on C) with an HP drop also counts.
+     - Below 50% HP it heals, by spell or by a strong potion if HP ≥ 25%.
+     - On stairs after 3 hits, it takes them.
+     - It reads Teleport after 5 hits or below 25% HP.
+     - It reads Phase Door after 3 hits or below 50% HP, at most once per 8 actions unless HP is
+       below 35%. Phasing away from a fast invisible thief every turn was futile.
+     - With no escape item, or with Phase Door on cooldown, after 2 hits it walks to the nearest
+       known stairs within 80 steps.
+     - It never rests while the threat is active.
+   - **Replays:** all 11 fresh-start collectD games that Sméagol killed were rerun on TS with
+     the same seeds and a 15-minute cap.
+
+     | Version | Sméagol deaths | Deepest level |
+     |---|---|---|
+     | Original collectD games | 11/11 | DL2–4 |
+     | First rule (no bump signal, no Phase cooldown, no stairs) | 3/11 | — |
+     | Final rule | 0/11 | mean DL6.2 (DL4–13) |
+
+     - With the final rule, 9 of the 11 still died, of ordinary early causes (nagas, kobold
+       chiefs, Wormtongue).
+     - Once a game diverges, its trajectory changes, so this is a sanity check, not a
+       measurement.
+   - **The scrub leak is fixed.** `perception.raceVisible`'s "just came into view" fallback now
+     excludes INVISIBLE races (unless See Invisible) and blindness.
+   - **TS thief behaviour stays as it is.** `EAT_GOLD` (no blink), `EAT_ITEM`, `DRAIN_CHARGES` and
+     `EAT_LIGHT` are all "simplified" in `monster/attack.ts`. This is one more reason to move to
+     C, where they're exact.
 
 ## Evaluating against hosted Jev (TypeSafe), plan
 

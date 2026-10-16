@@ -20,10 +20,16 @@ import evaluate  # noqa: E402
 GAME_IMAGE, LAYA_IMAGE = "angband-jev-game", "angband-jev-laya"
 CLASSES = ["Warrior", "Rogue", "Ranger", "Paladin", "Blackguard"]
 CPU_SHARES = "256"           # low weight: the user's containers win when busy
-LAYA_PORT = 8010
+LAYA_PORT = 8010 + int(os.environ.get("OVN_PORT_OFFSET", "0"))  # see PORT_OFFSET
 STOP = threading.Event()
 NATIVE = os.environ.get("OVN_NATIVE") == "1"   # set by --native; inherited by train.py/evaluate.py
 PROCS, PROCS_LOCK = {}, threading.Lock()       # native long-lived servers by name
+# Game engine: "ts" (the TS port's ai-server.ts) or "c" (C Angband 4.2.6 with main-http.c, native only).
+# C games start from a fresh user directory (empty monster lore) and load bank savepoints with --load.
+ENGINE = os.environ.get("OVN_ENGINE", "ts")
+# Added to every game/labeller port (4100+, 4300+), so a test run can't collide with a running session
+PORT_OFFSET = int(os.environ.get("OVN_PORT_OFFSET", "0"))
+C_BIN = os.environ.get("ANGBAND_C", "/home/mph/src/angband-c/build-rd/game/angband")
 THROTTLED_SLOTS = 9                            # parallel games while RUN/THROTTLE exists
 
 # Stage budgets in hours (full run). Smoke mode scales them down.
@@ -117,9 +123,40 @@ def stop_server(name):
         docker("rm", "-f", name)
 
 
-def start_server(run, name, port, env, seed):
+def c_savepoint_files(udir, path):
+    """Unpack a C bank savepoint (gzip JSON {turn, depth, save: {format c-savefile-1, data, lore}}) into a user dir."""
+    import base64
+    snap = json.load(gzip.open(path)) if path.endswith(".gz") else json.load(open(path))
+    save = snap.get("save", snap)
+    if save.get("format") != "c-savefile-1": raise ValueError(f"not a C savepoint: {path}")
+    sav = os.path.join(udir, "restore.sav")
+    with open(sav, "wb") as f: f.write(base64.b64decode(save["data"]))
+    with open(os.path.join(udir, "lore.txt"), "wb") as f: f.write(base64.b64decode(save.get("lore") or ""))
+    return sav
+
+
+def start_c_server(run, name, port, env, seed, restore=None):
+    """C Angband on 127.0.0.1:port: a new character (seeded; RACE/CLASS from env unless "random"), or a bank
+    savepoint continued with a fresh seed."""
+    udir = run.d("procs", name + "-user")
+    shutil.rmtree(udir, ignore_errors=True); os.makedirs(udir)
+    args = [C_BIN, "-mhttp", f"-duser={udir}"] + ([] if restore else ["-n"]) + ["--", "--port", str(port), "--seed", str(seed)]
+    if restore: args += ["--load", c_savepoint_files(udir, restore)]
+    else:
+        for k, flag in (("RACE", "--race"), ("CLASS", "--class")):
+            if env.get(k) and env[k] != "random": args += [flag, env[k]]
+    log = open(run.d("procs", name + ".log"), "w")
+    p = subprocess.Popen(["nice", "-n", "10", *args], cwd=os.path.dirname(C_BIN), stdout=log, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, start_new_session=True)
+    log.close()
+    with PROCS_LOCK: PROCS[name] = p
+    return wait_http(f"http://127.0.0.1:{port}/health")
+
+
+def start_server(run, name, port, env, seed, restore=None):
     """A game server answering on 127.0.0.1:port. True once it is healthy."""
     stop_server(name)
+    if ENGINE == "c": return start_c_server(run, name, port, env, seed, restore)
     script = ["node_modules/.bin/tsx", "packages/@angband/core/src/borg/ai-server.ts"]
     if NATIVE:
         log = open(run.d("procs", name + ".log"), "w")
@@ -204,6 +241,24 @@ def app_dir(run):
     return app
 
 
+def freeze_c(run):
+    """C engine: copy the game (binary + lib) into the run and point C_BIN at the copy, so a rebuild during the
+    night can't change the experiment. Records the angband-c commit and working-tree diff. Idempotent on resume."""
+    global C_BIN
+    dst = os.path.join(run.d("src"), "c-game")
+    if not os.path.exists(os.path.join(dst, "DONE")):
+        shutil.rmtree(dst, ignore_errors=True)
+        shutil.copytree(os.path.dirname(C_BIN), dst, ignore=shutil.ignore_patterns("tests", "run-tests"))
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(C_BIN))))  # <repo>/<build>/game/angband
+        rev = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        diff = subprocess.run(["git", "-C", repo, "diff"], capture_output=True, text=True).stdout
+        open(os.path.join(dst, "GIT_HEAD"), "w").write(f"{rev}\n{os.path.abspath(C_BIN)}\n")
+        open(os.path.join(dst, "working-tree.diff"), "w").write(diff)
+        open(os.path.join(dst, "DONE"), "w").write(now())
+    C_BIN = os.path.join(dst, os.path.basename(C_BIN))
+    return C_BIN
+
+
 def mounts(run):
     src = freeze_source(run)
     return ["-v", f"{src}/core-src:/app/packages/@angband/core/src:ro", "-v", f"{src}/tools:/app/tools:ro"]
@@ -227,14 +282,14 @@ def play_game(run, tag, slot, seed, cls, env, out_dir, wall_cap, max_actions, po
     """One game on its own server. Returns an outcome dict.
     env values "/data" and "/bank" name the game's output folder and the savepoint bank.
     restore: a savepoint file to continue from (reseeded with `seed`) instead of a new character."""
-    port = port_base + slot
+    port = port_base + slot + PORT_OFFSET
     srv, ply = f"ovn-{tag}-s{slot}", f"ovn-{tag}-p{slot}"
     out_dir = os.path.abspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     senv = {"VANILLA": "1", "STAT_FLOOR": "0", "RACE": "random", "CLASS": cls}
-    if not start_server(run, srv, port, senv, seed):
-        stop_server(srv); return {"seed": seed, "class": cls, "error": "server failed to start"}
-    if restore:
+    if not start_server(run, srv, port, senv, seed, restore if ENGINE == "c" else None):
+        stop_server(srv); return {"seed": seed, "class": cls, "error": "server failed to start", "restore": restore}
+    if restore and ENGINE != "c":
         try: restore_savepoint(port, restore, seed)
         except Exception as e:
             stop_server(srv); return {"seed": seed, "class": cls, "error": f"restore failed: {e}", "restore": restore}
