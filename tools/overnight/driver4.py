@@ -246,9 +246,10 @@ def main():
     run = D.Run(a.run, a.hours, a.smoke, a.slots)
     run.prior = os.path.abspath(a.prior)
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
+    app = D.app_dir(run)  # first: freezing the source recreates RUN/src
     cbin = D.freeze_c(run) if D.ENGINE == "c" else None
     run.log(f"driver4 start (smoke={a.smoke}, slots={a.slots}, engine={D.ENGINE}, c_bin={cbin}); prior={run.prior}; "
-            f"app={D.app_dir(run)}")
+            f"app={app}")
     threading.Thread(target=D2.watchdog, args=(run,), daemon=True).start()
     try:
         for name, kind, hours in STAGES:

@@ -1067,6 +1067,49 @@ shared code. collectD reports stall resets so this can be watched at scale.
     - p = 0.07, so this needs confirming before it becomes the baseline. Session 5 should
       include rules+ as an arm or as the new baseline candidate.
 
+## Session 5: C engine, 8 hours (2026-10-16)
+
+The user asked for an 8-hour session after session 4: "Commit, and start the next phase with an
+8 hour window". Driver: `tools/overnight/driver5.py`, from commit `3c3584c` plus driver5.
+- **Engine:** C Angband 4.2.6 (`main-http`, angband-c `jev-http`), frozen into `RUN/src/c-game`.
+- **View:** honest, as in session 4.
+- **Rules player:** includes the unseen-attacker handling and the scrub fix.
+- **Bank:** TS savepoints can't load in C, so collectE starts fresh, and the run's own C bank
+  (DL ≥ 5) feeds finalE's bank starts.
+
+### Questions
+1. Does session 4's rules+ finding (caution +1 better under the honest view) hold on C?
+2. Does a gated model trained on more data (labelD + labelE) beat the rules, and also the best
+   rules setting?
+
+### Stages (8 h, 7.5 h budgeted, 13 slots)
+| Stage | Budget | What |
+|---|---|---|
+| collectE | 0.75 h | honest rules on C, format v3; bank starts once the run's bank has DL ≥ 5 savepoints |
+| labelE | 3.0 h | C rollouts, utility v2, danger-first, K = 8, honest rules continuation |
+| trainE | 0.75 h | laya from the base model on labelD (2,823 clean TS labels) + labelE, 4 epochs; held-out accuracy reported overall and on the labelE part |
+| finalE | 3.0 h | 3 arms × 192 starts (144 fresh, 48 bank): rules, rules+ (caution +1), E-gate (trainE, oil/potion guards, confidence ≥ 0.3) |
+
+### Pre-committed decision rules
+- **Score and promotion** are as before: depth − 3 per death; promote if W > L and deaths ≤
+  rules + 2. They're reported for fresh, bank and all starts, with the death-penalty sweep
+  and its verdict.
+- **rules+ becomes the rules baseline** if, against rules (all starts), W > L, the sweep verdict
+  is "better", and sign p < 0.05 at −3 per death. If it is "better" but p ≥ 0.05, it stays a
+  candidate. Two sessions in the same direction count as evidence for the next plan, not as a
+  promotion.
+- **E-gate is promoted** only if it passes the promotion test against rules **and** beats rules+
+  head to head (W > L). "Clearly better play" also needs p < 0.05 against both and a "better"
+  sweep verdict against both.
+- **No frontier line this session.** Two rules points can't support one.
+- **Canaries:**
+  - collectE: errors ≤ 10%, every decision format v3, ≥ 500 fight/tactic decisions.
+  - labelE: ≥ 300 labels, split-half ≥ 65%, all-tie ≤ 25%, run errors ≤ 2%.
+  - trainE: accuracy > majority.
+  - finalE: ≥ 75% of starts complete for all arms, consulted ≥ 0.9, throws ≤ 100.
+
+### Run log
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
