@@ -39,7 +39,8 @@ const FEAT = {
   MAGMA_K: 19, QUARTZ_K: 20, GRANITE: 21, PERM: 22,
   LAVA: 23, PASS_RUBBLE: 24,
 };
-const PASSABLE_FEATS = new Set([FEAT.FLOOR, FEAT.OPEN_DOOR, FEAT.BROKEN_DOOR, FEAT.UP_STAIR, FEAT.DOWN_STAIR, FEAT.LAVA, FEAT.PASS_RUBBLE]);
+// Lava is left out: it burns, and vanilla asks before a step that costs over a third of HP (headless: no step, no time)
+const PASSABLE_FEATS = new Set([FEAT.FLOOR, FEAT.OPEN_DOOR, FEAT.BROKEN_DOOR, FEAT.UP_STAIR, FEAT.DOWN_STAIR, FEAT.PASS_RUBBLE]);
 // 掘削具 (Shovel/Pick) を持っているか。VANILLA では初期所持なし → 持たない時は花崗岩/マグマ/石英を掘らない
 let canDigHard = true;
 const SOFT_DIG_FEATS = new Set([FEAT.CLOSED_DOOR, FEAT.SECRET, FEAT.RUBBLE]);
@@ -525,7 +526,19 @@ let cmdDebug = false;
 const CMD_DEBUG_AFTER = Number(process.env.CMD_DEBUG_AFTER ?? "") || Infinity; // debugging: log every command after this many commands
 let commandsSent = 0;
 let lastKnownState: any = null; // 直前のstate (confused検出用)
+// 時間の進まないコマンド (C: 暗闇で読む/唱える、使えない呪文 など) のループ防止
+let sendSeq = 0, noTimeStreak = 0;
+const noTimeUntil: Record<number, number> = {};
+function readBlocked(): boolean { return (noTimeUntil[CMD.READ] ?? 0) > sendSeq; }
+function castBlocked(): boolean { return (noTimeUntil[CMD.CAST] ?? 0) > sendSeq; }
 async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
+  sendSeq++;
+  if (noTimeStreak >= 30) {
+    console.log(`  [CMD-GUARD] ${noTimeStreak} commands passed no time: holding a turn instead of ${JSON.stringify(cmd)}`);
+    cmd = { type: CMD.SEARCH };
+    noTimeStreak = 0;
+  }
+  const turnBefore = lastKnownState?.turn;
   // 混乱中のREAD/CASTは必ず失敗する → RESTに差し替えて無限ループ防止
   if (lastKnownState?.player?.timed?.confused > 0 && (cmd.type === CMD.READ || cmd.type === CMD.CAST)) {
     console.log(`  [CMD-GUARD] confused中のREAD/CASTをRESTに差し替え`);
@@ -551,6 +564,10 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
       return s;
     }
     lastKnownState = adaptPlayerView(data);
+    if (typeof turnBefore === "number" && lastKnownState?.turn === turnBefore) {
+      noTimeStreak++;
+      if (cmd.type === CMD.READ || cmd.type === CMD.CAST) noTimeUntil[cmd.type as number] = sendSeq + 20;
+    } else noTimeStreak = 0;
     return lastKnownState;
   }
   // All retries failed — return refreshed state, don't loop
@@ -1074,8 +1091,20 @@ function gameIdOf(st: any): string {
 // 序盤の買い物: 予算内で 油 > Phase > 掘削具(Shovel) > CLW の優先順 (全店を見て最安を買う)。深層用リストは buySupplies
 // 4.2.6 の always 品 (油/Phase/CLW/Shovel/Pick) は常に在庫あり。まとめ買い (quantity) 対応。
 // Word of Recall は買わない (初期所持1本を温存)。Pick(300G)は高価なので Shovel(10G)を買う。持ち物に入れるだけで装備しない
-async function buyEarlyKit(): Promise<void> {
+// 予備の松明 (燃料の多い順)。fuel は C だけが返す
+function spareTorchSlot(inv: any[]): number | null {
+  const t = inv.filter((i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? "") && i.qty > 0 && (i.fuel ?? 0) > 0)
+    .sort((a: any, b: any) => (b.fuel ?? 0) - (a.fuel ?? 0))[0];
+  return t ? t.slot : null;
+}
+
+// 食料を最優先 (vanilla は初期資金が少なく、食料が後回しだと餓死する)
+const EARLY_KIT_STEPS: [string, number][] = [["food", 3], ["torch", 2], ["oil", 5], ["phase", 2], ["digger", 1], ["oil", 10], ["phase", 5],
+  ["clw", 3], ["clw", 5], ["csw", 2], ["food", 6]];
+async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise<void> {
   const kinds: Record<string, (i: any) => boolean> = {
+    food: i => i.tval === TVAL.FOOD && (i.name ?? "").includes("Ration"),
+    torch: i => i.tval === TVAL.LIGHT && (i.name ?? "").includes("Wooden Torch"),
     oil: i => i.tval === TVAL.FLASK && (i.name ?? "").includes("Flask"),
     phase: i => i.tval === TVAL.SCROLL && (i.name ?? "").includes("Phase Door"),
     digger: i => i.tval === TVAL.DIGGING && (i.name ?? "").includes("Shovel"),
@@ -1086,8 +1115,7 @@ async function buyEarlyKit(): Promise<void> {
     kind === "digger"
       ? inv.filter(i => i.tval === TVAL.DIGGING && i.qty > 0).reduce((a, i) => a + i.qty, 0)
       : inv.filter(i => kinds[kind]!(i) && i.qty > 0).reduce((a, i) => a + i.qty, 0);
-  const steps: [string, number][] = [["oil", 5], ["phase", 2], ["digger", 1], ["oil", 10], ["phase", 5], ["clw", 3], ["clw", 5], ["csw", 2]];
-  const bought: Record<string, number> = { oil: 0, phase: 0, digger: 0, clw: 0, csw: 0 };
+  const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0 };
   let spent = 0, n = 0;
   for (const [kind, target] of steps) {
     const test = kinds[kind]!;
@@ -1117,8 +1145,8 @@ async function buyEarlyKit(): Promise<void> {
     }
   }
   const after = await getState();
-  console.log(`  [序盤購入] oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw} csw+${bought.csw} (${spent}G使用, 残金${after.player.gold}G)`);
-  addLesson(0, 0, "序盤購入", `oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw}。残金${after.player.gold}G`);
+  console.log(`  [序盤購入] food+${bought.food} torch+${bought.torch} oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw} csw+${bought.csw} (${spent}G使用, 残金${after.player.gold}G)`);
+  addLesson(0, 0, "序盤購入", `food+${bought.food} oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw}。残金${after.player.gold}G`);
 }
 
 const MAX_ACTIONS = Number(process.env.MAX_ACTIONS ?? "100000"); // テスト用の早期終了
@@ -1275,6 +1303,7 @@ function findTieredHealingPotion(inventory: any[], hpPct: number): number | null
  * Teleport Level scroll — 緊急フロア脱出 (召喚群れなど)
  */
 function findTeleportLevelScroll(inventory: any[]): number | null {
+  if (readBlocked()) return null; // 読めない (暗闇/盲目): 読もうとし続けない
   const scroll = inventory.find((item: any) =>
     item.tval === TVAL.SCROLL && item.name.includes("Teleport Level") && item.qty > 0
   );
@@ -1282,6 +1311,7 @@ function findTeleportLevelScroll(inventory: any[]): number | null {
 }
 
 function findPhaseScroll(inventory: any[]): number | null {
+  if (readBlocked()) return null; // 読めない (暗闇/盲目): 読もうとし続けない
   const scroll = inventory.find((item: any) =>
     item.tval === TVAL.SCROLL && item.name.includes("Phase Door") && item.qty > 0
   );
@@ -1344,6 +1374,7 @@ function nearestStair(tiles: any[], px: number, py: number): { dir: number; len:
 }
 
 function findTeleportScroll(inventory: any[]): number | null {
+  if (readBlocked()) return null; // 読めない (暗闇/盲目): 読もうとし続けない
   const scroll = inventory.find((item: any) =>
     item.tval === TVAL.SCROLL && item.name.includes("Teleportation") && item.qty > 0
   );
@@ -1358,6 +1389,7 @@ function findSpeedPotion(inventory: any[]): number | null {
 }
 
 function findRecallScroll(inventory: any[]): number | null {
+  if (readBlocked()) return null; // 読めない (暗闇/盲目): 読もうとし続けない
   const scroll = inventory.find((item: any) =>
     item.tval === TVAL.SCROLL && item.name.includes("Word of Recall") && item.qty > 0
   );
@@ -1717,6 +1749,8 @@ let unseenHits: number[] = [];
 let prevHpUnseen = -1;
 let lastUnseenPhase = -100;
 let studyBlockedUntil = 0;
+let lightBlockedUntil = 0;
+let lastFoodRecallAt = -1000;
 // "It bites you." / "You are hit by something!" / bumping into it: "You hit the monster" (TS), "You hit it." (C)
 const UNSEEN_ATTACK_RX = /^(It|Something) [a-z' ]*\byou\b|hit by something|^You (hit|miss) (the monster|it)\b/;
 let retreatStartTurn = 0;       // 退避開始ターン
@@ -1746,6 +1780,8 @@ function shouldKeepItem(item: any, equipment: any[]): boolean {
   if ([30, 31, 32, 33, 34].includes(item.tval)) return true;
   // 掘削具は保持 (stuck 脱出用)
   if (item.tval === TVAL.DIGGING) return true;
+  // 予備の松明は保持 (vanilla の松明は燃え尽きる。燃え尽きたものは売る)
+  if (item.tval === TVAL.LIGHT && /Torch/i.test(item.name ?? "") && (item.fuel === undefined || item.fuel > 0)) return true;
   // 装備品: 現装備より良いなら保持
   if (EQUIPPABLE_TVALS.has(item.tval)) {
     const currentEquip = equipment.find((e: any) => sameEquipCategory(e.tval, item.tval));
@@ -1806,7 +1842,7 @@ async function sellJunk(state: any) {
 async function buySupplies(state: any) {
   const p = state.player;
   const gold = p.gold;
-  if (gold < 50) return;
+  if (gold < 5) return;
 
   let totalBought = 0;
   let currentGold = gold;
@@ -1815,11 +1851,13 @@ async function buySupplies(state: any) {
   // Shopping list: name match, valid tvals (to avoid buying staves/wands), store IDs
   // tval 25=scroll, 26=potion, 28=food
   const shoppingList = [
+    { name: "Ration" as string | null, tvals: [28], target: 6, stores: [0] }, // food first: starvation
+    { name: "Wooden Torch", tvals: [TVAL.LIGHT], target: 3, stores: [0] }, // vanilla torches burn out
     { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [4, 5] },
     { name: "Phase Door", tvals: [25], target: 20, stores: [4, 5] },
     { name: "Teleportation", tvals: [25], target: 12, stores: [4, 5, 6] },
     { name: "Word of Recall", tvals: [25], target: 5, stores: [4, 5] },
-    { name: null as string | null, tvals: [28], target: 10, stores: [0] }, // any food (tval=28)
+    { name: null as string | null, tvals: [28], target: 10, stores: [0] }, // food top-up
   ];
 
   for (const item of shoppingList) {
@@ -2131,6 +2169,8 @@ async function playGame() {
         console.log(`  [町到着] Gold:${state.player.gold} Cure:${cureQty} Phase:${phaseQty}`);
         await sellJunk(state); // 先に不要品を売却してゴールド確保
         state = await getState();
+        await buyEarlyKit([["food", 5], ["torch", 3]]); // 装備で資金を使い切る前に食料と光源
+        state = await getState();
         await buyEquipment(state); // 装備品を先に購入（ゴールド消費前）
         state = await getState();
         await buySupplies(state);
@@ -2222,6 +2262,29 @@ async function playGame() {
       }
     }
 
+    // === 飢餓: 停滞脱出より先 (停滞中に餓死していた)。食べる、無ければ町へ (WoR、無ければ上り階段の補給帰還) ===
+    if (p.timed.food <= 1500) {
+      const f = findFood(inv);
+      if (f !== null) {
+        addLesson(state.turn, state.depth, "食事", `空腹。食事`);
+        state = await sendCommand({ type: CMD.EAT, itemIndex: f });
+        continue;
+      }
+      if (!ROLLOUT && state.depth >= 1) {
+        const r = findRecallScroll(inv);
+        if (r !== null && actionCount - lastFoodRecallAt > 300) { // 300 行動空ける: 再読で取り消さない
+          lastFoodRecallAt = actionCount;
+          addLesson(state.turn, state.depth, "食料切れ", `食料なし (空腹)。WoRで町へ`);
+          state = await sendCommand({ type: CMD.READ, itemIndex: r });
+          continue;
+        }
+        if (r === null && !restockTrip) {
+          restockTrip = true;
+          addLesson(state.turn, state.depth, "食料切れ", `食料なし (空腹)、WoRなし。上り階段で町へ`);
+        }
+      }
+    }
+
     // === 最最優先: 極端な停滞 → 強制脱出 ===
     if (noProgressCount >= 500) {
       // 500回停滞 → visited クリアで探索リセット (同じパターンを打破)
@@ -2249,6 +2312,12 @@ async function playGame() {
         state = await sendCommand({ type: CMD.GO_UP });
         visited.clear(); lastVisitedSize = 0; noProgressCount = 0; stuckCount = 0;
         killsThisLevel = 0; levelEntryTurn = state.turn; explorationRateWindow = []; levelEntryDetected = false; unreachableItems.clear();
+        continue;
+      }
+      // 既知の階段へ歩ける → 最短経路で向かう (着いたら上の強制降下/上昇)。直線に掘るより確実
+      const stairPath = nearestStair(tiles, px, py);
+      if (stairPath && stairPath.len <= 150) {
+        state = await sendCommand({ type: CMD.WALK, direction: stairPath.dir });
         continue;
       }
       // 階段上にいない → 壁を掘って脱出 (方向を少しずつ変える)
@@ -2381,7 +2450,7 @@ async function playGame() {
     const spells: SpellInfo[] = p.spells ?? [];
     const sp = p.sp ?? 0;
     const maxSp = p.maxSp ?? 0;
-    const canCastSpells = spells.length > 0 && sp > 0;
+    const canCastSpells = spells.length > 0 && sp > 0 && !castBlocked();
     const newSpellSlots = p.newSpells ?? 0;
 
     // === 見えない攻撃者: 回復/離脱。脅威が続く間は休まない (下の REST は unseenThreat で止める) ===
@@ -2571,6 +2640,20 @@ async function playGame() {
       }
     }
 
+    // === 優先度1.2: 光源 (vanilla の松明は燃え尽きる: 暗闇では読めず唱えられない) ===
+    {
+      const cur = (p.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+      const low = cur ? (typeof cur.fuel === "number" && /Torch/i.test(cur.name ?? "") && cur.fuel < 300) : true;
+      const spare = low && actionCount >= lightBlockedUntil ? spareTorchSlot(inv) : null;
+      if (spare !== null) {
+        addLesson(state.turn, state.depth, "光源", `松明の残り${cur?.fuel ?? 0}ターン。予備の松明に替える`);
+        state = await sendCommand({ type: CMD.EQUIP, itemIndex: spare });
+        const after = (state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+        if ((after?.fuel ?? 0) < 300) lightBlockedUntil = actionCount + 200; // 替えられなかった: ループ防止
+        continue;
+      }
+    }
+
     // === 優先度1.5: 検知スペル (新フロアで1回使用) ===
     if (!levelEntryDetected && canCastSpells && actionCount > 1) {
       const detectSpell = findCastableSpell(spells, DETECT_SPELLS, p.level, sp);
@@ -2616,13 +2699,17 @@ async function playGame() {
     }
 
     // === 優先度1.9: 浅層の補給帰還 (回復薬切れ or Phase/油切れ → 上り階段で町へ) ===
-    if (RULEFIX.has("restock") && !ROLLOUT && state.depth >= 1 && state.depth <= 4 && p.level < 15) {
+    if (RULEFIX.has("restock") && !ROLLOUT && state.depth >= 1 && ((state.depth <= 4 && p.level < 15) || restockTrip)) {
       const cureN = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
       const escN = inv.filter((i: any) => (i.name?.includes("Phase Door") || /Flask~? of oil/i.test(i.name ?? "")) && i.qty > 0)
         .reduce((s: number, i: any) => s + i.qty, 0);
-      if (!restockTrip && (cureN === 0 || escN === 0) && p.gold >= 40) {
+      const foodN = inv.filter((i: any) => i.tval === TVAL.FOOD && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
+      const lightNow = (p.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+      const lightLow = typeof lightNow?.fuel === "number" && /Torch/i.test(lightNow.name ?? "") && lightNow.fuel < 1500
+        && spareTorchSlot(inv) === null;
+      if (!restockTrip && (((cureN === 0 || escN === 0) && p.gold >= 40) || ((foodN === 0 || lightLow) && p.gold >= 5))) {
         restockTrip = true;
-        addLesson(state.turn, state.depth, "補給帰還", `回復薬${cureN} Phase/油${escN}、${p.gold}G。上り階段で町へ`);
+        addLesson(state.turn, state.depth, "補給帰還", `回復薬${cureN} Phase/油${escN} 食料${foodN}、${p.gold}G。上り階段で町へ`);
       }
       if (restockTrip && monsters.every((m: any) => m.distance > 4)) {
         const onUp = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.UP_STAIR);

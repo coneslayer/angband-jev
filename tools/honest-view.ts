@@ -44,8 +44,8 @@ export function estimatedMaxHp(level: number, unique: boolean): number {
   return Math.max(5, Math.round(unique ? 7.5 * Math.pow(l, 1.5) : 1.7 * Math.pow(l, 1.48)));
 }
 
-// Floor, doors, stairs, lava, passable rubble: squares a frontier can open out from
-const OPEN_FEATS = new Set([1, 2, 3, 4, 5, 6, 23, 24]);
+// Floor, doors, stairs, passable rubble: squares a frontier can open out from
+const OPEN_FEATS = new Set([1, 2, 3, 4, 5, 6, 24]);
 
 function withFrontier(tiles: any[]): any[] {
   const known = new Set<string>();

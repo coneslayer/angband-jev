@@ -1109,6 +1109,52 @@ The user asked for an 8-hour session after session 4: "Commit, and start the nex
   - finalE: ≥ 75% of starts complete for all arms, consulted ≥ 0.9, throws ≤ 100.
 
 ### Run log
+- **Smoke tests** (offset ports, 6 slots):
+  - The first smoke test found that `freeze_c` ran before `app_dir`, whose source freeze
+    deleted `src/c-game`, so no C game could start. Fixed.
+  - The second smoke test passed every stage: collectE 260 games, 0 errors; labelE 40/40; trainE;
+    finalE 3 starts × 3 arms, E-gate consulted 1.0.
+- **First launch, 08:46, aborted after about 2 minutes:** a C Paladin looped on "study Bless" 929
+  times until killed.
+  - Vanilla Priests, Paladins and Druids lack `CHOOSE_SPELLS`, so `CMD_STUDY` takes a book
+    (`item`), and `main-http` only set `spell`. The smoke test hadn't caught it.
+  - Fixes: angband-c `3605dc6d5` (study names a studiable book holding the spell; checked for
+    Paladin, Priest, Druid and Mage) and angband-jev `635a9d3` (busho stops retrying a study
+    that doesn't take, for 200 actions).
+  - The aborted run is kept at `runs/session5/2026-10-16.aborted-study-bug`.
+- **Second launch, 08:49, stopped at 08:54.** The first 25 games showed C-specific failures that
+  the 1,500-action smoke caps had hidden. 13/25 ran all 30,000 actions, most of them "resting
+  while confused". Kept at `runs/session5/2026-10-16.aborted-c-fidelity`.
+- **Fixes, each checked with a 12–15 minute full-length collect on offset ports (13 slots):**
+  1. **REST was a no-op on C** (angband-c `6ef6f25ee`). Vanilla reads a rest count of 1 as
+     "repeat the last count", initially 0, so no time passed and confusion never wore off.
+  2. **Starvation.** Food came last in the shopping list, and shopping was skipped under 50 gold.
+     - Rations are now bought first.
+     - Hunger with no food now means: eat if possible, else Word of Recall, else walk up to town.
+     - This runs before the stall handlers, which had pre-empted it every turn.
+  3. **Light.** Vanilla torches burn out (TS's don't), and busho sold its spares. In the dark it
+     can't read or cast, and the refused commands passed no time, so it looped: Bless ×23,000,
+     Phase Door ×26,000.
+     - C now reports `fuel` for lights (shown in the UI as turns).
+     - busho keeps and buys spare torches and swaps one in below 300 turns.
+     - A silver jelly can still drain the light.
+  4. **Generic no-time guard.** A READ or CAST that passes no game time blocks that type for 20
+     commands. After 30 consecutive commands that pass no time, a turn is held (SEARCH) instead.
+  5. **Stalls.** When stalled with a stair known, busho walks the BFS path to it, instead of
+     tunnelling in a straight line toward it.
+  6. **Lava is impassable to busho.** Vanilla asks before a step that would cost over a third of
+     HP; headless, that means no step and no time.
+
+  | Test | Games | 30k-action cap | Stall resets | Starvation | Decisions | Mean max DL |
+  |---|---|---|---|---|---|---|
+  | REST fix only | 107 | 24 | 663 | 15 | 10,046 | 3.59 |
+  | + food, light (first pass) | 138 | 19 | 775 | 15 | — | 3.95 |
+  | + no-time guard | 122 | 23 | 889 | 15 | — | 3.60 |
+  | + early hunger, stair walk | 148 | 16 | 404 | 7 | 19,218 | 4.30 |
+
+  Remaining: deaths to poison (21 in the last test; they're ordinary fights lost without potions)
+  and small sealed pockets (e.g. 46 known squares, no stairs). These are shared by every arm.
+- **Launch:** see below.
 
 ## C Angband engine: spike (2026-10-15)
 
