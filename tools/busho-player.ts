@@ -1716,6 +1716,7 @@ let retreatMode = false;        // 退避中フラグ
 let unseenHits: number[] = [];
 let prevHpUnseen = -1;
 let lastUnseenPhase = -100;
+let studyBlockedUntil = 0;
 // "It bites you." / "You are hit by something!" / bumping into it: "You hit the monster" (TS), "You hit it." (C)
 const UNSEEN_ATTACK_RX = /^(It|Something) [a-z' ]*\byou\b|hit by something|^You (hit|miss) (the monster|it)\b/;
 let retreatStartTurn = 0;       // 退避開始ターン
@@ -2547,13 +2548,15 @@ async function playGame() {
     }
 
     // === 優先度0.5: スペル学習 (新スペル枠があれば即学習) ===
-    if (newSpellSlots > 0 && spells.length > 0) {
+    if (newSpellSlots > 0 && spells.length > 0 && actionCount >= studyBlockedUntil) {
       const toStudy = findStudyableSpell(spells, p.level);
       if (toStudy) {
         spellsLearned++;
         addLesson(state.turn, state.depth, "スペル学習",
           `${toStudy.name} (Lv${toStudy.level}, MP${toStudy.mana})を学習。残り枠${newSpellSlots - 1}`);
         state = await sendCommand({ type: CMD.STUDY, spellIndex: toStudy.index });
+        // 学習が効かなかった (枠が減らない): しばらく諦める (無限ループ防止)
+        if ((state.player?.newSpells ?? 0) >= newSpellSlots) studyBlockedUntil = actionCount + 200;
         continue;
       }
     }
