@@ -1154,7 +1154,78 @@ The user asked for an 8-hour session after session 4: "Commit, and start the nex
 
   Remaining: deaths to poison (21 in the last test; they're ordinary fights lost without potions)
   and small sealed pockets (e.g. 46 known squares, no stairs). These are shared by every arm.
-- **Launch:** see below.
+- **Launch:** `driver5.py --run runs/session5/2026-10-16 --prior runs/session4/2026-10-15
+  --hours 8 --slots 13`, started 10:00 (PID 71726) from `36bd4b5`. The C binary is frozen from
+  angband-c `6ef6f25ee`. Deadline about 18:00.
+  - First 25 games: none hit the action cap, and no loops (the top repeated action is Bless, up to
+    121 times). All 25 died, reaching up to DL9.
+- **collectE (10:00–10:46):** 352 games, 0 errors, 49,794 decisions, all format v3. Canaries
+  passed.
+  - By type: fight 37,514, tactic 6,945, equip 1,455, descend and explore 1,423 each, recall
+    1,034. That's five times collectD's 9,038 decisions in half the time.
+  - Deaths: 288 of 352. Max depth 12.
+  - Top killers: poison 32, soldier 30, starvation 20, cave spider 16, acolyte 14, apprentice 14.
+  - Stall resets: 967.
+  - The C bank now holds 623 savepoints for finalE's bank starts. There were no bank starts in
+    collectE, since TS savepoints can't load in C.
+- **labelE (10:46–13:46):** 4,117 labels (fight 3,034, tactic 1,083), 0 rollout errors.
+  Canaries passed.
+  - Split-half agreement: fight 80.9%, tactic 82.1% (labelD: 83.8/82.9%).
+  - All-option ties: 364 (8.8%); fight 5.5%, tactic 18.3%. Nearly all are records where every
+    option died in every rollout (u = −1 throughout).
+  - Fight argmax: melee 978, throw 864, flee 600, the rest ties.
+  - Tactic argmax: fight 301, heal 199, flee 137, the rest ties (201 three-way).
+  - That is 1.5 times labelD's 2,823 clean labels, so trainE has about 6,900 labels.
+- **trainE (13:46–15:04):** 6,940 labels in (labelD 2,823 + labelE 4,117); all-option ties are
+  not trained on, leaving 5,600 train and 579 held out. 4 epochs. Canaries passed.
+  - Overran its 0.75 h budget by 33 minutes: training runs a fixed 4 epochs and isn't time-boxed,
+    and the data was 2.5 times trainD's. finalE is capped by the global deadline, so it gets
+    2 h 56 min instead of 3 h.
+
+  | Held-out | n | Model | Rules | Majority | Base |
+  |---|---|---|---|---|---|
+  | All | 579 | 0.630 | 0.535 | 0.508 | 0.508 |
+  | labelE part | 461 | 0.605 | 0.547 | 0.521 | 0.521 |
+  | Fight | 436 | 0.592 | | | |
+  | Tactic | 143 | 0.748 | | | |
+
+  - Brier 0.199 (base 0.292, rules 0.713).
+  - The margin over the rules is +0.095, under half of trainD's +0.21 (0.703 vs 0.492). The weak
+    spot is fight (0.592). The fight choice was already three-way in labelD (throw 420, flee 364,
+    melee 336), so the drop isn't a new kind of question. One possible cause is that C fights differ
+    from TS fights, so the two sets of labels may pull in different directions (untested).
+- **Hibernation (about 15:24–16:55):** a power failure hibernated the machine. Every process
+  (driver, laya server, game processes) was frozen and resumed together. Per-game time limits use
+  the monotonic clock, so no game was wrongly cut; games in flight report about 5,600 s because
+  their wall time includes the sleep. The global deadline is wall-clock, so finalE lost 91
+  minutes, but it still finished every start by 17:41.
+- **finalE (15:04–17:41):** 192 of 192 starts complete in all three arms, 0 errors, 0 deadline
+  cuts. Canaries passed (E-gate consulted 1.0, max throws 25). The rules arm died in 150 of 192,
+  mean depth 5.11. Top killers: poison 18, soldier 15, apprentice 13.
+
+  | Arm vs rules (all 192) | W–L | Mean diff (−3/death) | CI80 | Deaths | Depth | Sweep | Sign p |
+  |---|---|---|---|---|---|---|---|
+  | rules+ (caution +1) | 85–75 | +0.40 | [0.06, 0.74] | 142 | 5.39 | better | 0.24 |
+  | E-gate | 67–64 | +0.16 | [−0.13, 0.44] | 149 | 5.25 | trade-off | 0.43 |
+  | E-gate vs rules+ | 74–81 | −0.25 | [−0.55, 0.09] | 149 vs 142 | 5.25 vs 5.39 | worse | 0.74 |
+
+  - rules+ by start type: fresh 71–63 (+0.51, better), bank 14–12 (+0.08, better). It was
+    identical to rules in 9 starts.
+  - E-gate by start type: fresh 61–61 (+0.14, trade-off), bank 6–3 (+0.21, trade-off). It was
+    identical to rules in only 36 of 192 starts (D-gate: 75 of 96), so the model is acting far
+    more often now, but that doesn't add up to better play.
+
+### Session 5 verdicts (by the pre-committed rules)
+1. **rules+ does not become the baseline.** It beat rules (W > L, sweep "better") but sign p is
+   0.24, not < 0.05, so it stays a candidate. With session 4 (46–32, "better", p 0.03–0.07), that's
+   two sessions in the same direction on two engines. Per the rules, that counts as evidence for
+   the next plan, not a promotion.
+2. **E-gate is not promoted.** It passes the promotion test against rules (67–64, deaths 149 ≤
+   152), but it loses to rules+ head to head (74–81), which the rules also require. Its sweep
+   verdict against rules is only "trade-off" (60–64 with no death penalty).
+3. **Offline vs play:** trainE's held-out lead over the rules (+9.5 points) again didn't turn
+   into better play. The gap between label accuracy and game results is now the main open
+   question, alongside whether longer training (more epochs, more labels) helps offline at all.
 
 ## C Angband engine: spike (2026-10-15)
 
