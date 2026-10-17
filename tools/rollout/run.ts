@@ -208,11 +208,12 @@ async function http(url: string, method: string, body?: string): Promise<any> {
   return JSON.parse(t);
 }
 
-function runPlayer(api: string, type: string, option: string, horizon: number): Promise<{ result: any | null; ms: number; err?: string }> {
+function runPlayer(api: string, type: string, option: string, horizon: number, k: number): Promise<{ result: any | null; ms: number; err?: string }> {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const child = spawn(PLAYER_CMD[0], PLAYER_CMD.slice(1), {
-      env: { ...process.env, API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic" },
+      env: { ...process.env, API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic",
+        PLAYER_RNG_SEED: String(k) }, // the player's own random moves share seed k across options too
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "", err = "";
@@ -263,7 +264,7 @@ async function oneRun(server: string, rec: Rec, option: string, k: number): Prom
       catch { await new Promise((r) => setTimeout(r, 500)); s0 = await http(`${server}/restore`, "POST", body); }
     }
     const restoreMs = Date.now() - t0;
-    const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150);
+    const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150, k);
     if (!result) return { ...base, error: err, restore_ms: restoreMs, player_ms: ms, total_ms: Date.now() - t0 };
     let s1: any = null;
     try { s1 = await http(`${server}/state`, "GET"); } catch { /* dead/closed game: end inventory unknown */ }

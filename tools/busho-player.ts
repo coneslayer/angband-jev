@@ -852,6 +852,16 @@ const DECISION_MODEL_TYPES = new Set((process.env.DECISION_MODEL_TYPES ?? "").sp
 const DECISION_ON = (LLM_ENABLED && !ROLLOUT) || WIDE; // 呼出側のゲート用
 const GAME_START_TS = Date.now();
 const GAME_SEED = process.env.SEED ?? process.env.GAME_SEED ?? null; // サーバの--seed (stateには出ない)
+// プレイヤー自身の乱数 (混乱中・停滞時のランダム移動): PLAYER_RNG_SEED/SEEDで固定し、同じseedで同じゲームを再現する (Session 6)
+const PLAYER_RNG_SEED = process.env.PLAYER_RNG_SEED ?? GAME_SEED;
+let rngState = PLAYER_RNG_SEED !== null ? (Number(PLAYER_RNG_SEED) >>> 0) || 1 : (Math.random() * 2 ** 32) >>> 0;
+function rand(): number { // mulberry32
+  rngState = (rngState + 0x6d2b79f5) >>> 0;
+  let t = rngState;
+  t = Math.imul(t ^ (t >>> 15), t | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
 
 interface DecideCtx {
   state: any;
@@ -2604,7 +2614,7 @@ async function playGame() {
           continue;
         }
         // 回復薬なし → ランダム歩行で逃走試行 (混乱中の移動はランダム方向)
-        const rdir = ALL_DIRS[Math.floor(Math.random() * ALL_DIRS.length)];
+        const rdir = ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)];
         state = await sendCommand({ type: CMD.WALK, direction: rdir });
         continue;
       }
@@ -4099,7 +4109,7 @@ async function playGame() {
             }
           }
           // 階段到達不能 → 壁を掘る
-          const randomDir = ALL_DIRS[Math.floor(Math.random() * ALL_DIRS.length)];
+          const randomDir = ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)];
           state = await sendCommand({ type: CMD.TUNNEL, direction: randomDir });
           continue;
         }
@@ -4125,7 +4135,7 @@ async function playGame() {
           continue;
         }
         // スクロール切れ → 壁を掘って脱出
-        const randomDir = ALL_DIRS[Math.floor(Math.random() * ALL_DIRS.length)];
+        const randomDir = ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)];
         state = await sendCommand({ type: CMD.TUNNEL, direction: randomDir });
       } else {
         // 全タイル訪問済 → 降下
@@ -4148,7 +4158,7 @@ async function playGame() {
           }
         }
         // フォールバック: ランダムWALK
-        state = await sendCommand({ type: CMD.WALK, direction: ALL_DIRS[Math.floor(Math.random() * ALL_DIRS.length)] });
+        state = await sendCommand({ type: CMD.WALK, direction: ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)] });
       }
     }
 

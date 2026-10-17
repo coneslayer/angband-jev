@@ -6,6 +6,8 @@ record's question. Metrics per decision type and overall:
   acc       argmax matches the rollout winner (any of the tied winners counts)
   p_gold    probability the model puts on the rollout winner(s)
   brier     multi-class Brier score against the rollout distribution
+  selective at each confidence gate: coverage, and model vs rules accuracy on the covered records (all, and
+            where model and rules disagree), which is what a gated arm acts on; answers saved beside --out
 Baselines from the same records: the rules player's choice (meta.rules_choice), the
 majority winner in the training data, and optionally the untuned base checkpoint.
 
@@ -123,6 +125,24 @@ def score(records, predict):
             for k, m in by.items()}
 
 
+GATES = (0.0, 0.02, 0.05, 0.1, 0.2, 0.3)
+
+
+def selective(records, answers):
+    """What a gated arm sees: at each confidence gate, the share of records the model would act on (coverage) and,
+    on those records, model vs rules accuracy, overall and where the two disagree (the decisions that change play)."""
+    out = {}
+    for g in GATES:
+        cov = [(r, a) for r, a in zip(records, answers) if a.get("confidence", 0.0) >= g]
+        dis = [(r, a) for r, a in cov if a.get("choice") != r["meta"].get("rules_choice")]
+        hit = lambda rows, f: round(sum(f(r, a) in winners(r["gold"]["decision"]["probabilities"]) for r, a in rows) / len(rows), 4) if rows else None  # noqa: E731
+        out[str(g)] = {"coverage": round(len(cov) / max(1, len(records)), 4), "n": len(cov),
+                       "acc_model": hit(cov, lambda r, a: a.get("choice")), "acc_rules": hit(cov, lambda r, a: r["meta"].get("rules_choice")),
+                       "disagree_n": len(dis), "disagree_acc_model": hit(dis, lambda r, a: a.get("choice")),
+                       "disagree_acc_rules": hit(dis, lambda r, a: r["meta"].get("rules_choice"))}
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--heldout", required=True); ap.add_argument("--ckpt", required=True)
@@ -143,9 +163,22 @@ def main():
     with LayaServer(a.ckpt, a.port) as srv:
         for label, model in (("model", NAME), ("base", a.base)):
             if not model: continue
-            t0 = time.time()
-            result[label] = score(records, lambda r: srv.ask(model, r["state"], r["questions"])["decision"]["probabilities"])
+            t0, answers = time.time(), []
+
+            def ask(r):
+                ans = srv.ask(model, r["state"], r["questions"])["decision"]
+                answers.append(ans)
+                return ans["probabilities"]
+            result[label] = score(records, ask)
             result[label]["seconds"] = round(time.time() - t0, 1)
+            if label == "model":
+                result["selective"] = selective(records, answers)
+                if a.out:
+                    with open(a.out.replace(".json", "") + ".answers.jsonl", "w") as f:
+                        for r, ans in zip(records, answers):
+                            f.write(json.dumps({"game_id": r["meta"].get("game_id"), "turn": r["meta"].get("turn"),
+                                                "type": r["meta"]["decision_type"], "rules": r["meta"].get("rules_choice"),
+                                                "gold": r["gold"]["decision"]["probabilities"], "answer": ans}) + "\n")
         result["cpu_fallbacks"] = json.load(urllib.request.urlopen(f"{srv.url}/health")).get("cpu_fallbacks")
 
     text = json.dumps(result, indent=1)

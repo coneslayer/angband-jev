@@ -1227,6 +1227,88 @@ The user asked for an 8-hour session after session 4: "Commit, and start the nex
    into better play. The gap between label accuracy and game results is now the main open
    question, alongside whether longer training (more epochs, more labels) helps offline at all.
 
+## Session 6 (14 h, from 2026-10-16 evening)
+
+Not a complete experiment on its own: it fixes the pairing, tests the confidence gate, and builds the
+labels and training evidence for the next session.
+
+### What session 5 left (found after its run)
+- **The gate kept the model out of play.** In finalE, E-gate's model disagreed with the rules on
+  about 11,200 fight/tactic decisions, but its answer was used (confidence ≥ 0.3) on only 139 of
+  about 20,000, and it changed the rules' choice in 45, spread over 33 games. On trainE's held-out
+  labels at the 0.3 gate it would act on 3.8% of decisions and disagree with the rules on 3 of 579.
+  The "consulted ≥ 0.9" canary only showed that the model was asked.
+  - Selective accuracy on trainE's held-out labels (any tied winner counts as right):
+
+    | Gate | Coverage | Model acc | Rules acc | Disagreements | Model acc there | Rules acc there |
+    |---|---|---|---|---|---|---|
+    | 0 | 100% | 0.630 | 0.535 | 349 | 0.585 | 0.427 |
+    | 0.05 | 65% | 0.648 | 0.577 | 207 | 0.575 | 0.444 |
+    | 0.1 | 33% | 0.663 | 0.601 | 80 | 0.525 | 0.375 |
+    | 0.3 | 3.8% | 0.909 | 0.864 | 3 | 0.667 | 0.333 |
+- **Pairs weren't pairs.** The rules player used unseeded `Math.random()` for random moves when
+  confused or stuck. C games stall often (967 stall resets in collectE), so the same seed played
+  twice gave different games in 3 of 6 starts. In finalE, 87 of the 121 E-gate games where the
+  model never acted still differed from the rules game. Paired tests were valid but much noisier
+  than designed, and "identical to rules" counts on C meant little.
+  - **Fix:** busho draws those moves from a seeded mulberry32 (`PLAYER_RNG_SEED`, default the
+    game's `SEED`). Rollouts pass seed k, so common random numbers now cover the player too. The
+    replay test then gave 6 of 6 identical games (including 17,000- and 20,000-action games).
+  - labelF's rollouts use the seeded player; labelD/labelE's didn't. Same labels in expectation,
+    less noise.
+- **Evaluation** now also writes the per-gate table above (`evaluate.py` "selective") and saves
+  every answer beside its metrics file.
+
+### Questions
+1. With true pairs, does rules+ beat rules (third test)?
+2. Does trainE play better than the rules when it is allowed to act: gate 0.05 (acts on about
+   two-thirds of decisions) or no gate?
+3. Does longer training help offline (2, 4, 8 epochs, with a second seed at 4 to size the noise)?
+4. A bigger model for the next session: labelD + labelE + labelF.
+
+### Plan (`driver6.py`, 14 h, 13 slots)
+| Phase | Stage | Budget | What |
+|---|---|---|---|
+| 1 | finalF | 2.5 h | 240 starts (192 fresh seeds 2600000+, 48 bank from session 5's bank): rules, rules+ (caution +1), E05 and E00 (trainE at gates 0.05 and 0, oil/potion guards), plus rules-replay on the first 24 starts |
+| 2, CPU | labelF | to the end | continue labelling session 5's collectE decisions (danger-first; labelE's are skipped), K = 8, seeded rollouts |
+| 2, GPU | sweepF | about 4.5 h | on trainE's exact train/held-out split: 8 epochs (seed 0), 4 epochs (seed 1), 2 epochs (seed 0); trainE is the 4-epoch seed-0 point; accuracy, Brier and the per-gate table for each |
+| 2, GPU | trainF | the rest | laya from the base model on labelD + labelE + labelF so far, at the sweep's epoch count, capped to fit the deadline; same game-hash split, so trainE's held-out games stay held out; scored on all held-out, on the labelD/E part and on the labelF part |
+
+Training and labelling share the machine: labelling is CPU-bound and training GPU-bound.
+
+### Pre-committed decision rules
+- **Score** as before: depth − 3 per death. Promotion test: W > L and deaths ≤ rules + 2.
+- **rules+ becomes the rules baseline** if, against rules over all starts, W > L, the sweep
+  verdict is "better" and sign p < 0.05.
+- **E05 or E00 is promoted** only if it passes the promotion test against rules **and** beats
+  rules+ head to head (W > L). "Clearly better play" also needs a "better" sweep verdict against
+  both and sign p < 0.025 against both (two model arms, so the 0.05 bar is halved).
+- **Epoch count for trainF:** the count with the best held-out accuracy among 2, 4 and 8. A count
+  other than 4 is chosen only if it beats trainE (4 epochs, seed 0) by more than the seed-to-seed
+  gap at 4 epochs (at least 1 point). Ties go to fewer epochs. trainF isn't promoted or played
+  this session; it is the next session's candidate.
+- **Canaries:**
+  - finalF: ≥ 75% of starts complete in every main arm; rules-replay identical to rules in ≥ 90%
+    of its starts; model arms consulted ≥ 0.9 and throws ≤ 100. If the replay canary fails, the
+    results are reported as unpaired.
+  - labelF: ≥ 300 new labels, split-half ≥ 65%, all-tie ≤ 25%, run errors ≤ 2%.
+  - sweepF: trainE re-evaluated and at least one sweep run finished.
+  - trainF: accuracy > majority.
+- **Reported for model arms:** how often the model's answer was used and how often it changed the
+  rules' choice, so a gate that blocks everything is visible.
+
+### Run log
+- **Smoke tests** (offset ports, 6 slots, `runs/session6/smoke*`):
+  - The first hung after finalF. Both phase-2 tracks saved `state.json` while the other changed it;
+    a save raised "dictionary changed size during iteration" while holding the save lock, and the
+    other track then waited on that lock forever. Saves now serialise, retry on that error, and
+    always release the lock. Kept at `runs/session6/smoke.deadlock`.
+  - The second passed every stage and canary (19:57–20:07): finalF replays 2 of 2 identical;
+    E00's model answer used 131 times and changed the rules' choice 42 times in 4 games; labelF
+    30 labels; sweepF three 1-epoch runs and trainE re-evaluated; trainF's held-out set is exactly
+    trainE's 579 records.
+- **Launch:** held for a reboot (security updates).
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
