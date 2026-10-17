@@ -1323,6 +1323,45 @@ Training and labelling share the machine: labelling is CPU-bound and training GP
   - Stopped at 20:38 by STOP file (between games), still in finalF. In the first five replays one
     differed (2600002-Ranger: Kobold in rules, Human in the replay and the other arms), which led to
     the shared-savefile bug above. Kept at `runs/session6/2026-10-16.aborted-shared-savefile`.
+  - Relaunched 20:47 (PID 8550) from `7235069`. First 7 minutes: 54 games, 0 errors, 10 of 10
+    replays identical, every start the same character in all arms.
+  - A second short power cut hibernated the machine for about 2 minutes (22:20:47–22:22:51). The
+    driver, laya server and games resumed; no errors or cuts after it.
+- **finalF (20:47–22:40):** 240 of 240 starts complete in every arm, 0 errors, 0 deadline cuts.
+  rules-replay identical in 24 of 24, so these are true pairs (the first C tournament with them).
+  Canaries passed. The rules arm died in 183 of 240, mean depth 4.90. Top killers: poison 25,
+  soldier 17, apprentice 14.
+
+  | Arm (all 240) | W–L | Mean diff (−3/death) | CI80 | Deaths | Depth | Sweep | Sign p | Identical to rules |
+  |---|---|---|---|---|---|---|---|---|
+  | rules+ vs rules | 102–77 | +0.25 | [0.00, 0.50] | 184 | 5.17 | better | 0.036 | 23 |
+  | E05 vs rules | 95–97 | −0.06 | [−0.32, 0.21] | 186 | 4.88 | worse | 0.59 | 3 |
+  | E00 vs rules | 91–110 | −0.46 | [−0.73, −0.20] | 198 | 4.62 | worse | 0.92 | 3 |
+  | E05 vs rules+ | 88–107 | −0.31 | [−0.60, −0.02] | 186 vs 184 | | worse | 0.92 | |
+  | E00 vs rules+ | 81–120 | −0.72 | [−0.99, −0.45] | 198 vs 184 | | worse | 0.998 | |
+
+  - rules+ by start type: fresh 90–65 (+0.33, better), bank 12–12 (−0.04, trade-off). Its sweep is
+    positive at every death penalty (sign p 0.026–0.039 up to −3, 0.13 at −6 and −20).
+  - The model now really plays. E05's answer was used on 11,286 of 24,294 trained-type decisions
+    and changed the rules' choice 5,097 times (238 of 240 games). E00's was used on 21,994 of 22,887
+    and changed it 9,531 times (all 240 games). Max throws 36 and 50.
+  - Both model arms lose on fresh starts (E05 77–82, E00 72–95) and are slightly ahead on bank
+    starts (E05 18–15, E00 19–15; 48 starts, too few to read). E00 dies 15 more times than rules.
+
+### Session 6 verdicts so far (by the pre-committed rules)
+1. **rules+ becomes the rules baseline.** Against rules over all starts: W > L (102–77), sweep
+   "better", sign p 0.036 < 0.05. It's the third session in the same direction, and the first
+   with true pairs. From session 7, "rules" means caution +1. Its edge is on fresh starts; on bank
+   starts it's even.
+2. **Neither model arm is promoted.** Both fail the promotion test against rules, and both lose
+   to rules+ head to head.
+3. **The offline lead is real in the labels but not in play.** When trainE is allowed to act,
+   it changes thousands of decisions and plays worse, most clearly with no gate. On held-out
+   labels it beat the rules where they disagreed (0.585 vs 0.427 at gate 0). So the rollout labels
+   (short horizons: fight 150 turns, tactic 50) and whole-game results disagree. That gap, not
+   gating or training length, is now the main problem. The sweep and trainF still run as
+   planned; they answer the training question, but their models can't be expected to play better
+   until the labels measure what matters for the whole game.
 
 ## C Angband engine: spike (2026-10-15)
 
