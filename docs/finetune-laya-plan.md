@@ -1347,8 +1347,29 @@ Training and labelling share the machine: labelling is CPU-bound and training GP
     and changed it 9,531 times (all 240 games). Max throws 36 and 50.
   - Both model arms lose on fresh starts (E05 77–82, E00 72–95) and are slightly ahead on bank
     starts (E05 18–15, E00 19–15; 48 starts, too few to read). E00 dies 15 more times than rules.
+- **sweepF (22:40–09:48, 11.1 h against a 4.5 h budget):** canary passed. The budget was wrong
+  by a factor of about 2.5: training runs at 0.50 s per item per epoch, so the three runs (14
+  epochs on 5,600 items) needed about 11 h. All on trainE's 579 held-out records.
 
-### Session 6 verdicts so far (by the pre-committed rules)
+  | Point | Accuracy | Brier | Fight (436) | Tactic (143) | Disagreements at gate 0: n, model vs rules | Train time |
+  |---|---|---|---|---|---|---|
+  | 4 epochs, seed 0 (trainE) | **0.630** | **0.199** | 0.592 | 0.748 | 349, 0.585 vs 0.427 | (session 5) |
+  | 4 epochs, seed 1 | 0.611 | 0.216 | 0.585 | 0.692 | 335, 0.540 vs 0.409 | 209 min |
+  | 8 epochs, seed 0 | 0.617 | 0.202 | 0.596 | 0.678 | 336, 0.557 vs 0.417 | 372 min |
+  | 2 epochs, seed 0 | 0.587 | 0.215 | 0.578 | 0.615 | 301, 0.522 vs 0.422 | 82 min |
+
+  Majority 0.508, rules 0.535. The seed-to-seed gap at 4 epochs is 1.9 points, so the rule keeps
+  **4 epochs**: 8 epochs is 1.4 points below trainE (within seed noise), 2 epochs is 4.3 below.
+  On this data, training longer doesn't help. Every point beats the rules where they disagree.
+- **trainF: skipped** (09:48). With labelF's 9,232 new labels the training set is 13,416 items
+  (held-out 1,657); 4 epochs would take about 7.4 h and even one about 1.9 h, with 59 minutes left.
+  The labels are kept for the next session.
+- **labelF (22:40–10:37):** canary passed. 10,096 new labels (fight 8,428, tactic 1,668), 0 run
+  errors, all-tie 373 (3.7%). Split-half agreement: fight 80.5%, tactic 84.1%. With labelD and
+  labelE that makes 17,036 labels, 84% of them fights. The driver finished at 10:37 and left no
+  processes behind.
+
+### Session 6 verdicts (by the pre-committed rules)
 1. **rules+ becomes the rules baseline.** Against rules over all starts: W > L (102–77), sweep
    "better", sign p 0.036 < 0.05. It's the third session in the same direction, and the first
    with true pairs. From session 7, "rules" means caution +1. Its edge is on fresh starts; on bank
@@ -1359,9 +1380,15 @@ Training and labelling share the machine: labelling is CPU-bound and training GP
    it changes thousands of decisions and plays worse, most clearly with no gate. On held-out
    labels it beat the rules where they disagreed (0.585 vs 0.427 at gate 0). So the rollout labels
    (short horizons: fight 150 turns, tactic 50) and whole-game results disagree. That gap, not
-   gating or training length, is now the main problem. The sweep and trainF still run as
-   planned; they answer the training question, but their models can't be expected to play better
-   until the labels measure what matters for the whole game.
+   gating or training length, is now the main problem.
+4. **Epochs stay at 4.** 8 epochs is no better than 4 (inside the 1.9-point seed gap) and 2 is
+   worse. More epochs on the same labels isn't the way forward.
+5. **trainF wasn't trained.** The sweep used the time. labelF's 10,096 labels (more than labelD
+   and labelE together, and as reproducible: split-half 80–84%) carry over.
+
+Reproducible labels aren't the same as right labels. The split-half check shows the rollouts
+agree with themselves, not that a 150-turn result predicts the whole game. Session 7 should test
+that directly.
 
 ## C Angband engine: spike (2026-10-15)
 
