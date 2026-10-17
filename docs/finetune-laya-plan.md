@@ -1256,6 +1256,18 @@ labels and training evidence for the next session.
     replay test then gave 6 of 6 identical games (including 17,000- and 20,000-action games).
   - labelF's rollouts use the seeded player; labelD/labelE's didn't. Same labels in expectation,
     less noise.
+- **New C characters shared one savefile.** A new C game (`-n`) uses the default savefile
+  `lib/save/<user>` in the frozen game directory, so every concurrent new game read it at birth
+  and wrote it while playing. The same seed then gave different characters in different arms
+  (seed 2600004: Human, High-Elf, Half-Troll, Half-Orc and Elf Blackguards), and the shared save
+  likely also leaked flavours and RNG state. Found on the first session 6 launch (one of five
+  replays differed). Affected: fresh starts in every C session (collectE, finalE, and their
+  pairs). Not affected: bank starts and rollouts, which `--load` their own file and save to it.
+  - **Fix:** new games get their own save/scores/panic directories (`-dsave` etc.), and
+    `freeze_c` no longer copies savefiles. `-dsave` must not be used with `--load`: the load then
+    fails silently and a new level-1 character is born.
+  - Check: 12 fresh seeds and 6 bank savepoints, each played twice at the same time (13 slots):
+    18 of 18 identical, bank games loaded at DL5–9.
 - **Evaluation** now also writes the per-gate table above (`evaluate.py` "selective") and saves
   every answer beside its metrics file.
 
@@ -1307,7 +1319,10 @@ Training and labelling share the machine: labelling is CPU-bound and training GP
     E00's model answer used 131 times and changed the rules' choice 42 times in 4 games; labelF
     30 labels; sweepF three 1-epoch runs and trainE re-evaluated; trainF's held-out set is exactly
     trainE's 579 records.
-- **Launch:** held for a reboot (security updates).
+- **Launch:** held for a reboot (security updates), then launched 20:26 (PID 359) from `3015602`.
+  - Stopped at 20:38 by STOP file (between games), still in finalF. In the first five replays one
+    differed (2600002-Ranger: Kobold in rules, Human in the replay and the other arms), which led to
+    the shared-savefile bug above. Kept at `runs/session6/2026-10-16.aborted-shared-savefile`.
 
 ## C Angband engine: spike (2026-10-15)
 

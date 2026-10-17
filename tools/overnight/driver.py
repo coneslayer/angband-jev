@@ -140,7 +140,12 @@ def start_c_server(run, name, port, env, seed, restore=None):
     savepoint continued with a fresh seed."""
     udir = run.d("procs", name + "-user")
     shutil.rmtree(udir, ignore_errors=True); os.makedirs(udir)
-    args = [C_BIN, "-mhttp", f"-duser={udir}"] + ([] if restore else ["-n"]) + ["--", "--port", str(port), "--seed", str(seed)]
+    # A new character's savefile defaults to the shared lib/save/<user>, which every concurrent new game read at
+    # birth and wrote (Session 6: the same seed gave different races in different arms), so new games get their own
+    # save/scores/panic dirs. Not for --load: with -dsave the load silently fails and a new character is born; a
+    # loaded game saves to its own --load file anyway.
+    own = [] if restore else [f"-dsave={udir}", f"-dscores={udir}", f"-dpanic={udir}", "-n"]
+    args = [C_BIN, "-mhttp", f"-duser={udir}"] + own + ["--", "--port", str(port), "--seed", str(seed)]
     if restore: args += ["--load", c_savepoint_files(udir, restore)]
     else:
         for k, flag in (("RACE", "--race"), ("CLASS", "--class")):
@@ -248,7 +253,11 @@ def freeze_c(run):
     dst = os.path.join(run.d("src"), "c-game")
     if not os.path.exists(os.path.join(dst, "DONE")):
         shutil.rmtree(dst, ignore_errors=True)
-        shutil.copytree(os.path.dirname(C_BIN), dst, ignore=shutil.ignore_patterns("tests", "run-tests"))
+        tests = shutil.ignore_patterns("tests", "run-tests")
+        # no leftover savefiles: every game now gets its own save dir (-dsave), and a stale lib/save/<user> once
+        # leaked into births when all games shared it
+        skip = lambda d, names: tests(d, names) | (set(names) if os.path.basename(d) == "save" else set())  # noqa: E731
+        shutil.copytree(os.path.dirname(C_BIN), dst, ignore=skip)
         repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(C_BIN))))  # <repo>/<build>/game/angband
         rev = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         diff = subprocess.run(["git", "-C", repo, "diff"], capture_output=True, text=True).stdout
