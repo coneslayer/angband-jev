@@ -839,6 +839,10 @@ function expToNextLevel(p: any): number | null {
 }
 let rolloutActions = 0;
 let minHpFrac = 1; // ロールアウト中の最低HP割合 (危険度の指標)
+let rolloutDepthMax = 0; // ロールアウト中の最大深度 (長期ロールアウトの価値 = 深度 − 3×死亡)
+// ROLLOUT_CHECKPOINTS=50,150,500: その行動数での状態を記録 (1本の長いロールアウトから複数ホライズンを測る, Session 7)
+const ROLLOUT_CHECKPOINTS = new Set((process.env.ROLLOUT_CHECKPOINTS ?? "").split(",").filter(Boolean).map(Number));
+const rolloutCheckpoints: { a: number; depth: number; dmax: number; hp: number; mhp: number; exp: number }[] = [];
 // DECISION_TRIGGERS=wide: ログモードと同じ広いトリガー集合を、ログなしでも使う (評価/DAgger 用)。既定は従来のゲート
 const DECISION_TRIGGERS = process.env.DECISION_TRIGGERS ?? "default";
 const LOGLIKE = DECISION_LOG || DECISION_TRIGGERS === "wide"; // ログモード相当のトリガー/追加質問
@@ -2076,6 +2080,10 @@ async function playGame() {
     if (actionCount % 10 === 0) recordFrame(state);
     const p = state.player;
     if (p.maxHp > 0) minHpFrac = Math.min(minHpFrac, p.hp / p.maxHp);
+    rolloutDepthMax = Math.max(rolloutDepthMax, state.depth);
+    if (ROLLOUT_CHECKPOINTS.has(actionCount - 1)) {
+      rolloutCheckpoints.push({ a: actionCount - 1, depth: state.depth, dmax: rolloutDepthMax, hp: p.hp, mhp: p.maxHp, exp: p.exp ?? 0 });
+    }
     const { x: px, y: py } = p;
     const tiles = state.map.tiles;
     const monsters = state.monsters;
@@ -4214,7 +4222,8 @@ async function playGame() {
       actions: actionCount,
       hp: fp.hp, max_hp: fp.maxHp,
       min_hp_frac: finalState.dead ? 0 : Math.min(minHpFrac, fp.maxHp > 0 ? fp.hp / fp.maxHp : 1),
-      depth_start: rolloutStart.depth, depth_end: finalState.depth,
+      depth_start: rolloutStart.depth, depth_end: finalState.depth, depth_max: Math.max(rolloutDepthMax, finalState.depth),
+      ...(ROLLOUT_CHECKPOINTS.size ? { checkpoints: rolloutCheckpoints } : {}),
       cl_start: rolloutStart.cl, cl_end: fp.level,
       exp_start: rolloutStart.exp, exp_end: fp.exp ?? 0,
       exp_to_next_level_at_start: rolloutStart.toNext, // 推定値 (player JSON に無い場合) — 種族 expfact × player_exp 表

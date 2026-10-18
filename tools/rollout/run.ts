@@ -60,7 +60,10 @@ for (const kv of (opt("horizon", "HORIZON", "") ?? "").split(",").filter(Boolean
 const costs = new CostTable(path.join(GAMEDATA, "object.json"));
 // --utility v2: also charge the share of each scarce supply used (flasks, Cure potions, Phase/teleport scrolls).
 // Counts are stored per run (meta.runs[].sup = start/end), so the weights can be re-tuned offline.
+// --utility game: the tournament's score over the rollout instead: deepest level gained - 3 if dead (Session 7, long horizons).
 const UTILITY = opt("utility", "ROLLOUT_UTILITY", "v1")!;
+// --checkpoints 50,150,500: the player also reports its state at these action counts (several horizons from one rollout).
+const CHECKPOINTS = opt("checkpoints", "ROLLOUT_CHECKPOINTS", "")!;
 const SCARCE_W: Record<string, number> = { flask: 0.15, cure: 0.25, escape: 0.15 };
 for (const kv of (opt("scarce-w", "ROLLOUT_SCARCE_W", "") ?? "").split(",").filter(Boolean)) { const [c, w] = kv.split("="); SCARCE_W[c] = Number(w); }
 type Supply = { flask: number; cure: number; escape: number };
@@ -85,7 +88,7 @@ interface Run {
   opt: string; k: number; fired: boolean; dead: boolean; u: number | null;
   hp_term?: number; hp_min?: number; xp_term?: number; cons_term?: number; cons_used?: number; actions?: number;
   sup0?: Supply; sup1?: Supply | null; scarce_term?: number;
-  depth_end?: number; error?: string; restore_ms?: number; player_ms?: number; total_ms?: number; death_cause?: string | null;
+  depth_end?: number; depth_max?: number; cp?: any[]; error?: string; restore_ms?: number; player_ms?: number; total_ms?: number; death_cause?: string | null;
 }
 
 function recKey(r: any): string { return `${r.game_id}|${r.turn}|${r.decision_type}`; }
@@ -212,7 +215,7 @@ function runPlayer(api: string, type: string, option: string, horizon: number, k
   const t0 = Date.now();
   return new Promise((resolve) => {
     const child = spawn(PLAYER_CMD[0], PLAYER_CMD.slice(1), {
-      env: { ...process.env, API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic",
+      env: { ...process.env, API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic", ROLLOUT_CHECKPOINTS: CHECKPOINTS,
         PLAYER_RNG_SEED: String(k) }, // the player's own random moves share seed k across options too
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -243,6 +246,7 @@ function utility(res: any, s0: any, s1: any): { u: number; hp: number; hpMin: nu
   const xp = toNext > 0 ? Math.min(1, Math.max(0, gain / toNext)) : (gain > 0 ? 1 : 0);
   const hp = res.max_hp > 0 ? Math.max(0, res.hp / res.max_hp) : 0;
   const hpMin = typeof res.min_hp_frac === "number" ? Math.max(0, Math.min(hp, res.min_hp_frac)) : hp;
+  if (UTILITY === "game") return { u: Math.max(0, (res.depth_max ?? res.depth_end ?? 0) - (res.depth_start ?? 0)) - (res.dead ? 3 : 0), hp, hpMin, xp, cons, used, sup0, sup1, scarce };
   if (res.dead) return { u: -1, hp, hpMin, xp, cons, used, sup0, sup1, scarce };
   // Lowest HP during the horizon measures how close a call it was; end HP alone is nearly always full.
   const u = 0.35 * hpMin + 0.25 * hp + 0.4 * xp - 0.3 * cons - (UTILITY === "v2" ? scarce : 0);
@@ -268,7 +272,7 @@ async function oneRun(server: string, rec: Rec, option: string, k: number): Prom
     if (!result) return { ...base, error: err, restore_ms: restoreMs, player_ms: ms, total_ms: Date.now() - t0 };
     let s1: any = null;
     try { s1 = await http(`${server}/state`, "GET"); } catch { /* dead/closed game: end inventory unknown */ }
-    const run: Run = { ...base, fired: !!result.decision_fired, dead: !!result.dead, actions: result.actions, depth_end: result.depth_end,
+    const run: Run = { ...base, fired: !!result.decision_fired, dead: !!result.dead, actions: result.actions, depth_end: result.depth_end, depth_max: result.depth_max, cp: result.checkpoints,
       death_cause: result.death_cause ?? null, restore_ms: restoreMs, player_ms: ms };
     if (run.fired) {
       const x = utility(result, s0, s1);
@@ -323,7 +327,7 @@ function finish(rec: Rec, runs: Run[]): { labelled: boolean; line: any } {
   meta.all_tie = allTie(rows(seeds));
   meta.split_half = { first: toObj(probs(h1)), second: toObj(probs(h2)) };
   meta.runs = Object.fromEntries(rec.options.map((o) => [o, runs.filter((r) => r.opt === o).sort((a, b) => a.k - b.k).map((r) =>
-    r.fired ? { k: r.k, dead: r.dead, hp: r3(r.hp_term ?? 0), hpmin: r3(r.hp_min ?? 0), xp: r3(r.xp_term ?? 0), cons: r3(r.cons_term ?? 0), act: r.actions, dl: r.depth_end,
+    r.fired ? { k: r.k, dead: r.dead, hp: r3(r.hp_term ?? 0), hpmin: r3(r.hp_min ?? 0), xp: r3(r.xp_term ?? 0), cons: r3(r.cons_term ?? 0), act: r.actions, dl: r.depth_end, dmax: r.depth_max, ...(r.cp ? { cp: r.cp.map((c: any) => [c.a, c.dmax, r3(c.mhp > 0 ? c.hp / c.mhp : 0), c.exp]) } : {}),
       ...(r.sup0 ? { sup: [r.sup0.flask, r.sup0.cure, r.sup0.escape, ...(r.sup1 ? [r.sup1.flask, r.sup1.cure, r.sup1.escape] : [])], scarce: r3(r.scarce_term ?? 0) } : {}), ...(r.dead ? { cause: r.death_cause } : {}) }
       : { k: r.k, fired: false, ...(r.error ? { error: r.error.slice(0, 120) } : {}) })]));
   return { labelled: true, line: { state: rec.raw.state, questions: rec.raw.questions,

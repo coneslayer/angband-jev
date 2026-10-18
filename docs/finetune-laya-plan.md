@@ -1390,6 +1390,133 @@ Reproducible labels aren't the same as right labels. The split-half check shows 
 agree with themselves, not that a 150-turn result predicts the whole game. Session 7 should test
 that directly.
 
+## Session 7 (14 h, planned 2026-10-17)
+
+Session 6 showed that trainE beats the rules on held-out labels but loses to them in play. The
+labels score each choice over a short look-ahead (fight 150 actions, tactic 50) with a utility of
+HP, XP and supplies; the tournament scores the whole game (deepest level − 3 per death). This
+session tests whether the two agree.
+
+### Questions
+1. On held-out decisions, does the short label pick the same option as long rollouts scored like
+   the tournament?
+2. Where the short label says the rules are wrong, does the label's choice do better than the
+   rules' choice over the long rollouts? Where trainE disagrees with the rules, does its choice?
+3. How long does a horizon need to be before its winner matches the longest one?
+4. "Train more": trainG, 4 epochs on all 17k labels (labelD + labelE + labelF).
+
+### Plan (`driver7.py`, 14 h, 13 slots, two tracks from the start)
+| Track | Stage | Budget | What |
+|---|---|---|---|
+| CPU | valG | to 30 min before the end | re-label held-out labelF decisions with long rollouts: 5,000 actions (about a median game), scored as deepest level gained − 3 if dead, K = 8, the same seeds and the same rules continuation as labelF, with checkpoints at 50, 150, 500 and 1,500 actions. Pool: 922 records (held-out games, one short-label winner, not all-tie); the 480 where the label disagrees with the rules alternate with those where it agrees |
+| CPU | reportG | after both tracks | `horizon.py`: agreement and the paired tests at each horizon |
+| GPU | evalE | minutes | trainE asked on the pool: its choices for reportG, and its accuracy on new held-out games |
+| GPU | trainG | about 7.5 h | laya from the base model on labelD + labelE + labelF (13,416 train items), 4 epochs (capped to fit), same game-hash split; scored on all held-out, the labelD/E part, the labelF part, and asked on the pool |
+
+The long rollouts keep the rules continuation (caution 0) that labelF used, so the only changes
+from the short labels are the horizon and the score. Because the seeds are the same and the
+player is seeded, each long rollout's first 150 (or 50) actions should replay the short one
+exactly; that is a canary. Labelling after this session should continue with rules+.
+
+`run.ts` gains `--utility game` (deepest level gained − 3 if dead) and `--checkpoints`; the
+player reports its deepest level and its state at the checkpoints. Neither changes play.
+
+### Pre-committed decision rules
+- **The main test:** at 5,000 actions, on records where the short label's winner differs from
+  the rules' choice, compare the two choices' mean value over the paired seeds, record by record.
+  - **Labels point the right way** if W > L with sign p < 0.05. Then the play gap is somewhere
+    else (small gains that don't add up over a game, or the model's errors), and session 8
+    looks there.
+  - **Labels mislead** if L > W with sign p < 0.05 (for the rules). Then session 8 relabels with
+    the game score at the shortest checkpoint horizon whose winner agrees with the 5,000-action
+    winner in at least 80% of records (5,000 if none does).
+  - Otherwise **inconclusive**: report how noisy the long labels are (their split-half agreement).
+- **Reported, no rule:** short-versus-long agreement at each horizon against chance (about 1/3)
+  and the long labels' own split-half ceiling; trainE's and trainG's choices against the rules
+  by the same paired test; death rates per option.
+- **trainG** isn't played this session. Canary: accuracy > majority.
+- **Canaries:** valG ≥ 150 records labelled and run errors ≤ 2%; long rollouts replay the short
+  ones in ≥ 95% of comparable runs. If the replay canary fails, the long labels are still a valid
+  independent sample, but not paired with the short ones seed by seed.
+
+### Run log
+- **Smoke test** (`runs/session7/smoke`, 13 slots, 11:52–12:00 on 10-17): every stage and canary
+  passed.
+  - valG: 3 records, 72 long rollouts, 0 errors. Mean 3,841 actions, 50 s per rollout; 62.5%
+    reached 5,000 actions, and the rest died first.
+  - Long rollouts replayed the short ones in 60 of 60 comparable runs.
+  - At 50 and 150 actions, all three records were ties under the game score (no deaths, no new
+    levels). The short horizons will be compared on few records; that is itself the point.
+  - evalE and a 1-epoch, 300-item trainG ran beside the rollouts (0.60 s per item-epoch with
+    fixed costs included).
+  - **Throughput:** 50 s per rollout on 13 slots is about 92 s per record (24 rollouts), so about
+    525 of the 922 records in 13.5 h, about 260 of them disagreements (they alternate).
+- **Launch:** scheduled for 16:30, but the launcher's "another driver running" check matched
+  something and it didn't start. No driver was running. The likely culprit is a shell whose own
+  command text contained the driver command line. Started by hand at 18:11 (PID 79329, deadline
+  08:11 on 10-18). Pool: 922 records (480 disagree, 442 agree).
+- **evalE (18:11–18:13):** trainE on the pool: accuracy 0.516 against the short labels (majority
+  0.473, rules 0.479). The pool was chosen so that the rules lose about half of it, so these
+  numbers aren't comparable with trainE's held-out 0.630. Where trainE disagrees with the rules
+  (442): 0.462 vs 0.385.
+- **trainG (18:13–00:41):** canary passed. 14,147 train items, 4 epochs in 380 minutes (0.40 s
+  per item-epoch, faster than session 6's 0.50).
+
+  | Held-out set | n | trainG | trainE | Majority | Rules | Where trainG disagrees with rules: n, trainG vs rules |
+  |---|---|---|---|---|---|---|
+  | All | 1,755 | 0.621 | | 0.549 | 0.561 | 732, 0.574 vs 0.432 |
+  | labelD/E part (trainE's held-out) | 579 | 0.594 | **0.630** | 0.508 | 0.535 | 329, 0.538 vs 0.435 |
+  | labelF part | 1,176 | 0.634 | | 0.569 | 0.574 | 403, 0.603 vs 0.429 |
+  | valG pool | 922 | 0.573 | 0.516 | 0.473 | 0.479 | 291, 0.536 vs 0.241 |
+
+  On trainE's own held-out set, trainG is 3.6 points worse, which is more than the 1.9-point
+  seed gap. Adding labelF (2.4 times the data) didn't help on the old labels. On the pool,
+  trainG is better than trainE, and it disagrees with the rules less often (291 vs 442).
+- **valG (18:11–07:41):** canary passed. 668 records labelled (fight 588, tactic 80), 0 run
+  errors, mean 3,474 actions per rollout, 52.7% reached 5,000 actions. That's faster than
+  estimated (525). The driver finished at 07:41 and left no processes behind.
+- **reportG:** canary passed. The long rollouts replayed the short ones in 14,040 of 14,040
+  comparable runs, so every comparison is paired seed by seed.
+
+  | Horizon (actions) | Long result is a tie | Short label = long winner | Long split-half (ceiling) | Winner = 5,000's | Label's choice vs rules: W–L, mean, p | trainE vs rules | trainG vs rules |
+  |---|---|---|---|---|---|---|---|
+  | 50 | 540 / 668 | 0.49 (128) | 0.88 (64) | 0.53 | 68–11, +0.13, <0.001 | 37–18, +0.07, 0.007 | 33–12, +0.08, 0.001 |
+  | 150 | 456 | 0.50 (212) | 0.76 (104) | 0.51 | 108–33, +0.17, <0.001 | 57–39, +0.08, 0.04 | 49–28, +0.07, 0.01 |
+  | 500 | 267 | 0.48 (401) | 0.55 (234) | 0.57 | 148–97, +0.16, <0.001 | 112–84, +0.08, 0.03 | 75–55, +0.08, 0.048 |
+  | 1,500 | 130 | 0.42 (538) | 0.44 (401) | 0.65 | 170–131, +0.22, 0.014 | 152–113, +0.16, 0.010 | 104–73, +0.19, 0.012 |
+  | **5,000** | 87 | 0.38 (581) | 0.39 (482) | 1 | **162–142, +0.22, 0.14** | 144–139, +0.20, 0.41 | 88–91, +0.23, 0.62 |
+
+  Values are the tournament's score over the rollout (deepest level gained − 3 if dead), and
+  "mean" is the per-record mean difference. Label vs rules covers the 334 records where they
+  differ, trainE 319 and trainG 210. Sign p is one-sided, for the chooser. Death rates by 5,000
+  actions are 46–51% for every option.
+  - At 5,000 actions, eight rollouts can't tell options apart: seeds 1–4 and 5–8 pick the same
+    winner in 39% of records, against a chance of about 33%. The short label agrees with the
+    long winner (38%) as often as the long rollouts agree with themselves.
+  - Summed over records, though, the label's choice is ahead of the rules' at every horizon, and
+    significantly so up to 1,500 actions. So are trainE's and trainG's choices.
+  - By option pair at 5,000 (label's choice over the rules'): flee over melee 69–50, mean +0.62;
+    throw over melee 74–79, −0.03; heal over fight 10–6. Fight records 145–130 (+0.24); tactic
+    records 17–12 (+0.08).
+- **Why trainE still lost in play** (finalF, from its decision logs): E00 overrode the rules
+  9,531 times. 6,351 of those were flee instead of melee (26 per game) and 2,016 throw instead
+  of melee. One flee, with the rules taking over afterwards, gains on average. Fleeing every
+  time the question comes up is a different policy, and nothing in the labels measures it.
+
+### Session 7 verdicts (by the pre-committed rules)
+1. **The main test is inconclusive:** at 5,000 actions, the label's choice beats the rules'
+   162–142 (mean +0.22), p = 0.14. The labels don't mislead: the rules don't win at any
+   horizon. Per decision, long results with K = 8 are close to pure noise.
+2. **The labels point the right way for one decision at a time.** With the rules continuing
+   afterwards, the label's choice wins significantly up to 1,500 actions and stays ahead at
+   5,000. trainE's and trainG's overrides do too. So the gap between labels and play isn't the
+   label horizon.
+3. **The likely gap is compounding.** Rollout labels value one override followed by the rules.
+   In play the model overrides at every decision, mostly by fleeing (26 times per game for E00).
+   That repeated policy is the thing that loses.
+4. **trainG isn't better than trainE** on trainE's held-out set (0.594 vs 0.630). More of the
+   same labels didn't help there. trainG overrides less and does better on the pool.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
