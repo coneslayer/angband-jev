@@ -1517,6 +1517,125 @@ player reports its deepest level and its state at the checkpoints. Neither chang
 4. **trainG isn't better than trainE** on trainE's held-out set (0.594 vs 0.630). More of the
    same labels didn't help there. trainG overrides less and does better on the pool.
 
+## Session 8 (18 h, run 2026-10-20)
+
+Session 7 found that the label's choice beats the rules' choice when it is made once and the
+rules then play on, at every horizon up to 1,500 actions (5,000 is too noisy to tell). In play,
+though, trainE overrides the rules about 40 times per game (E00: 6,351 flee-for-melee and 2,016
+throw-for-melee overrides in 240 games), and it loses. This session tests whether the loss comes
+from overrides piling up.
+
+How a fight decision works matters here. It is made once per monster when the monster first
+comes within 6 squares, and the choice becomes that monster's plan for the whole encounter. So
+"once per monster" is already true, and piling up means across monsters: a model that says
+"flee" to most new monsters flees from most of the dungeon.
+
+### Questions
+1. If the model must hand control back to the rules after each override, does it stop losing?
+   Does it beat rules+?
+2. Is there a dose response: no cooldown, the label horizon, 1,000 actions?
+3. Does trainG play better than trainE under the same cooldown?
+
+### Plan (`driver8.py`, one stage, 18 h, 13 slots)
+`MODEL_COOLDOWN` (new in the player): after the model overrides the rules, further overrides are
+ignored for a set number of actions. The model is still asked, and the record shows the blocked
+override (`ration: cooldown`) and the action count. A cooldown equal to the label horizon
+(fight 150, tactic 50) is exactly what the labels measured: one override, then the rules.
+In finalF's E00 logs, a cooldown of about 150 actions would have kept about a third of the
+overrides (3,255 of 9,531, using game turns ÷ 10 as actions).
+
+| Arm | Model | Cooldown after an override |
+|---|---|---|
+| rules+ (baseline) | – | – |
+| E-all | trainE, no gate, oil/potion guards | none (finalF's E00, now on rules+) |
+| E-cool | trainE, same | the label horizon: fight 150, tactic 50 actions |
+| E-cool1000 | trainE, same | 1,000 actions |
+| G-cool | trainG, same | the label horizon |
+| rules+-replay | – | first 24 starts, determinism canary |
+
+Every arm runs on rules+ (caution +1). Starts follow a fixed order, 4 fresh to 1 bank (fresh
+seeds 2800000+, bank seeds 2850000+ from session 5's bank). The stage plays them in that order
+until 20 minutes before the end, and every start completed by all five main arms is analysed.
+Expect about 1,300–1,400 starts: about 83 s per rules game, plus about 44 s of model calls per
+model game, since four model arms queue on one laya server. Stopping depends only on the clock,
+never on results.
+
+### Pre-committed decision rules
+- **Score** as before: depth − 3 per death; paired by start.
+- **Compounding:** supported if E-cool beats E-all head to head with W > L and sign p < 0.05.
+  E-cool1000 against E-all and against E-cool shows the dose response (reported, no rule).
+- **Promotion:** a model arm is promoted if, against rules+, W > L, deaths ≤ rules+ + 2, the
+  death-penalty sweep says "better", and sign p < 0.0125 (four model arms, so 0.05 ÷ 4). If
+  several pass, the one with the best mean difference is promoted. A promoted arm becomes the
+  player for session 9 and the collector for labels taken from the model's own play.
+- **trainG vs trainE:** G-cool against E-cool head to head (reported, no rule).
+- **Canaries:**
+  - at least 600 complete starts, and at least 75% of started starts complete;
+  - rules+-replay identical in at least 90% of its starts;
+  - model arms consulted at least 0.9 of the time, with at most 100 throws in any game;
+  - the cooldown binds: each cooldown arm has blocked overrides and fewer changes per game than
+    E-all.
+- **Reported for model arms:** changes per game, by (model, rules) pair; blocked overrides.
+
+### Run log
+- **Smoke test** (`runs/session8/smoke`, 13 slots, 09:17–09:20 on 10-18; games capped at 1,500
+  actions): every canary passed.
+  - 18 of 18 starts complete in every arm; 0 errors, 0 cuts; replay 2 of 2 identical.
+  - Model arms consulted 1.0, with rules+ underneath (`RULES_CAUTION: 1` in the logs).
+  - The cooldown binds. Changes per game: E-all 10.8, E-cool 3.9, E-cool1000 1.5, G-cool 3.5.
+    Blocked overrides: 142, 160 and 132. In one E-cool game, the override at action 311 blocks
+    those at 353, 402 and 432, and the next is allowed after 461.
+  - With four model arms, laya answers in about 460 ms per call (finalF: about 150 ms). It's
+    slower, but no call timed out.
+- **Launch:** `runs/session8/2026-10-20`, 18:30 on 10-20; the stage ran until 12:12 on 10-21
+  (1,062 min). Every canary passed.
+  - 1,336 starts begun, 1,329 complete in all five arms (1,063 fresh, 266 bank); 0 errors.
+    12 games were cut at the deadline, and those starts are excluded.
+  - Replay 24 of 24 identical. The cooldown binds: changes per game E-all 41.0, E-cool 14.2,
+    E-cool1000 5.4, G-cool 13.3 (blocked overrides 0, 45,570, 63,390 and 36,199). Real games run
+    far longer than the smoke test's 1,500-action cap, so the counts are higher than there.
+  - rules+: 996 deaths, mean depth 5.19.
+
+| Against rules+ (1,329 pairs) | W | L | Mean diff (80% CI) | Deaths | Sweep | Sign p |
+|---|---|---|---|---|---|---|
+| E-all | 416 | 674 | −0.85 (−0.96, −0.73) | 1,104 | worse | 1.0 |
+| E-cool | 467 | 626 | −0.52 (−0.64, −0.40) | 1,054 | worse | 1.0 |
+| E-cool1000 | 525 | 569 | −0.13 (−0.25, −0.01) | 1,001 | worse | 0.91 |
+| G-cool | 532 | 558 | −0.18 (−0.30, −0.06) | 1,018 | worse | 0.79 |
+
+| Head to head | W | L | Mean diff (80% CI) | Deaths | Sign p |
+|---|---|---|---|---|---|
+| E-cool vs E-all | 565 | 461 | +0.33 (0.22, 0.43) | 1,054 vs 1,104 | 0.0006 |
+| E-cool1000 vs E-all | 642 | 417 | +0.72 (0.60, 0.82) | 1,001 vs 1,104 | <0.0001 |
+| E-cool1000 vs E-cool | 567 | 452 | +0.39 (0.28, 0.49) | 1,001 vs 1,054 | 0.0002 |
+| G-cool vs E-cool | 585 | 474 | +0.34 (0.23, 0.44) | 1,018 vs 1,054 | 0.0004 |
+
+On bank starts (deeper characters) no arm differs clearly from rules+ (E-cool1000 98–85,
+G-cool 85–91); the losses come from fresh starts.
+
+### Verdicts
+1. **Promotion: none.** Every model arm loses to rules+; no arm has W > L. rules+ stays the
+   player.
+2. **Compounding: the pre-committed rule passes, but the explanation it was meant to test
+   doesn't hold up.** E-cool beats E-all (p = 0.0006), and the dose response is clean: fewer
+   overrides, smaller loss. But the loss per override does not shrink when overrides are spaced
+   out: about −0.021 per override for E-all, −0.037 for E-cool, −0.024 for E-cool1000. If
+   overrides hurt mainly by piling up, isolated overrides should cost less, and they don't. The
+   simpler reading is dilution: trainE's overrides are wrong on average one at a time, and the
+   cooldown just makes fewer of them. This contradicts session 7 only on the surface: the labels'
+   choice beats the rules, but trainE's choice where it differs from the rules is often not the
+   label's (held-out accuracy 0.63), and two thirds of E-all's overrides are flee-for-melee
+   (35,751 of 54,513).
+3. **trainG plays better than trainE** under the same cooldown (+0.34, p = 0.0004), with about
+   the same number of overrides (13.3 vs 14.2 per game) and −0.014 per override. Offline
+   held-out accuracy did not show this (session 7: 0.594 vs 0.630), so the offline metric is not
+   a reliable stand-in for play.
+4. **Next:** the model's overrides need to be right more often, not rarer. Options: gate
+   overrides on confidence again with trainG (fewer, better-chosen overrides rather than a
+   clock); restrict overrides to the pairs that don't lose (measure the per-pair outcome from
+   these logs first); or label decisions from the model's own games so it learns from the states
+   its overrides create.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

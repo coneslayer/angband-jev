@@ -887,6 +887,15 @@ function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
 
 // MODEL_GUARD=oil,potion,flee: モデル方策で消耗品を使い切る/逃走を覆す答えをルールの選択に戻す (Session 3)
 const MODEL_GUARD = new Set((process.env.MODEL_GUARD ?? "").split(",").map((t) => t.trim()).filter(Boolean));
+// MODEL_COOLDOWN=fight=150,tactic=50 (または数値1つ): モデルがルールを覆したら、その行動数だけルールに任せる。
+// ラベルが測ったのは「1回覆して以降ルール」なので、覆しが連続する方策との差を測る (Session 8)
+const MODEL_COOLDOWN: Record<string, number> = {};
+for (const kv of (process.env.MODEL_COOLDOWN ?? "").split(",").filter(Boolean)) {
+  const [t, n] = kv.includes("=") ? kv.split("=") : ["*", kv];
+  MODEL_COOLDOWN[t] = Number(n) || 0;
+}
+const cooldownFor = (type: string) => MODEL_COOLDOWN[type] ?? MODEL_COOLDOWN["*"] ?? 0;
+let modelCooldownUntil = -1; // この行動数まではモデルの覆しを使わない
 const itemCount = (inv: any[], pred: (it: any) => boolean): number =>
   inv.filter((it: any) => it && pred(it)).reduce((n: number, it: any) => n + (it.qty ?? 1), 0);
 /** 発動したガード名 (null なら通す) */
@@ -940,7 +949,13 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
     let useModel = modelChoice !== null && (modelConfidence === null || modelConfidence >= DECISION_MIN_CONFIDENCE);
     const guard = useModel ? modelGuard(type, c, modelChoice!) : null;
     if (guard) useModel = false;
-    await logDecision(type, c, req, { model_choice: modelChoice, model_confidence: modelConfidence, acted: useModel ? "model" : "rules", ...(guard ? { guard } : {}) });
+    let ration: string | null = null;
+    if (useModel && modelChoice !== c.rules && cooldownFor(type) > 0) {
+      if (rolloutActions < modelCooldownUntil) { useModel = false; ration = "cooldown"; }
+      else modelCooldownUntil = rolloutActions + cooldownFor(type);
+    }
+    await logDecision(type, c, req, { model_choice: modelChoice, model_confidence: modelConfidence, acted: useModel ? "model" : "rules",
+      actions: rolloutActions, ...(guard ? { guard } : {}), ...(ration ? { ration } : {}) });
     return useModel ? modelChoice : null;
   }
   if (!LLM_ENABLED) return null;
