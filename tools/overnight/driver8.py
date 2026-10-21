@@ -32,6 +32,8 @@ SMOKE_MINUTES = {"finalH": 15}
 REPLAY_N = 24
 N_STARTS = 2000  # more than fit: the stage runs to its deadline and analyses the starts complete in every main arm
 LABEL_COOLDOWN = "fight=150,tactic=50"  # the rollout labels' horizons
+STARTS = {"rng": "finalH", "fresh": 2800000, "bank": 2850000}  # seeds; a later session sets its own
+HEAD_TO_HEAD = (("E-all", "E-cool"), ("E-all", "E-cool1000"), ("E-cool", "E-cool1000"), ("E-cool", "G-cool"))
 
 
 def arms_for(run):
@@ -74,14 +76,16 @@ def override_stats(gdirs):
 
 def starts_for(run):
     pool = D2.bank_files(run)
-    rng = random.Random("finalH")
+    rng = random.Random(STARTS["rng"])
     out, nf, nb = [], 0, 0
     for i in range(18 if run.smoke else N_STARTS):
         if i % 5 == 4 and pool:
-            out.append({"id": f"{2850000 + nb}-bank", "seed": 2850000 + nb, "cls": "random", "restore": rng.choice(pool)}); nb += 1
+            seed = STARTS["bank"] + nb
+            out.append({"id": f"{seed}-bank", "seed": seed, "cls": "random", "restore": rng.choice(pool)}); nb += 1
         else:
             c = D.CLASSES[nf % len(D.CLASSES)]
-            out.append({"id": f"{2800000 + nf}-{c}", "seed": 2800000 + nf, "cls": c, "restore": None}); nf += 1
+            seed = STARTS["fresh"] + nf
+            out.append({"id": f"{seed}-{c}", "seed": seed, "cls": c, "restore": None}); nf += 1
     return out
 
 
@@ -164,7 +168,7 @@ def stage_tournament(run, name, deadline):
         if a.get("cooldown") and a["name"] in stats and "E-all" in stats:
             checks.append((f"{a['name']}: cooldown binds", stats[a["name"]]["blocked_by_cooldown"] > 0 and
                            stats[a["name"]]["changes_per_game"] < stats["E-all"]["changes_per_game"]))
-    for base, other in (("E-all", "E-cool"), ("E-all", "E-cool1000"), ("E-cool", "E-cool1000"), ("E-cool", "G-cool")):
+    for base, other in HEAD_TO_HEAD:
         res["head_to_head"][f"{other} vs {base}"] = compare(base, other)
     res["canary"] = D2.canary(res, checks)
     return res

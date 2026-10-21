@@ -1694,7 +1694,112 @@ the bins are 0, 0.02, 0.05, 0.1 and 0.2. Expect about 4,500 labels (about 1,000 
   (trainG's confidence is on a 0–0.4 scale), and leaving out guard-blocked records. smoke2 ran
   before the fixes were saved; smoke3 has them, and every canary passed.
 - **Launch:** `runs/session9/2026-10-21`, 12:46 on 10-21; labelH until 17:31.
+- **labelH (12:46–17:31):** every canary passed. 5,460 labels (fight 4,628, tactic 832), 0 run
+  errors, split-half 82.3% (fight) and 79.4% (tactic), all-tie 270 (4.9%). 3,843 labelled
+  disagreements are not all-tie.
 
+| trainG's choice minus rules+'s (labelH) | n | W | L | Mean diff | Sign p (model) |
+|---|---|---|---|---|---|
+| All disagreements | 3,843 | 1,737 | 1,837 | +0.035 | 0.95 (rules: 0.049) |
+| Acted | 1,453 | 617 | 729 | +0.002 | 1.0 (rules: 0.001) |
+| Blocked by the cooldown | 2,390 | 1,120 | 1,108 | +0.055 | 0.41 |
+| Confidence < 0.02 | 862 | 302 | 464 | −0.007 | 1.0 |
+| 0.02–0.05 | 763 | 319 | 387 | +0.017 | 1.0 |
+| 0.05–0.1 | 846 | 409 | 381 | +0.032 | 0.17 |
+| 0.1–0.2 | 932 | 464 | 422 | +0.058 | 0.08 |
+| ≥ 0.2 | 440 | 243 | 183 | +0.106 | 0.002 |
+| flee>melee | 2,102 | 903 | 1,091 | +0.050 | 1.0 |
+| throw>melee | 862 | 431 | 404 | +0.024 | 0.18 |
+| heal>fight | 356 | 178 | 172 | +0.001 | 0.39 |
+| flee>fight | 222 | 32 | 68 | −0.014 | 1.0 |
+| melee>throw | 190 | 122 | 67 | +0.021 | <0.0001 |
+
+- **reportH:** the pre-committed gate kept four pairs (flee>melee, heal>fight, melee>throw,
+  throw>melee) at confidence 0, because those pairs' mean was already positive there. On the odd
+  games it scores 822–853 (p = 0.78): it fails.
+
+### Verdicts
+1. **trainG's overrides lose more often than they win (1,737–1,837), but by less when they lose.**
+   The mean utility is slightly in the model's favour (+0.035), while the count favours the rules
+   (p = 0.049). The overrides it acted on in session 8 are the weakest group (617–729).
+2. **The pre-committed gate fails**, so by the rule no gate goes to a tournament. The rule chose
+   on the mean and was scored on the count, and those disagree here.
+3. **Confidence separates right from wrong overrides cleanly (post hoc).** Win rate rises with
+   every bin, from 39% below 0.02 to 57% at 0.2 and above. This wasn't the pre-committed test,
+   but it holds on both halves of the games separately: at confidence ≥ 0.05, 561–498 (p = 0.03)
+   and 555–488 (p = 0.02); at ≥ 0.1, 356–314 and 351–291. Caveats: the overrides trainG actually
+   acted on at ≥ 0.05 are only even (400–390), and in session 6 trainE gated at 0.05 lost to rules+
+   (88–107). A confidence gate on trainG needs its own tournament before anyone relies on it.
+4. **By pair:** melee-for-throw (122–67) and throw-for-melee at confidence ≥ 0.05 (307–242) win.
+   Flee-for-fight in heal/flee decisions loses (32–68). Flee-for-melee, the commonest override,
+   loses on count at any confidence (573–607 at ≥ 0.05) despite a positive mean.
+5. **labelH is the first set of labels from a model's own games, with rules+ continuing.** It's
+   ready for trainH.
+
+## Session 10 (22 h, run 2026-10-21)
+
+Session 9's pre-committed gate failed, but trainG's confidence separated right overrides from
+wrong ones on both halves of the games: at confidence ≥ 0.05 they win more often than the rules'
+choice, and below it they lose. That is a post-hoc finding, so it needs its own test in play,
+on new starts. In parallel, trainH is the phase's first model trained partly on labels from a
+model's own games.
+
+### Questions
+1. Does trainG beat rules+ when it acts only at confidence ≥ 0.05, or ≥ 0.1?
+2. Does adding labelH make a model whose overrides are right more often, on held-out labelH?
+3. Which of the gated player's overrides are right, on its own states (for the next round)?
+
+### Plan (`driver10.py`, 13 slots)
+| Phase | Track | Stage | Time | What |
+|---|---|---|---|---|
+| 1 | CPU + GPU serving | finalJ | until 9.75 h before the end (about 12 h) | tournament on new seeds (fresh 2900000+, bank 2950000+ from session 5's bank), fixed order, 4 fresh to 1 bank: rules+; **G-c05** (trainG acting only at confidence ≥ 0.05, oil/potion guards, label-horizon cooldown as session 8's G-cool); **G-c10** (the same at 0.1); rules+-replay on the first 24 starts |
+| 2 | GPU | trainH | to 20 min before the end | laya from the base model on labelD + labelE + labelF + labelH (about 18,900 train items), 4 epochs (fewer if they don't fit), the game-hash split; scored on all held-out and on each part; trainG also answers held-out labelH; both models' overrides there are scored against the rules with the labels' utilities, by confidence |
+| 2 | CPU | labelJ | to 30 min before the end | rollout labels on G-c05's finalJ games, rules+ continuing, disagree and agree 3 to 1 (driver9's pool and labeller) |
+| 2 | CPU | reportJ | the rest | driver9's override report on labelJ, with overrides split into acted, blocked by the cooldown and blocked by the gate |
+
+The gated arms keep session 8's cooldown, so the only change from G-cool is the gate. Expect
+about 1,400 complete starts (3 main arms instead of 5, and 2 model arms sharing laya). At
+that size a sign test at p < 0.025 needs roughly 66 more wins than losses in 1,100 decided pairs.
+trainH: 18,861 items × 4 epochs × 0.403 s (trainG's rate) is about 8.4 h, which fits phase 2's
+9.4 h with the five evaluations.
+
+Two things are mixed in trainH's data: labelD–F's rollouts continue with the rules at caution
+0, while labelH's continue with rules+; labelD is from the TS engine.
+
+### Pre-committed decision rules
+- **Score** as before: depth − 3 per death; paired by start.
+- **Promotion:** a gated arm is promoted if, against rules+, W > L, deaths ≤ rules+ + 2, the
+  death-penalty sweep says "better", and sign p < 0.025 (two arms, so 0.05 ÷ 2). If both pass,
+  the one with the better mean difference. A promoted arm becomes the player for session 11.
+- **G-c05 vs G-c10:** head to head, reported, no rule.
+- **trainH plays next** (replacing trainG in session 11's arms) if, on held-out labelH, its
+  overrides at confidence ≥ 0.05 win a larger share of decided records (W ÷ (W + L)) than
+  trainG's, and its held-out accuracy beats the majority baseline.
+- **Canaries:** at least 600 complete starts and at least 75% of started starts complete; replay
+  identical in at least 90%; each gated arm consulted at least 0.9 of the time, at most 100 throws
+  in any game, and its gate blocks some overrides; labelJ as labelH (at least 300 labels,
+  split-half at least 65%, all-tie at most 25%, run errors at most 2%).
+- **Reported:** changes per game and pairs per arm; blocked by the gate and by the cooldown;
+  reportJ's tables.
+
+### Code changes
+- `driver8.py`: the start seeds and head-to-head pairs are module settings (`STARTS`,
+  `HEAD_TO_HEAD`), so session 10 reuses its tournament. Session 8's starts are unchanged.
+- `driver9.py`: the pool, labeller and report take their inputs as arguments
+  (`build_pool`, `label`, `overrides`, `report`), and an override's status is acted, cooldown or
+  gate. Re-running the report on session 9's labels reproduces reportH exactly.
+
+### Run log
+- **Smoke test** (`runs/session10/smoke`, 17:38–17:47 on 10-21; games capped at 1,500 actions,
+  trainH on 300 items for 1 epoch): every canary passed.
+  - finalJ: 18 of 18 starts complete in every arm, 0 errors, 0 cuts; replay 2 of 2 identical.
+  - The gate binds. G-c05: 2.8 changes per game, 96 overrides blocked by the gate and 51 by the
+    cooldown. G-c10: 2.0 changes per game, 122 blocked by the gate and 20 by the cooldown.
+  - trainH ran end to end, with every evaluation. Held-out labelH has 476 records; trainG
+    overrides the rules on 350 of them, 199 at confidence ≥ 0.05 (110–80). So the trainH rule
+    will compare about 200 records per model, which is noisy.
+  - labelJ and reportJ ran on G-c05's smoke games, with overrides split into acted, cooldown and
+    gate.
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

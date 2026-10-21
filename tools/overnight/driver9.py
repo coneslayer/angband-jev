@@ -8,7 +8,7 @@ See docs/finetune-laya-plan.md, "Session 9". Honest view (PLAYER_VIEW=1), C engi
            where it agreed come 3 to 1, each shuffled with a fixed seed. The rollout continuation is rules+
            (RULES_CAUTION=1), the player the overrides have to beat.
   reportH  per record, the label's mean utility of trainG's choice minus the rules' choice: by pair, type,
-           acted/cooldown and confidence. A gate (allowed pairs, confidence threshold) is chosen on one half of the
+           acted/cooldown/gate and confidence. A gate (allowed pairs, confidence threshold) is chosen on one half of the
            games and scored on the other half.
 Resumable via RUN/state.json; `touch RUN/STOP` stops between stages. Never restart it mid-stage.
 
@@ -42,11 +42,17 @@ def disagrees(r): return bool(r.get("model_choice") and r.get("rules_choice") an
 
 
 def pool(run):
-    """trainG's fight/tactic decisions from session 8 (one per game, turn and type), snapshot paths relative to the
-    session 8 run: disagree and agree 3 to 1, each shuffled with a fixed seed. Written once."""
+    """trainG's fight/tactic decisions from session 8, snapshot paths relative to the session 8 run. Written once."""
     dec = run.d("labelH", "decisions.jsonl")
-    if os.path.exists(dec): return dec
-    root = os.path.join(run.prior8, "finalH", ARM)
+    if not os.path.exists(dec):
+        run.state["labelH_pool"] = build_pool(run.prior8, os.path.join("finalH", ARM), dec, "labelH", run.smoke); run.save()
+    return dec
+
+
+def build_pool(base, rel, dec, seed, smoke):
+    """The fight/tactic decisions of the games in base/rel (one per game, turn and type), snapshot paths relative to
+    base: disagree and agree 3 to 1, each shuffled with a fixed seed."""
+    root = os.path.join(base, rel)
     dis, agr, seen = [], [], set()
     for g in sorted(os.listdir(root)):
         f = os.path.join(root, g, "decisions.jsonl")
@@ -56,29 +62,32 @@ def pool(run):
             if r.get("decision_type") not in TYPES or not r.get("snapshot") or key(r) in seen: continue
             if r.get("guard"): continue  # the model's choice was impossible (no oil, no potion), so never played
             seen.add(key(r))
-            r["snapshot"] = os.path.join("finalH", ARM, g, r["snapshot"])
+            r["snapshot"] = os.path.join(rel, g, r["snapshot"])
             (dis if disagrees(r) else agr).append(r)
-    rng = random.Random("labelH")
+    rng = random.Random(seed)
     rng.shuffle(dis); rng.shuffle(agr)
     order, ai = [], 0
     for i, r in enumerate(dis):
         order.append(r)
         if i % 3 == 2 and ai < len(agr): order.append(agr[ai]); ai += 1
     order += agr[ai:]
-    if run.smoke: order = order[:24]
+    if smoke: order = order[:24]
     with open(dec + ".tmp", "w") as f:
         for r in order: f.write(json.dumps(r) + "\n")
     os.replace(dec + ".tmp", dec)
-    run.state["labelH_pool"] = {"records": len(order), "disagree": len(dis), "agree": len(agr)}; run.save()
-    return dec
+    return {"records": len(order), "disagree": len(dis), "agree": len(agr)}
 
 
 # ── CPU ──
 def stage_label(run, name, deadline):
-    dec = pool(run)
+    return label(run, name, pool(run), run.prior8, deadline)
+
+
+def label(run, name, dec, base, deadline):
+    """Rollout labels for the records in dec (snapshots relative to base), rules+ continuing."""
     out = run.d(name, "labels.jsonl")
     urls = [f"http://127.0.0.1:{4300 + i + D.PORT_OFFSET}" for i in range(run.slots)]
-    script = ["tools/rollout/run.ts", "--decisions", dec, "--dir", run.prior8, "--out", out, "--servers", ",".join(urls),
+    script = ["tools/rollout/run.ts", "--decisions", dec, "--dir", base, "--out", out, "--servers", ",".join(urls),
               "--workers", str(run.slots), "--types", ",".join(TYPES), "--k", "8", "--k-min", "4", "--order", "file",
               "--utility", "v2"]
     env = {"BUSHO_TMP": run.d(name, "tmp", "x")[:-2], "ANGBAND_C": D.C_BIN, "RULES_CAUTION": "1", **D5.HONEST}
@@ -120,10 +129,23 @@ def tally(rows):
 def half(game_id): return int(hashlib.sha1(game_id.encode()).hexdigest(), 16) % 2
 
 
+def status(r):
+    """Why the rules acted, or that the model did."""
+    return "acted" if r.get("acted") == "model" else "cooldown" if r.get("ration") == "cooldown" else "gate"
+
+
 def stage_report(run, name, deadline):
     lab = run.d("labelH", "labels.jsonl")
     if not os.path.exists(lab) or not os.path.getsize(lab): return {"skipped": "no labelH labels"}
-    raw = {key(r): r for r in map(json.loads, open(run.d("labelH", "decisions.jsonl")))}
+    res = report(overrides(lab, run.d("labelH", "decisions.jsonl")), run.smoke)
+    with open(run.d(name, "report.json"), "w") as f: json.dump(res, f, indent=1)
+    return res
+
+
+def overrides(lab, dec):
+    """One row per labelled record (not all-tie): the model's and rules' choices, and for disagreements the label's
+    mean utility of the model's choice minus the rules'."""
+    raw = {key(r): r for r in map(json.loads, open(dec))}
     rows = []
     for line in open(lab).read().split("\n")[:-1]:
         m = json.loads(line)["meta"]
@@ -132,8 +154,12 @@ def stage_report(run, name, deadline):
         u, mc, rc = m["u_mean"], r.get("model_choice"), r.get("rules_choice")
         win = strict(m["u_mean"])
         rows.append({"game": m["game_id"], "type": m["decision_type"], "model": mc, "rules": rc, "label": win,
-                     "conf": r.get("model_confidence") or 0, "blocked": r.get("ration") == "cooldown",
+                     "conf": r.get("model_confidence") or 0, "status": status(r),
                      "diff": (u[mc] - u[rc]) if disagrees(r) and mc in u and rc in u else None})
+    return rows
+
+
+def report(rows, smoke):
     dis = [x for x in rows if x["diff"] is not None]
     agr = [x for x in rows if x["diff"] is None and x["model"] and x["model"] == x["rules"]]
     by = lambda f, xs: {k: tally([x["diff"] for x in xs if f(x) == k]) for k in sorted({f(x) for x in xs}, key=str)}  # noqa: E731
@@ -144,7 +170,7 @@ def stage_report(run, name, deadline):
            "agree_label_is_rules": round(sum(x["label"] == x["rules"] for x in agr) / max(1, len(agr)), 4),
            "agree_n": len(agr),
            "by_pair": by(lambda x: f"{x['model']}>{x['rules']}", dis), "by_type": by(lambda x: x["type"], dis),
-           "by_status": by(lambda x: "cooldown" if x["blocked"] else "acted", dis),
+           "by_status": by(lambda x: x["status"], dis),
            "by_conf": by(lambda x: bin_of(x["conf"]), dis),
            "conf_at_least": {str(b): tally([x["diff"] for x in dis if x["conf"] >= b]) for b in CONF_BINS}}
     # a gate chosen on half 0 of the games, scored on half 1
@@ -157,8 +183,7 @@ def stage_report(run, name, deadline):
     res["gate"] = {"pairs": pairs, "min_conf": tau, "chosen_on": tally([x["diff"] for x in a if gate(x)]),
                    "scored_on": tally([x["diff"] for x in b if gate(x)]),
                    "scored_on_share_kept": round(sum(map(gate, b)) / max(1, len(b)), 4)}
-    res["canary"] = D2.canary(res, [("disagree records >= 100", run.smoke or len(dis) >= 100)])
-    with open(run.d(name, "report.json"), "w") as f: json.dump(res, f, indent=1)
+    res["canary"] = D2.canary(res, [("disagree records >= 100", smoke or len(dis) >= 100)])
     return res
 
 
