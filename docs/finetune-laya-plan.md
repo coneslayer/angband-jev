@@ -1636,6 +1636,65 @@ G-cool 85–91); the losses come from fresh starts.
    these logs first); or label decisions from the model's own games so it learns from the states
    its overrides create.
 
+## Phase: labels from the model's own games (sessions 9 onward)
+
+Session 8 showed that trainG's overrides lose to rules+ one at a time, not by piling up. The
+labels it was trained on came from the rules' own games. The states a model reaches when it
+plays are different (it has fled from things, thrown oil, kept fighting), and nothing taught it
+what to do there. This phase labels decisions from the model's own games, finds out which
+overrides are right, and trains on those states. The loop: play, label, (gate or retrain), play
+again.
+
+- **Session 9 (5 h, now):** label trainG's own session 8 decisions; measure which overrides are
+  right, by pair and by confidence; choose a gate on half of the games and check it on the other
+  half.
+- **Session 10 (overnight):** depending on session 9:
+  - if the gate holds up on the held-out half, a tournament of gated trainG against rules+, while
+    labelling continues on CPU;
+  - in either case, trainH: laya from the base model on labelD–F plus labelH.
+- **Later:** the best player's games become the next round's label pool.
+
+## Session 9 (5 h, run 2026-10-21)
+
+### Questions
+1. On states that trainG's own play reaches, how often is its override better than rules+'s
+   choice, judged by rollouts with rules+ continuing?
+2. Which overrides are right: by (model, rules) pair, by decision type, by whether it acted or the
+   cooldown blocked it, and by trainG's confidence?
+3. Is there a gate (a set of pairs, a minimum confidence) under which the overrides win, and does
+   it hold up on games it wasn't chosen on?
+
+### Plan (`driver9.py`, CPU only, 13 slots)
+| Stage | Time | What |
+|---|---|---|
+| labelH | to 15 min before the end | rollout labels (K = 8, adaptive from 4, utility v2, horizons fight 150 / tactic 50) on fight/tactic decisions from session 8's G-cool games. Disagree and agree records 3 to 1, each shuffled with a fixed seed. Records the guards blocked (no oil, no potion) are left out, since the choice was never possible. |
+| reportH | the rest | per record, the label's mean utility of trainG's choice minus the rules' choice; tallies by pair, type, acted/cooldown and confidence bin; the gate |
+
+Changes from earlier labels:
+- The rollout continuation is rules+ (`RULES_CAUTION=1`), the player the overrides now have to
+  beat. labelD–F used the rules at caution 0.
+- The states come from a model's games, not the rules' games.
+
+Pool: 45,937 disagree and 78,487 agree records (one per game, turn and type). trainG's
+confidence on its overrides runs from 0 to about 0.4 (median 0.055, 90th percentile 0.2), so
+the bins are 0, 0.02, 0.05, 0.1 and 0.2. Expect about 4,500 labels (about 1,000 an hour).
+
+### Pre-committed decision rules
+- **Labels canaries** as labelF: at least 300 labels, split-half at least 65%, all-tie at most
+  25%, run errors at most 2%.
+- **Gate:** chosen on the games with sha1(game_id) even: the pairs with at least 30 records and a
+  positive mean difference, then the lowest confidence bin at which those pairs' overrides have a
+  positive mean. Scored on the odd games. **The gate goes to a session 10 tournament only if, on
+  the odd games, W > L with sign p < 0.05.**
+- **Reported, no rule:** overall disagree W/L; by pair, type, acted/cooldown, and confidence bin.
+
+### Run log
+- **Smoke tests** (`runs/session9/smoke`, `smoke2`, `smoke3`; 24 records each): the pipeline
+  works from end to end, with 0 run errors. Two fixes after the first: the confidence bins
+  (trainG's confidence is on a 0–0.4 scale), and leaving out guard-blocked records. smoke2 ran
+  before the fixes were saved; smoke3 has them, and every canary passed.
+- **Launch:** `runs/session9/2026-10-21`, 12:46 on 10-21; labelH until 17:31.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
