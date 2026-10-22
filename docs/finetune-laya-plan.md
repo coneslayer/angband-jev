@@ -1888,6 +1888,60 @@ Two things are mixed in trainH's data: labelD–F's rollouts continue with the r
    often. It trained for 3 epochs, not 4.
 6. **labelJ adds 8,927 labels from the gated player's own states**, ready for the next training
    round.
+
+## Session 11 (12 h, planned 2026-10-22)
+
+Session 10 left two leads. Gated at 0.1, trainG was the closest any model has come to rules+
+(669–627, p = 0.13), and trainH, which replaces it, overrides correctly more often on held-out
+labelH. Both label sets also say the cooldown blocks good overrides: at confidence ≥ 0.1 the
+overrides it blocked would have won (labelJ 597–478, labelH 466–388, summed over depths).
+
+Session 10's labels don't support gating by depth. Overrides at ≥ 0.1 win most clearly at
+DL 0–2 (labelJ 413–325, labelH 294–241) and are about even at DL 8 and below (64–62, 55–60).
+So the bank-start advantage isn't explained by better overrides deeper down, and it isn't
+tested here.
+
+### Questions
+1. Does trainH, acting only at confidence ≥ 0.1, beat rules+?
+2. With the gate at 0.1, does dropping the cooldown help or hurt in play? Session 8's E-all
+   (no gate, no cooldown) was far worse, but its overrides were mostly low-confidence.
+
+### Plan (`driver11.py`, one stage, 13 slots)
+| Stage | Time | What |
+|---|---|---|
+| finalK | until 20 min before the end (about 11.4 h) | tournament on new seeds (fresh 3000000+, bank 3050000+ from session 5's bank), fixed order, 4 fresh to 1 bank: rules+; **H-c10** (trainH `runs/session10/2026-10-21/trainH/ckpt-e3-s0.final`, acts only at confidence ≥ 0.1, oil/potion guards, label-horizon cooldown, as G-c10); **H-c10-nocool** (the same without the cooldown); rules+-replay on the first 24 starts |
+
+No training or labelling: laya serves the tournament on the GPU throughout, and 12 h isn't
+enough for both a tournament worth running and a training round. At session 10's rate (about
+137 complete starts an hour with 3 main arms), expect about 1,550 complete starts and roughly
+1,200 decided pairs per arm. A sign test at p < 0.025 then needs about 68 more wins than
+losses, a 53% win rate. G-c10 managed 51.6%, so an arm only as good as G-c10 won't be promoted;
+trainH has to be better in play, not only on labels.
+
+### Pre-committed decision rules
+- **Score** as before: depth − 3 per death; paired by start.
+- **Promotion:** an arm is promoted if, against rules+, W > L, deaths ≤ rules+ + 2, the
+  death-penalty sweep says "better", and sign p < 0.025 (two arms). If both pass, the one with
+  the better mean difference. A promoted arm becomes the player for session 12.
+- **Cooldown:** dropped from the gated player (in later sessions' arms) if H-c10-nocool beats
+  H-c10 head to head with W > L, sign p < 0.05 and deaths ≤ H-c10's + 2. Otherwise it stays.
+- **Canaries:** at least 600 complete starts and at least 75% of started starts complete; replay
+  identical in at least 90%; each gated arm consulted at least 0.9 of the time, at most 100 throws
+  in any game, and its gate blocks some overrides.
+- **Reported:** fresh and bank separately; changes per game and pairs per arm; blocked by the
+  gate and by the cooldown.
+
+### Code changes
+- `driver11.py`: session 10's tournament (`driver10.stage_tournament`, with its gate-binds
+  canary) with session 11's arms, seeds and head-to-head pair.
+
+### Run log
+- **Smoke test** (`runs/session11/smoke`, 17:44–17:47 on 10-22; games capped at 1,500 actions):
+  every canary passed. 18 of 18 starts complete in every arm, 0 errors, 0 cuts; replay 2 of 2
+  identical. Both arms load trainH, are consulted every time and stay under 13 throws a game.
+  The gate binds in both. H-c10: 2.0 changes per game, 102 overrides blocked by the gate and 97 by
+  the cooldown. H-c10-nocool: 4.3 changes per game, 120 blocked by the gate and none by the
+  cooldown, so the cooldown setting takes effect.
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
