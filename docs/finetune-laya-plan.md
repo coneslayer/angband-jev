@@ -1800,6 +1800,94 @@ Two things are mixed in trainH's data: labelD–F's rollouts continue with the r
     will compare about 200 records per model, which is noisy.
   - labelJ and reportJ ran on G-c05's smoke games, with overrides split into acted, cooldown and
     gate.
+- **Launch:** `runs/session10/2026-10-21`, 18:25 on 10-21, extended to 22 h (the extra 4 h go to
+  the tournament); finalJ until 06:40 on 10-22, then trainH and labelJ until about 16:25.
+- **finalJ (18:25 on 10-21 to 06:42 on 10-22):** every canary passed. 1,682 of 1,688 started
+  starts complete in every main arm (1,345 fresh, 337 bank), 0 errors, at most 4 cut by the
+  deadline per arm; replay 24 of 24 identical. Both gated arms consulted 1.0 of the time, at most
+  57 throws in a game. rules+: 1,240 deaths, mean depth 5.2.
+
+| Arm vs rules+ | W–L | Mean diff | Deaths | Sweep | Sign p | Changes per game | Blocked by gate | Blocked by cooldown |
+|---|---|---|---|---|---|---|---|---|
+| G-c05 | 675–673 | −0.03 | 1,242 | trade-off | 0.49 | 10.0 | 39,256 | 25,589 |
+| G-c10 | 669–627 | +0.06 | 1,234 | better | 0.13 | 6.9 | 60,903 | 14,406 |
+
+| By kind of start | G-c05 vs rules+ | G-c10 vs rules+ | G-c10 vs G-c05 |
+|---|---|---|---|
+| Fresh (1,345) | 544–582, −0.12; deaths 1,000 vs 973 | 568–547, +0.01; 982 vs 973 | 570–498 (p = 0.015) |
+| Bank (337) | 131–91 (p = 0.004), +0.33; 242 vs 267 | 101–80, +0.24; 252 vs 267 | 87–93 |
+| All | 675–673 | 669–627 | 657–591 (p = 0.033), deaths 1,234 vs 1,242 |
+
+  Commonest changes, G-c05 (G-c10 is similar in proportion): flee>melee 7,838, throw>melee 5,341,
+  melee>throw 1,600, heal>fight 1,046.
+- **trainH (06:42–14:15):** 3 epochs, not 4. The driver capped them: phase 2 began at 06:42, and
+  4 epochs of 18,861 items didn't fit before 16:05 with the evaluations. Training also ran at
+  0.469 s per item-epoch (with labelJ sharing the machine), not the 0.403 assumed, so 4 epochs
+  would have needed about 9.8 h. Train items 18,861 (labelD 2,823, labelE 4,117, labelF 10,096,
+  labelH 5,460 before the split), held out 2,231. Every canary passed.
+
+| Held-out accuracy | trainH | Majority | Rules | trainG |
+|---|---|---|---|---|
+| All (2,231) | 62.1% | 50.7% | 55.1% | |
+| labelD + E (579) | 62.7% | 46.1% | 53.5% | |
+| labelF (1,176) | 62.7% | 52.2% | 57.4% | |
+| labelH (476) | 59.9% | 52.3% | 51.5% | 59.5% |
+
+| Overrides on held-out labelH (476 records) | trainG | trainH |
+|---|---|---|
+| All | 170–162 (n 350) | 129–110 (n 262) |
+| Confidence ≥ 0.05 | 110–80, 57.9%, +0.047 | **83–48, 63.4%**, +0.070 (p = 0.001) |
+| Confidence ≥ 0.1 | 71–47, 60.2% | 56–30, 65.1% |
+| Confidence ≥ 0.2 | 25–20 | 23–13 |
+
+- **labelJ (06:42–15:55):** every canary passed. 8,927 labels (fight 7,359, tactic 1,568) on
+  G-c05's own finalJ games, 0 run errors, split-half 82.5% and 81.4%, all-tie 623 (7.0%).
+- **reportJ:** 6,104 labelled disagreements that aren't all-tie.
+
+| trainG's choice minus rules+'s (labelJ, G-c05's games) | n | W | L | Mean diff | Sign p (model) |
+|---|---|---|---|---|---|
+| All disagreements | 6,104 | 2,543 | 2,803 | +0.034 | 1.0 (rules: 0.0002) |
+| Acted | 1,513 | 718 | 729 | +0.016 | 0.62 |
+| Blocked by the cooldown | 1,750 | 892 | 790 | +0.103 | 0.007 |
+| Blocked by the gate (< 0.05) | 2,841 | 933 | 1,284 | +0.002 | 1.0 |
+| Confidence 0.05–0.1 | 1,310 | 591 | 659 | +0.020 | 0.97 |
+| 0.1–0.2 | 1,349 | 678 | 623 | +0.055 | 0.07 |
+| ≥ 0.2 | 604 | 341 | 237 | +0.172 | <0.0001 |
+| flee>melee | 2,979 | 1,255 | 1,590 | +0.057 | 1.0 |
+| throw>melee | 1,730 | 671 | 697 | +0.010 | 0.77 |
+| heal>fight | 660 | 289 | 280 | +0.001 | 0.37 |
+| melee>throw | 280 | 162 | 112 | +0.015 | 0.002 |
+| melee>flee | 67 | 50 | 16 | +0.137 | <0.0001 |
+
+  The report's gate chooser again kept four pairs at confidence 0 (their mean is positive) and
+  loses on both halves by count (1,053–1,162, then 1,085–1,253), as in session 9.
+- **Machine:** one Windows low-memory event at 06:57; the watchdog throttled labelJ to 9 games.
+  The driver finished at 15:56 on 10-22.
+
+### Verdicts
+1. **No promotion.** G-c05 is even with rules+ (675–673, p = 0.49, sweep "trade-off").
+   G-c10 passes every condition but significance (669–627, 6 fewer deaths, sweep "better",
+   p = 0.13). It is the best result for a model arm so far, but it isn't a win.
+2. **The higher gate is better.** G-c10 beats G-c05 head to head (657–591, p = 0.033), almost all
+   of it on fresh starts (570–498). labelJ says why: on G-c05's own games, overrides at confidence
+   0.05–0.1 lose (591–659), and only those at ≥ 0.1 win (1,019–860; ≥ 0.2: 341–237). Session 9's
+   post-hoc 0.05 threshold was too low once the model played its own games.
+3. **The overrides G-c05 acted on are even (718–729)**, which matches its even tournament. As in
+   session 9, overrides the cooldown blocked would have won (892–790), so the cooldown still
+   blocks good overrides along with bad ones.
+4. **Both gated arms do better on bank starts than on fresh ones** (G-c05 131–91 against 544–582).
+   Session 8 leans the same way for every arm (each was relatively better on bank starts), but
+   much less. Bank starts begin at DL ≥ 5 (mean depth 7.6 against 4.6). The likeliest reading is
+   that the model helps deeper down and hurts early, but it isn't tested: labelE and the bank
+   savepoints both come from session 5, so familiarity with those games isn't ruled out.
+5. **trainH replaces trainG in session 11** by the pre-committed rule: on held-out labelH at
+   confidence ≥ 0.05 its overrides win 63.4% (83–48) against trainG's 57.9% (110–80), and its
+   held-out accuracy (62.1%) beats the majority (50.7%). The margin is small and the samples are
+   about 140 and 190 records, so trainH is the better bet rather than a proven improvement. Its
+   held-out labelH accuracy is barely above trainG's (59.9% against 59.5%), and it overrides less
+   often. It trained for 3 epochs, not 4.
+6. **labelJ adds 8,927 labels from the gated player's own states**, ready for the next training
+   round.
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
