@@ -1989,6 +1989,29 @@ trainH has to be better in play, not only on labels.
    One guess is the commonest override, flee for melee, which may cost turns or food drops. Food
    is visible in the UI and handled by the rules, so it's worth looking at the starved games
    before the next tournament: a fix in the rules would apply under every arm.
+
+### Starvation follow-up (2026-10-23)
+- **How the characters starve** (finalK, all arms): mostly by running out of food deep in the
+  dungeon without a Word of Recall, then walking up and starving on the way (rules+ 43 of 63,
+  H-c10 53 of 86, H-c10-nocool 52 of 85). The rest: out of food with a WoR (4–6), a shallow
+  restock trip started only at zero food (6, 15, 14), other (9–15). All three arms run out of
+  food in about as many games (85, 91, 90); the model arms survive the walk up less often.
+- **A rule tried and dropped:** `RULEFIX=food` started the walk up before the food ran out
+  (rations ≤ one per three levels, no WoR, gold ≥ 5). Checked on session 11's starts, rules+
+  only, paired with session 11's own rules+ games (`runs/session11/foodcheck`, 07:09–08:24; the
+  code is in its frozen `src`). With the rule off, 20 of 20 re-run games were identical.
+  - The 63 starts where rules+ starved: starvation 63 → 46 and deaths 63 → 57, but W–L 8–8 and
+    mean depth 6.19 → 5.97. The rule fired in 92 games.
+  - 453 other starts: W–L 7–13, 5 new starvations, deaths 302 → 301.
+  - It doesn't help, so it was reverted.
+- **Why it doesn't help:** the walk up is the problem, not when it starts. In the games that
+  starved anyway, the player spends thousands of actions per level looking for an up staircase;
+  when exploration stalls, the stall rule forces a descent, and it oscillates between two levels.
+  WoR is near the end of the town shopping list (after 30 Cure Critical Wounds, 20 Phase Door and
+  12 Teleportation), so poor characters seldom hold one; of the players who starved walking up,
+  about a third had 150 gold or more at their last restock. Fixing that means changing how the
+  rules shop or navigate, a larger change than this follow-up.
+- **The model arms' extra starvation is still unexplained.**
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
