@@ -280,8 +280,8 @@ function hurtsOnContact(m: any): boolean {
   if (!STATIONARY_RE.test(name)) return false;
   return /floating eye/i.test(name) || (m.maxhp ?? m.hp ?? 99) > 5;
 }
-// ── 序盤ルール改善 (RULEFIX=danger,restock,escape。"none" で旧ルール、A/B 用) ──
-const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape").split(",").map((t) => t.trim()));
+// ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ) ──
+const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood").split(",").map((t) => t.trim()));
 // モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
 const MON_BLOW_AVG: Map<string, number> = (() => {
   const m = new Map<string, number>();
@@ -318,6 +318,7 @@ function meleeTooCostly(m: any, p: any): boolean {
   return theirDmg * turnsToKill >= 0.5 * (1 - 0.5 * RULES_CAUTION) * p.hp;
 }
 let restockTrip = false; // 浅層で消耗品切れ → 上り階段で町へ (着いたら補充して解除)
+let upRerolls = 0, upRerollDepth = -1; // RULEFIX=upnav: 補給帰還中、この深さで階を振り直した回数
 
 // CL<12 の BFS 回避マス (毎ターン更新): 上記の敵のマス (hard: 歩くと攻撃になる) とその隣 (soft: 接触攻撃を受ける)
 let avoidHard = new Set<string>();
@@ -1882,6 +1883,8 @@ async function buySupplies(state: any) {
   const shoppingList = [
     { name: "Ration" as string | null, tvals: [28], target: 6, stores: [0] }, // food first: starvation
     { name: "Wooden Torch", tvals: [TVAL.LIGHT], target: 3, stores: [0] }, // vanilla torches burn out
+    // RULEFIX=wor: 帰還の巻物 1 枚を回復薬より先に。無いと食料切れのとき上り階段を歩いて餓死していた
+    ...(RULEFIX.has("wor") ? [{ name: "Word of Recall" as string | null, tvals: [25], target: 1, stores: [4, 5] }] : []),
     { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [4, 5] },
     { name: "Phase Door", tvals: [25], target: 20, stores: [4, 5] },
     { name: "Teleportation", tvals: [25], target: 12, stores: [4, 5, 6] },
@@ -2756,10 +2759,28 @@ async function playGame() {
           state = await sendCommand({ type: CMD.WALK, direction: dir });
           continue;
         }
+        // RULEFIX=upnav: 約 300 行動探しても上り階段が見えない → 下り階段へ戻り、降りてすぐ上る (この深さの階を作り直す)。
+        // 接続階段なので降りた先は上り階段の上。探索で上り階段を探すと 1 階に数千行動かかり、その間に餓死していた
+        if (state.depth < upRerollDepth) upRerolls = 0;
+        if ((RULEFIX.has("upnav") || (RULEFIX.has("upnavfood") && foodN <= 3)) && upRerolls < 10
+          && state.turn - levelEntryTurn > 3000) { // upnavfood: 食料が残り 3 個以下の時だけ (他の帰還では新しい階の危険の方が大きい)
+          const onDown = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.DOWN_STAIR);
+          if (onDown) {
+            upRerolls++; upRerollDepth = state.depth;
+            addLesson(state.turn, state.depth, "階振り直し", `補給帰還中、上り階段が見つからない。降りてすぐ上る (${upRerolls}回目)`);
+            state = await sendCommand({ type: CMD.GO_DOWN });
+            continue;
+          }
+          const stair = nearestStair(tiles, px, py); // 歩ける上り階段なら上り、多くは下り階段
+          if (stair && stair.len <= 150) {
+            state = await sendCommand({ type: CMD.WALK, direction: stair.dir });
+            continue;
+          }
+        }
         // 上り階段が未発見 → 通常の探索に任せる (降下は restockTrip 中は止める)
       }
     }
-    if (state.depth === 0) restockTrip = false;
+    if (state.depth === 0) { restockTrip = false; upRerolls = 0; upRerollDepth = -1; }
 
     // === 優先度2: 緊急回復+逃走 (深層は閾値引き上げ) ===
     const isExtremeDeep = state.depth >= 20;

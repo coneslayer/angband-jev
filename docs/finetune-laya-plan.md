@@ -2012,6 +2012,80 @@ trainH has to be better in play, not only on labels.
   about a third had 150 gold or more at their last restock. Fixing that means changing how the
   rules shop or navigate, a larger change than this follow-up.
 - **The model arms' extra starvation is still unexplained.**
+
+### Up-staircase fix (2026-10-23)
+The walk up stalls because, with connected stairs, every level of the walk needs an up staircase
+found by exploring. Three rules were tried on the same 516 session 11 starts (the 63 where rules+
+starved and 453 others), rules+ only, paired with session 11's rules+ games. With the rules off,
+20 of 20 re-run games were identical in both checks.
+- **`upnav`**: on a walk back to town, after about 300 actions on a level with no up staircase in
+  sight, go back to a down staircase, go down and come straight back up. Arriving on the
+  staircase, this gives a fresh level at the same depth. At most 10 times per depth.
+- **`wor`**: Word of Recall added to the shopping list after the Wooden Torch, before the
+  potions and scrolls.
+- **`upnavfood`**: `upnav` only when 3 or fewer food items are left.
+
+| Rule vs rules+ (session 11) | Starved starts: W–L | Starved | Deaths | Other starts: W–L | Deaths | Games changed |
+|---|---|---|---|---|---|---|
+| upnav (`runs/session11/rulecheck`) | 15–3 (p = 0.004) | 63 → 38 | 63 → 54 | 69–73 | 302 → 327 | 170 |
+| upnav + wor | 17–4 | 63 → 37 | 63 → 53 | 76–76 | 302 → 329 | 182 |
+| upnavfood (`runs/session11/rulecheck2`) | 9–2 (p = 0.033) | 63 → 43 | 63 → 59 | 4–3 | 302 → 303 | 13 |
+
+- **upnav fixes the walk but costs deaths elsewhere.** Most trips back to town are for potions or
+  Phase Door, not food: 255 of 296 first re-makes in the other starts began with more than 5 food.
+  Each fresh level brings fresh monsters, and of the 56 other starts newly dead, 49 had re-made a
+  level (31 newly alive). Re-making usually works quickly: about half the trips find an up
+  staircase on the first fresh level, and few reach the cap.
+- **wor makes no difference** (12–13 against upnav alone). WoR is already bought in some games
+  (45 of 516 with upnav, 82 with wor), and a WoR in the pack seldom changes the game.
+- **upnavfood is adopted** as part of RULEFIX's default (`danger,restock,escape,upnavfood`). It
+  keeps most of the gain where it's needed and changes only 13 of the other 453 games. Of the 44
+  games that still starve, 28 never re-made a level: most of them start the walk only when hungry
+  with no food left, from DL 5–9, and starve before they need to.
+
+## Session 12 (12 h, planned 2026-10-23)
+
+Session 11's tournament again on new starts, with upnavfood in rules+ under every arm. Session
+11's best arm, H-c10-nocool, was 670–611 against rules+ (p = 0.053) with more deaths, and beat
+H-c10 head to head at p = 0.069. Neither result is decisive. A second session on new starts tests
+whether they hold, and session 11's starvation excess may shrink now that the walk back to town
+works better.
+
+### Questions
+1. With upnavfood in the rules, does H-c10 or H-c10-nocool beat rules+?
+2. Does H-c10-nocool beat H-c10 again, and do sessions 11 and 12 together settle the cooldown?
+3. Do the model arms still starve more than rules+?
+
+### Plan (`driver12.py`, one stage, 13 slots)
+| Stage | Time | What |
+|---|---|---|
+| finalL | until 20 min before the end (about 11.4 h) | tournament on new seeds (fresh 3100000+, bank 3150000+ from session 5's bank), fixed order, 4 fresh to 1 bank: rules+; **H-c10**; **H-c10-nocool**; rules+-replay on the first 24 starts. Arms as in session 11 |
+
+Expect about 1,600 complete starts, as in session 11.
+
+### Pre-committed decision rules
+- **Promotion and cooldown:** session 11's rules, applied to session 12 alone.
+- **Pooled:** sessions 11 and 12 together (pairs are within a session) are reported for both
+  arms against rules+ and head to head. They count only for the cooldown, and only at p < 0.01.
+  The baselines differ slightly (upnavfood), so pooling answers whether the effect is
+  consistent, not how big it is.
+- **Canaries:** as in session 11.
+- **Reported:** as in session 11, plus starvation per arm.
+
+### Code changes
+- `busho-player.ts`: RULEFIX `upnav`, `upnavfood` and `wor` (opt-in). `upnavfood` is added to the
+  default.
+- `rulecheck11.py`: the rule check above. `RULECHECK_VARIANTS` overrides the variants.
+- `driver12.py`: session 11's driver with new seeds.
+
+### Run log
+- **Smoke test** (`runs/session12/smoke`, 12:09–12:11 on 10-23; games capped at 1,500 actions):
+  every canary passed. 18 of 18 starts complete in every arm, 0 errors, 0 cuts; replay 2 of 2
+  identical; the frozen source has upnavfood in the default. Both arms are consulted every time
+  and stay under 17 throws a game, and the gate binds in both. H-c10: 2.1 changes per game, 77
+  overrides blocked by the gate and 24 by the cooldown. H-c10-nocool: 3.2 changes per game, 103
+  blocked by the gate, none by the cooldown.
+- **Launch:** `runs/session12/2026-10-23`, 12:11 on 10-23 (driver PID 19163); finalL until 23:51.
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
