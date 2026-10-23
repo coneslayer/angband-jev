@@ -1942,6 +1942,53 @@ trainH has to be better in play, not only on labels.
   The gate binds in both. H-c10: 2.0 changes per game, 102 overrides blocked by the gate and 97 by
   the cooldown. H-c10-nocool: 4.3 changes per game, 120 blocked by the gate and none by the
   cooldown, so the cooldown setting takes effect.
+- **Launch:** `runs/session11/2026-10-22`, 17:47 on 10-22 (driver PID 2519); finalK until 05:27
+  on 10-23.
+- **finalK (17:47 on 10-22 to 05:28 on 10-23):** every canary passed. 1,633 of 1,639 started
+  starts complete in every main arm (1,306 fresh, 327 bank), 0 errors, at most 4 cut by the
+  deadline per arm; replay 24 of 24 identical. Both arms consulted 1.0 of the time, at most 50
+  throws in a game. rules+: 1,182 deaths, mean depth 5.08. No low-memory events.
+
+| Arm vs rules+ | W–L | Mean diff | Deaths | Mean depth | Sweep | Sign p | Changes per game | Blocked by gate | Blocked by cooldown |
+|---|---|---|---|---|---|---|---|---|---|
+| H-c10 | 637–627 | +0.07 | 1,225 | 5.23 | trade-off | 0.40 | 5.7 | 51,404 | 15,008 |
+| H-c10-nocool | 670–611 | +0.15 | 1,213 | 5.28 | trade-off | 0.053 | 14.1 | 49,335 | 0 |
+
+| Death penalty (W–L, mean diff) | 0 | 1 | 3 | 6 | 20 |
+|---|---|---|---|---|---|
+| H-c10 | 639–573, +0.15 | 640–594, +0.12 | 637–627, +0.07 | 639–650, −0.01 | 641–654, −0.38 |
+| H-c10-nocool | 662–557 (p = 0.001), +0.20 | 668–580, +0.18 | 670–611, +0.15 | 668–642, +0.09 | 671–643, −0.18 |
+
+| By kind of start | H-c10 vs rules+ | H-c10-nocool vs rules+ | nocool vs H-c10 |
+|---|---|---|---|
+| Fresh (1,306) | 549–531, +0.12 | 575–513 (p = 0.03), +0.18 | 392–367 |
+| Bank (327) | 88–96, −0.11 | 95–98, +0.01 | 72–52 (p = 0.04) |
+| All | 637–627 | 670–611 | 464–419 (p = 0.069), deaths 1,213 vs 1,225 |
+
+  Deaths per level reached are the same in every arm (rules+ 0.143, H-c10 0.143, H-c10-nocool
+  0.141): the models go deeper and die in proportion. Death causes that differ most (rules+,
+  H-c10, H-c10-nocool, all starts): starvation 63, 86, 85; blacklock mage 7, 21, 15; kobold 7, 19,
+  17; snaga 56, 33, 35; giant white louse 28, 20, 14. Commonest changes, H-c10-nocool: flee>melee
+  15,257, throw>melee 3,209, melee>throw 2,680, heal>fight 801.
+
+### Verdicts
+1. **No promotion.** Both arms win more pairs than they lose, but both die more than rules+
+   allows (+43 and +31 against +2), and neither sweep is "better".
+2. **H-c10-nocool is the best model arm yet** (670–611, +0.15, p = 0.053), and at death penalty 0
+   it wins clearly (662–557, p = 0.001). It goes deeper at the same death rate per level, so the
+   extra deaths come with the extra depth. Whether that counts as better depends on the death
+   penalty, which the promotion rule fixes at 3 and the sweep tests up to 20.
+3. **The cooldown stays, by the rule.** Without it the player beats H-c10 (464–419, 12 fewer
+   deaths) but at p = 0.069, short of 0.05. The direction agrees with the labels: the cooldown
+   blocks more good overrides than bad ones.
+4. **Session 10's bank advantage doesn't replicate.** With trainH the gains are on fresh starts
+   and the bank starts are even or slightly worse. It was likely noise or specific to trainG.
+5. **Starvation is the largest single source of the models' extra deaths** (85–86 against 63,
+   about 22 of the 31–43). The games aren't longer overall (about 9,000–9,250 actions in every
+   arm), and the starved characters reach the same depth (about DL 6), so the cause isn't known.
+   One guess is the commonest override, flee for melee, which may cost turns or food drops. Food
+   is visible in the UI and handled by the rules, so it's worth looking at the starved games
+   before the next tournament: a fix in the rules would apply under every arm.
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
