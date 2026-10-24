@@ -2086,6 +2086,54 @@ Expect about 1,600 complete starts, as in session 11.
   overrides blocked by the gate and 24 by the cooldown. H-c10-nocool: 3.2 changes per game, 103
   blocked by the gate, none by the cooldown.
 - **Launch:** `runs/session12/2026-10-23`, 12:11 on 10-23 (driver PID 19163); finalL until 23:51.
+- **finalL (12:11 to 23:52 on 10-23):** every canary passed. 1,611 of 1,617 started starts
+  complete in every main arm (1,288 fresh, 323 bank), 0 errors, at most 5 cut by the deadline per
+  arm; replay 24 of 24 identical. Both arms consulted 1.0 of the time, at most 50 throws in a
+  game. rules+: 1,198 deaths, mean depth 5.17.
+
+| Arm vs rules+ | W–L | Mean diff | Deaths | Mean depth | Sweep | Sign p | Changes per game | Blocked by gate | Blocked by cooldown |
+|---|---|---|---|---|---|---|---|---|---|
+| H-c10 | 647–579 | +0.14 | 1,161 | 5.23 | better | 0.028 | 5.9 | 50,868 | 15,535 |
+| H-c10-nocool | 629–590 | +0.14 | 1,158 | 5.23 | better | 0.14 | 14.2 | 48,659 | 0 |
+
+| Death penalty (W–L, sign p) | 0 | 1 | 2 | 3 | 6 | 20 |
+|---|---|---|---|---|---|---|
+| H-c10 | 614–554, 0.042 | 629–561, 0.026 | 639–567, 0.020 | 647–579, 0.028 | 669–583, 0.008 | 674–583, 0.006 |
+| H-c10-nocool | 607–573, 0.17 | 615–569, 0.10 | 626–585, 0.13 | 629–590, 0.14 | 651–599, 0.075 | 653–601, 0.075 |
+
+| By kind of start | H-c10 vs rules+ | H-c10-nocool vs rules+ | nocool vs H-c10 |
+|---|---|---|---|
+| Fresh (1,288) | 561–496, +0.16 | 542–503, +0.17 | 389–367 |
+| Bank (323) | 86–83, +0.04 | 87–87, +0.03 | 52–60 |
+| All | 647–579 | 629–590 | 441–427 (p = 0.33), deaths 1,158 vs 1,161 |
+
+| Sessions 11 + 12 pooled | W–L | Sign p |
+|---|---|---|
+| H-c10 vs rules+ | 1,284–1,206 | 0.061 |
+| H-c10-nocool vs rules+ | 1,299–1,201 | 0.026 |
+| nocool vs H-c10 | 905–846 | 0.083 |
+
+  Starvation (rules+, H-c10, H-c10-nocool): 59, 56, 54, against session 11's 63, 86, 85. Other
+  deaths: 1,139, 1,105, 1,104. Death causes that differ most: poison 143, 124, 117; snaga 50, 33,
+  38; soldier 101, 108, 120; scout 23, 30, 35; crow 11, 18, 23. Commonest changes, H-c10:
+  flee>melee 4,201, throw>melee 2,706, melee>throw 1,626, heal>fight 481.
+
+### Verdicts
+1. **No promotion, narrowly.** H-c10 passes three of the four tests: it wins more pairs
+   (647–579), dies less than rules+ (1,161 against 1,198) and its sweep is "better", the first
+   model arm to pass the sweep. But its sign p is 0.028 against the 0.025 the two-arm rule needs.
+   (The driver's own `promote` flag uses a looser test; the pre-committed rule is the one that
+   counts.) H-c10-nocool also dies less and sweeps "better", but at p = 0.14.
+2. **The models no longer die more.** In session 11 both arms died 31–43 more than rules+; here
+   both die 37–40 fewer, at the same depth. The starvation excess is gone (56 and 54 against 59),
+   and other deaths are also lower. With upnavfood in every arm, it isn't possible to say how much
+   of that is the fix and how much is the new starts.
+3. **The cooldown stays.** Head to head the two arms are even (441–427, p = 0.33; deaths 1,158
+   and 1,161), and pooled with session 11 the no-cooldown lead is 905–846, p = 0.083, short of the
+   pre-committed 0.01.
+4. **The gain is small but consistent.** Over the two sessions both arms win about 51.6–52% of
+   decided pairs, all of it on fresh starts; bank starts are even in both sessions. Session 11's
+   lead for H-c10-nocool and session 12's lead for H-c10 are each within the other's noise.
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
