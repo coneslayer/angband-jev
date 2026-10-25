@@ -2296,6 +2296,127 @@ by every model.
    whether labels predict game outcomes at all: for H-c10's labelled games, does the sum of its
    overrides' label gains predict whether the game beat its rules+ pair?
 
+### Do label gains show up in games? (2026-10-25)
+A check from data we already have (`tools/overnight/labelgain13.py runs`). It converts label gains
+into game score, predicts what H-c10 and H-c10-nocool should gain per game, and compares that
+with the tournaments.
+
+- **Calibration.** Session 7 re-ran 668 of labelF's states with 5,000-action rollouts scored like
+  the tournament. Regress the long result of each option against the rules on the short label's
+  gain. The label is taken from seeds 1–4 and the result from seeds 5–8, and the reverse, so
+  they share no randomness, as in play; then the slope is scaled to an 8-seed label. With shared
+  seeds the slope is 1.08, which is inflated, because a death in the first 150 actions counts in
+  both. One unit of label gain is worth, in game score:
+
+| Horizon (actions) | 500 | 1,500 | 5,000 |
+|---|---|---|---|
+| Game score per unit of label gain | 0.98 ± 0.09 | 0.92 ± 0.14 | 0.79 ± 0.18 |
+
+- **Label gains of trainH's overrides** on its own states (labelL and labelM together): acted
+  +0.045 ± 0.005 (2,972), blocked by the cooldown +0.139 ± 0.007 (3,699), blocked by the gate
+  +0.012 ± 0.003 (6,666).
+- **Noise.** A pair's score difference has a standard deviation of about 3.2 (2.6 for the two
+  model arms head to head). The smallest effect a tournament detects at p < 0.025 with 80%
+  power is +0.27 per game for 1,143 pairs, +0.22 for 1,611 and +0.14 for 4,387.
+
+| Comparison | Predicted per game | Observed, pooled | Gap |
+|---|---|---|---|
+| H-c10 vs rules+ (sessions 11–13) | 5.8 changes × 0.045 × 0.79 = **+0.21 ± 0.05** | **+0.086 ± 0.048** | +0.12 ± 0.07 (z ≈ 1.8) |
+| H-c10-nocool vs H-c10 (sessions 11–12) | 8.3 extra changes × 0.139 × 0.79 = **+0.91 ± 0.21** | **+0.037 ± 0.046** | +0.88 ± 0.22 (z ≈ 4) |
+| H-c10-nocool vs rules+ (sessions 11–12) | about +1.1 | +0.142 ± 0.056 | about +1.0 |
+
+Findings:
+1. **H-c10's edge is small even on paper.** If its label gains all turned into game score, it
+   would gain about 0.2 levels a game, which is under the 0.22–0.27 that one session's
+   tournament can see. What we observe is about 40% of that, and the shortfall is within 2
+   standard errors. For H-c10 alone, "too small for one session" explains most of what we've
+   seen.
+2. **Label gains don't add up when overrides come close together.** The overrides the cooldown
+   blocks have the best labels of all, three times the acted ones. Playing them (no cooldown)
+   should have added about 0.9 a game, and it added 0.04. Each label values one override with
+   rules+ taking over afterwards. Overrides soon after another override look good on that
+   assumption, but don't help when the model keeps overriding. This is session 7's compounding
+   explanation, now measured: about 95% of the predicted gain from the extra overrides is lost.
+3. **This answers the planned steps 2 and 3 in large part.** The no-cooldown arm was a
+   dose-response test already: more overrides with good labels gave no more game score.
+
+Caveats: the calibration comes from session 7's rules-play states (caution 0) and stops at 5,000
+actions, while the median tournament game is 7,200 (mean 9,300). The slope falls with horizon,
+so these predictions may be somewhat high. The no-cooldown arm's extra overrides happen in its
+own games, not exactly at the states H-c10's cooldown blocked.
+
+What this suggests for the next session (not pre-committed):
+- **Labels that value a policy, not one override.** Rollouts that continue with H-c10 (model,
+  gate and cooldown) instead of rules+, so that a label measures the override as it will be
+  played. This needs the model consulted inside the rollouts.
+- **Fewer, bigger gains.** At +0.045 a change, H-c10's best case is about 0.2 a game. A model
+  that makes the same few changes better won't be visible in a tournament; it needs decisions
+  with larger effects.
+
+## Session 14 (12 h, planned 2026-10-25)
+
+rules+ scores 3.07 a game in finalM (mean depth 5.22, minus 2.15 for deaths), and H-c10 adds
+about 0.09. This session looks for bigger gains in the rules themselves, where finalM's rules+
+games lose score:
+
+| Where the score goes (finalM, rules+, 1,145 games) | Evidence | Variant |
+|---|---|---|
+| Rangers score 1.14 (86% die); Warriors 4.23, the others 2.3–2.4 | The player never fires a launcher (`CMD.FIRE` is defined but never sent), so Rangers can't use their Short Bow and arrows | **fire** |
+| Poison is the commonest killer (76 deaths, 9%) | Replays: a Paladin poisoned at 5 of 30 HP, holding 6 Cure Light Wounds potions, kept tunnelling and died. The stall escapes (`noProgressCount` ≥ 100 or 500) run before every heal check | **lowheal** |
+| 28% of games reach the 20,000-action cap at a mean depth of 5.8 | Survivors make 27.9 restock trips a game and 37.7 descents, and spend 43% of their actions on DL1–2. A trip starts whenever potions *or* Phase/oil run out with 40 gold, which buys one or two potions | **restock100**, **restockboth** |
+| The same | On DL1–3 the rules wait for CL ≥ DL+2 | **clgate1** |
+
+### Questions
+1. Which of these rule changes raise the score (depth − 3 per death), each on its own?
+2. Do the adopted changes together raise it on starts that weren't used to choose them?
+
+### Variants (`RULEFIX` flags, off by default; rules+ is unchanged)
+- **fire:** with a launcher and matching ammo, shoot a monster 2 or more squares away in line
+  of sight instead of walking up to it, unless the plan is to flee from it or throw oil at it.
+  In town, buy ammo up to 30 (the General Store always has it) right after torches.
+- **lowheal:** below 35% HP, or below 50% while poisoned, the stall escapes are held back. With
+  no monster adjacent, drink a Cure potion first (the strongest one below 35%). With a monster
+  adjacent, the usual emergency flee/heal code runs.
+- **restock100:** a restock trip for potions or escapes needs 100 gold (now 40).
+- **restockboth:** a restock trip starts only when potions *and* Phase/oil are both gone (now
+  either). Food and light trips are unchanged.
+- **clgate1:** on DL1–3, descend at CL ≥ DL+1 (now DL+2).
+
+### Plan (`driver14.py`, 13 slots, CPU only)
+| Stage | Time | What |
+|---|---|---|
+| ruleN | first 9.8 h | First, rules+ re-run on 20 starts (replay canary). Then each variant alone on a fixed sample of 700 of finalM's 1,145 complete starts, start by start, and **fire** also on the other 71 fresh Ranger starts (184 in all). About 3,590 games at about 450 an hour (session 11's rule checks) |
+| confirmN | last 2.2 h | the adopted variants together ("combo") on the other 445 starts first, then on the 700 |
+
+Each variant's game is paired with finalM's rules+ game on the same start. Games are
+deterministic, and both runs freeze their source, so a pair differs only where the variant's
+rule fires.
+
+### Pre-committed decision rules
+- **Replay canary:** at least 18 of the 20 rules+ re-runs identical to finalM (actions, death,
+  depth), else no result counts.
+- **Adopt a variant** if, on its pairs, W > L at a death penalty of 3, one-sided sign p < 0.05
+  and the mean difference is above 0. **fire** is judged on all Ranger starts, and it must not
+  lose on the other sample starts (L > W with p < 0.05). If both restock variants pass, only
+  the one with the larger mean difference is adopted.
+- **New default rules+** (for session 15 and its labels): the combo of the adopted variants, if
+  on the 445 held-out starts it has W > L and a mean difference above 0.
+- **Reported:** W–L, mean difference and sign p at death penalties 0, 1, 3 and 6; deaths,
+  depth, starvation and poison deaths; mean actions; shots, restock trips and descents per game.
+
+### Run log
+- **Smoke test** (`runs/session14/smoke`, 11:01–11:03 on 10-25; 6 sample starts, 2 of them
+  Rangers, plus 1 other Ranger; games capped at 1,500 actions, except the replays): every
+  stage ran end to end. The first try ran every game and then failed in the analysis (a wrong
+  module for the sign test). Fixed and rerun:
+  - Replay canary: 3 of 3 full-length rules+ re-runs (2 bank starts and 1 fresh) identical to
+    finalM, so the new source with the flags off plays session 13's games.
+  - fire: Rangers fired 47 shots a game in 1,500 actions (37–59), more than the 15–20 arrows
+    they start with, so ammo is picked up or bought. restockboth cut restock trips from 0.8 to 0.2
+    a game in 1,500 actions.
+  - With nothing adopted in so short a test, the smoke test forced a combo (fire, lowheal,
+    restockboth) to exercise confirmN: 10 games, 0 errors.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

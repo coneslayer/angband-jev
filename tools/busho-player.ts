@@ -71,7 +71,7 @@ const TVAL = {
   BOOTS: 10, GLOVES: 11, HELM: 12, CROWN: 13, SHIELD: 14, CLOAK: 15,
   SOFT_ARMOR: 16, HARD_ARMOR: 17, DRAG_ARMOR: 18,
   LIGHT: 19, AMULET: 20, RING: 21,
-  BOW: 5, ARROW: 3, BOLT: 4,
+  BOW: 5, SHOT: 2, ARROW: 3, BOLT: 4,
   // 魔法書 (装備対象外)
   MAGIC_BOOK: 30, PRAYER_BOOK: 31, NATURE_BOOK: 32, SHADOW_BOOK: 33, OTHER_BOOK: 34,
 };
@@ -282,6 +282,9 @@ function hurtsOnContact(m: any): boolean {
 }
 // ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ) ──
 const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood").split(",").map((t) => t.trim()));
+// 明示した時だけ (session 14 の検証): fire (射撃武器で撃つ + 矢弾を買う), lowheal (HP 危険域・毒は停滞脱出より回復),
+// restock100 (補給帰還は 100G 以上), restockboth (回復薬と Phase/油の両方が切れたら帰還), clgate1 (DL1-3 は CL >= DL+1 で降下)
+const EARLY_CL_MARGIN = RULEFIX.has("clgate1") ? 1 : 2;
 // モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
 const MON_BLOW_AVG: Map<string, number> = (() => {
   const m = new Map<string, number>();
@@ -1132,6 +1135,9 @@ function spareTorchSlot(inv: any[]): number | null {
 const EARLY_KIT_STEPS: [string, number][] = [["food", 3], ["torch", 2], ["oil", 5], ["phase", 2], ["digger", 1], ["oil", 10], ["phase", 5],
   ["clw", 3], ["clw", 5], ["csw", 2], ["food", 6]];
 async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise<void> {
+  // RULEFIX=fire: 射撃武器があれば、光源の次に矢弾を 30 本まで (雑貨屋に常にある)
+  const ammoTval = RULEFIX.has("fire") ? launcherAmmoTval((await getState()).player) : null;
+  if (ammoTval !== null && steps === EARLY_KIT_STEPS) steps = [...steps.slice(0, 2), ["ammo", 30], ...steps.slice(2)];
   const kinds: Record<string, (i: any) => boolean> = {
     food: i => i.tval === TVAL.FOOD && (i.name ?? "").includes("Ration"),
     torch: i => i.tval === TVAL.LIGHT && (i.name ?? "").includes("Wooden Torch"),
@@ -1140,12 +1146,13 @@ async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise
     digger: i => i.tval === TVAL.DIGGING && (i.name ?? "").includes("Shovel"),
     clw: i => i.tval === TVAL.POTION && (i.name ?? "") === "Cure Light Wounds",
     csw: i => i.tval === TVAL.POTION && (i.name ?? "") === "Cure Serious Wounds", // CLW が置いてない店の代用
+    ammo: i => ammoTval !== null && i.tval === ammoTval,
   };
   const haveOf = (inv: any[], kind: string) =>
     kind === "digger"
       ? inv.filter(i => i.tval === TVAL.DIGGING && i.qty > 0).reduce((a, i) => a + i.qty, 0)
       : inv.filter(i => kinds[kind]!(i) && i.qty > 0).reduce((a, i) => a + i.qty, 0);
-  const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0 };
+  const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0, ammo: 0 };
   let spent = 0, n = 0;
   for (const [kind, target] of steps) {
     const test = kinds[kind]!;
@@ -1192,7 +1199,7 @@ const fightPlan = new Map<string, FightChoice>();
 const fleeSteps = new Map<string, number>();
 // サーバに射線なしで拒否された投擲 ("px,py>mx,my")。同じ地点からは投げずに殴る (拒否はターンが進まず無限ループになる)
 const noThrowLOS = new Set<string>();
-let throwHits = 0, throwKills = 0, throwsMade = 0, earlyFleeActions = 0, earlyFleeStairs = 0, phasesRead = 0, lastEarlyPhaseAction = -99;
+let shotsFired = 0, throwHits = 0, throwKills = 0, throwsMade = 0, earlyFleeActions = 0, earlyFleeStairs = 0, phasesRead = 0, lastEarlyPhaseAction = -99;
 
 // ルール自身の fight 分類: 序盤の高速/強敵は 油 > 逃走 > 殴る
 function rulesFightChoice(m: any, plevel: number, inv: any[], tiles: any[], px: number, py: number): FightChoice {
@@ -1351,6 +1358,20 @@ function findPhaseScroll(inventory: any[]): number | null {
 function findOilFlask(inventory: any[]): number | null {
   const f = inventory.find((item: any) => item.tval === TVAL.FLASK && item.qty > 0);
   return f ? f.slot : null;
+}
+
+// RULEFIX=fire: 装備中の射撃武器に合う矢弾の tval (スリング=弾、クロスボウ=ボルト、弓=矢)。射撃武器なしは null
+function launcherAmmoTval(player: any): number | null {
+  const bow = (player.equipment ?? []).find((e: any) => e.tval === TVAL.BOW);
+  if (!bow) return null;
+  const n = bow.name ?? "";
+  return /Sling/i.test(n) ? TVAL.SHOT : /Crossbow/i.test(n) ? TVAL.BOLT : TVAL.ARROW;
+}
+function findAmmo(player: any): number | null {
+  const t = launcherAmmoTval(player);
+  if (t === null) return null;
+  const a = (player.inventory ?? []).find((item: any) => item.tval === t && item.qty > 0);
+  return a ? a.slot : null;
 }
 
 // Bresenham でプレイヤー→目標の射線が通るか (中間タイルが全て通行可・扉閉でない)
@@ -2321,8 +2342,21 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=lowheal: HP 危険域 (35% 未満、毒なら 50% 未満) では停滞脱出より先に回復。隣接敵がいれば下の緊急回復/逃走に任せる ===
+    // (毒で HP が減り続けるのに停滞脱出で壁を掘り続け、回復薬 6 個を持ったまま死んでいた)
+    const lowHpHold = RULEFIX.has("lowheal") && state.depth >= 1 && (hpPct < 0.35 || (p.timed.poisoned > 0 && hpPct < 0.5));
+    if (lowHpHold && !monsters.some((m: any) => m.distance <= 1)) {
+      const healSlot = hpPct < 0.35 ? findStrongHealingPotion(inv) : findHealingPotion(inv);
+      if (healSlot !== null) {
+        healingsUsed++;
+        addLesson(state.turn, state.depth, "緊急回復", `HP${Math.round(hpPct * 100)}%${p.timed.poisoned > 0 ? "、毒" : ""}。停滞脱出より先に回復薬`);
+        state = await sendCommand({ type: CMD.QUAFF, itemIndex: healSlot });
+        continue;
+      }
+    }
+
     // === 最最優先: 極端な停滞 → 強制脱出 ===
-    if (noProgressCount >= 500) {
+    if (noProgressCount >= 500 && !lowHpHold) {
       // 500回停滞 → visited クリアで探索リセット (同じパターンを打破)
       addLesson(state.turn, state.depth, "停滞リセット",
         `${noProgressCount}回停滞。visitedクリアして探索再開`);
@@ -2331,7 +2365,7 @@ async function playGame() {
       noProgressCount = 0;
       continue;
     }
-    if (noProgressCount >= 100) {
+    if (noProgressCount >= 100 && !lowHpHold) {
       // 100回連続で新タイル訪問なし → 孤立部屋。階段があれば降下、なければ壁を掘る
       const forceDown = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.DOWN_STAIR);
       const forceUp = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.UP_STAIR);
@@ -2743,7 +2777,9 @@ async function playGame() {
       const lightNow = (p.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
       const lightLow = typeof lightNow?.fuel === "number" && /Torch/i.test(lightNow.name ?? "") && lightNow.fuel < 1500
         && spareTorchSlot(inv) === null;
-      if (!restockTrip && (((cureN === 0 || escN === 0) && p.gold >= 40) || ((foodN === 0 || lightLow) && p.gold >= 5))) {
+      const restockGold = RULEFIX.has("restock100") ? 100 : 40;
+      const kitOut = RULEFIX.has("restockboth") ? cureN === 0 && escN === 0 : cureN === 0 || escN === 0;
+      if (!restockTrip && ((kitOut && restockGold <= p.gold) || ((foodN === 0 || lightLow) && p.gold >= 5))) {
         restockTrip = true;
         addLesson(state.turn, state.depth, "補給帰還", `回復薬${cureN} Phase/油${escN} 食料${foodN}、${p.gold}G。上り階段で町へ`);
       }
@@ -3138,6 +3174,22 @@ async function playGame() {
         const key = fkey(m);
         let choice: FightChoice | null = fightPlan.get(key) ?? null;
         const planned = choice !== null;
+        // RULEFIX=fire: 射撃武器と矢弾があれば、離れた敵 (2 マス以上、射線あり) は殴りに行く前に撃つ。逃げる相手と油を投げる相手は除く
+        if (RULEFIX.has("fire") && state.depth >= 1 && m.distance >= 2 && choice !== "flee"
+          && !(choice === "throw" && findOilFlask(inv) !== null)) {
+          const ammo = findAmmo(p);
+          const losKey = `${px},${py}>${m.x},${m.y}`;
+          if (ammo !== null && hasLOS(tiles, px, py, m.x, m.y) && !noThrowLOS.has(losKey)) {
+            const turnBefore = state.turn;
+            state = await sendCommand({ type: CMD.FIRE, target: { x: m.x, y: m.y }, itemIndex: ammo });
+            if (state.turn !== turnBefore) {
+              shotsFired++;
+              acted = true;
+              break;
+            }
+            noThrowLOS.add(losKey); // サーバが拒否: この射線は投擲と同じく覚えておく
+          }
+        }
         if (!choice) {
           if (!lowCLDanger(m, p.level) && !meleeTooCostly(m, p)) continue;
           choice = rulesFightChoice(m, p.level, inv, tiles, px, py);
@@ -3833,7 +3885,7 @@ async function playGame() {
     // 低探索率フロア早期降下: 探索率<15%で1500ターン以上 → 小部屋/孤立フロアなので降りる
     // 探索率が極端に低い場合はkillsもCLも待たない (そのフロアで稼げない)
     const lowExplorationEarlyDescent = currentExplorationPct < 15 && turnsOnLevel > 1500 && state.depth > 0
-      && (state.depth > 3 || p.level >= state.depth + 2 || turnsOnLevel > 8000); // 序盤は CL ゲートを回避させない
+      && (state.depth > 3 || p.level >= state.depth + EARLY_CL_MARGIN || turnsOnLevel > 8000); // 序盤は CL ゲートを回避させない
 
     // If overleveled, skip kill requirement — rush deeper
     // DL20でCL22+, DL10でCL15+でオーバーレベル判定
@@ -3885,8 +3937,8 @@ async function playGame() {
     // 絶対最低CL: DL10→CL8, DL15→CL12, DL20→CL16, DL25→CL20, DL30→CL25
     const absoluteMinCl = state.depth >= 30 ? 25 : state.depth >= 25 ? 20 : state.depth >= 20 ? 16 : state.depth >= 15 ? 12 : state.depth >= 10 ? 8 : 0;
     // 序盤 (DL1-3) は CL >= DL+2 まで降りない (CL1 の 12HP で DL2-4 に潜って Fang/Grip/ゼリーに殺される対策)。長期滞在 (veryLongOnLevel) では緩和
-    const clOk = (p.level >= Math.floor(state.depth * minClRatio) && p.level >= absoluteMinCl && (state.depth > 3 || state.depth === 0 || p.level >= state.depth + 2))
-      || (state.depth >= 1 && state.depth <= 3 && p.level >= state.depth + 2);
+    const clOk = (p.level >= Math.floor(state.depth * minClRatio) && p.level >= absoluteMinCl && (state.depth > 3 || state.depth === 0 || p.level >= state.depth + EARLY_CL_MARGIN))
+      || (state.depth >= 1 && state.depth <= 3 && p.level >= state.depth + EARLY_CL_MARGIN);
 
     // === 装備品質ゲート (v9: CLだけでなく装備の準備状況もチェック) ===
     // DL15+: blows >= 2 (最低限の火力)
@@ -4270,7 +4322,7 @@ async function playGame() {
     console.log(`ROLLOUT_RESULT ${JSON.stringify(result)}`);
     return result;
   }
-  console.log(`  序盤キット: 投擲${throwsMade}回(命中${throwHits}/撃破${throwKills}) 逃走行動${earlyFleeActions}回(階段${earlyFleeStairs}, Phase${phasesRead})`);
+  console.log(`  序盤キット: 射撃${shotsFired}回 投擲${throwsMade}回(命中${throwHits}/撃破${throwKills}) 逃走行動${earlyFleeActions}回(階段${earlyFleeStairs}, Phase${phasesRead})`);
 
   // 最終フレーム + 録画保存
   recordFrame(finalState, finalState.dead ? `死亡: ${deathCause}` : "生存");
