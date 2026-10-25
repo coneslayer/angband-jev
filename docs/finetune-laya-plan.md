@@ -2134,6 +2134,168 @@ Expect about 1,600 complete starts, as in session 11.
 4. **The gain is small but consistent.** Over the two sessions both arms win about 51.6–52% of
    decided pairs, all of it on fresh starts; bank starts are even in both sessions. Session 11's
    lead for H-c10-nocool and session 12's lead for H-c10 are each within the other's noise.
+
+## Session 13 (24 h, planned 2026-10-24)
+
+H-c10 wins about 52% of decided pairs against rules+ over two sessions, short of what a
+12-hour tournament can show. This session works on the model instead of testing it again.
+Two sets of labels from the gated players' own states have never been trained on: labelJ
+(8,927 labels on G-c05's session 10 games) and the states H-c10 itself reaches, which haven't
+been labelled at all. Session 10 found that labels from a model's own games made trainH's
+overrides right more often (63% against trainG's 58% on held-out labelH). This session adds
+more of them and tries two ways of training on them.
+
+### Questions
+1. Does training on labelJ and on labels from H-c10's own states (labelL) make a model whose
+   overrides at the gate are worth more, on held-out states from H-c10's play?
+2. Which is better: training from the base model on everything, or continuing trainH on the new
+   labels?
+3. In play, does the best new model beat H-c10 (a first, short look), and does H-c10 still beat
+   rules+ (a third session for the pooled count)?
+
+### Plan (`driver13.py`, 13 slots)
+| Phase | Track | Stage | Time | What |
+|---|---|---|---|---|
+| 1 | GPU | trainI0 | first 11 h | laya from the base model on labelD–H (trainH's data) plus labelJ: 25,042 train items, 3 epochs (about 9.8 h at 0.469 s per item-epoch, capped to fit). Held out: trainH's held-out games (2,231 records, the same split) and a quarter of labelJ's games (2,123). trainH also answers held-out labelJ |
+| 1 | CPU | labelL | first 11 h | rollout labels on H-c10's session 12 games (trainH's own states), rules+ continuing, K = 8 as before. The disagreements alternate between trainH confidence ≥ 0.1 (the overrides the gate lets through; a third of them in play) and below; agree records 1 in 4. Expect about 10,500 labels |
+| 2 | GPU | trainIL | 7.25 h | **trainIL**: trainI0 continued on labelL's train games (about 7,000 items), 2 epochs. **trainHJL**: trainH continued on labelJ + labelL train games (about 13,000), 2 epochs. Then trainH, trainI0, trainIL and trainHJL answer held-out labelL (a quarter of its games); the two continuations also answer held-out labelJ and trainH's held-out. Chooses finalM's candidate |
+| 2 | CPU | labelM, reportL | 7.25 h | labelM: rollout labels on H-c10's session 11 games, as labelL (for session 14's training). reportL: driver9's override report on labelL |
+| 3 | CPU + GPU serving | finalM | last 5.75 h | tournament on new seeds (fresh 3200000+, bank 3250000+), 4 fresh to 1 bank: rules+; H-c10; **X-c10** (the candidate, gated at 0.1 with the cooldown, as H-c10); rules+-replay on the first 24 starts. About 750 complete starts |
+
+Continued training runs at laya's default learning rates from the checkpoint, the same way
+`train.py` already resumes after an out-of-memory error. The held-out quarter of labelJ and
+labelL is new; labelD–H keep trainH's 10% game-hash split, so its held-out records stay unseen
+by every model.
+
+### Pre-committed decision rules
+- **Gate score:** on held-out labelL, the sum over a model's overrides at confidence ≥ 0.1 of
+  its choice's mean utility minus the rules', per 1,000 records. It counts both how often a
+  gated model acts and how good the actions are.
+- **Candidate for finalM:** the model with the best gate score among trainI0, trainIL and
+  trainHJL, if its score beats trainH's, its held-out labelL accuracy beats the majority, and
+  its accuracy on trainH's held-out is no more than 2 points below trainH's. Otherwise finalM
+  runs with rules+ and H-c10 only.
+- **Session 14's model:** X replaces trainH if, in finalM, X-c10 beats H-c10 head to head
+  (W > L) with deaths ≤ H-c10's + 2. finalM is short (about 750 starts), so this is a choice of
+  which model to take forward, not a promotion.
+- **Promotion** against rules+ as in session 11 (sign p < 0.025 with two model arms, 0.05 with
+  one), on finalM alone. Pooled H-c10 against rules+ over sessions 11–13 is reported.
+- **Canaries:** labels as before (at least 300, split-half at least 65%, all-tie at most 25%,
+  run errors at most 2%); every trained model beats the majority on its held-out set; finalM at
+  least 400 complete starts and 75% of those started, replay identical in at least 90%, each
+  gated arm consulted at least 0.9 of the time, at most 100 throws in a game, the gate binds.
+- **Reported:** each model's held-out accuracy (labelL, labelJ, trainH's held-out) and its
+  overrides on held-out labelL by confidence; reportL's tables (trainH's overrides on its own
+  states by pair, confidence, and acted, cooldown or gate).
+
+### Code changes
+- `driver6.train_eval` takes `base`, a checkpoint to continue from (default: the base model).
+- `driver13.py`: the stages above. Its label pool is driver9's, with the disagreements balanced
+  by confidence.
+
+### Run log
+- **Smoke test** (`runs/session13/smoke`, 09:31–10:37 on 10-24; 300 training items for 1 epoch,
+  150-record held-out sets, games capped at 1,500 actions): every stage ran end to end.
+  - trainI0 trained after 3 out-of-memory retries: another process on the GPU spiked, and
+    `train.py`'s retry handled it. Both continued trainings worked from a checkpoint; trainHJL
+    kept trainH's accuracy on its held-out (0.65 against trainH's 0.71 on 150 records, where
+    trainI0 from the base on 300 items had 0.47).
+  - labelL and labelM: 24 labels each, 0 run errors. reportL ran.
+  - No candidate was chosen on the tiny held-out set, so finalM ran its fallback (rules+ and
+    H-c10). A second finalM with a candidate forced in: 18 of 18 starts complete in every arm, 0
+    errors, replay 2 of 2 identical, every canary passed. X-c10 was consulted every time, had
+    2.2 changes per game, and 121 overrides blocked by the gate and 36 by the cooldown.
+  - One false alarm: a rerun was started while the previous driver was still running (the
+    waiter had the launch shell's PID, and buffered stdout made the log look stopped). The two
+    drivers shared ports and the replay check failed. Rerun alone, it passed. The full run
+    is started with unbuffered output and its PID taken from `^python3`.
+- **Launch:** `runs/session13/2026-10-24`, 10:37 on 10-24 (driver PID 46464). Phase 1 until
+  21:37, phase 2 until 04:52 on 10-25, finalM until 10:17.
+- **trainI0 (10:37 to 20:20):** 25,042 items, 3 epochs, 570 minutes (0.455 s per item-epoch).
+  On held-out labelJ, trainH scores 0.621 against a majority of 0.516.
+- **labelL (10:37 to 21:37):** 11,432 labels (9,721 fight, 1,711 tactic). Of those, 10,672 have
+  a snapshot that trains. 0 run errors; split-half agreement 81.3% (fight) and 82.1% (tactic);
+  all-tie 4.0% and 21.7%. Labelled per stratum: 4,292 high-confidence disagreements, 4,287 low,
+  2,853 agree, out of a pool of 20,811, 44,448 and 100,232.
+- **trainIL (21:37 to 04:47):** trainIL took 114 minutes on 8,011 items and trainHJL 263 minutes
+  on 14,192. Held-out labelL has 2,661 records.
+
+| Model | Acc held-out L (majority 0.500, rules 0.486) | Brier L | Acc held-out J (0.516) | Acc trainH's held-out (0.507) | Overrides at 0.1 on L: W–L, mean diff | Gate score |
+|---|---|---|---|---|---|---|
+| trainH | 0.613 | 0.209 | 0.621 | 0.621 | 574–374, +0.092 | **34.2** |
+| trainI0 | **0.643** | 0.196 | **0.643** | **0.657** | 370–187, +0.113 | 24.9 |
+| trainIL | **0.643** | **0.192** | 0.638 | 0.619 | 336–149, +0.139 | 26.3 |
+| trainHJL | 0.629 | 0.197 | 0.625 | 0.631 | 243–132, +0.123 | 18.0 |
+
+  No candidate: trainH has the best gate score, so finalM ran its fallback (rules+ and H-c10).
+  The new models are more accurate and their overrides at 0.1 are better, but they are less
+  confident: fewer of their disagreements reach 0.1 (586, 503 and 389, against trainH's 990).
+- **Post hoc: the pool's sampling.** The label pool takes trainH's confident disagreements 2.2
+  times as often as its other disagreements and 7.3 times as often as agreements, which favours
+  trainH on a per-record score. Weighted back to how often each kind occurs in play (weights
+  4.8, 10.4 and 35.1), the gate scores are:
+
+| Gate | 0 | 0.02 | 0.05 | 0.1 | 0.2 |
+|---|---|---|---|---|---|
+| trainH | 31.2 | 25.5 | 22.8 | **19.5** | 9.4 |
+| trainI0 | **43.3** | **38.6** | **28.9** | 17.9 | 7.3 |
+| trainIL | 34.3 | 26.8 | 23.7 | 14.8 | 5.9 |
+| trainHJL | 32.2 | 24.0 | 17.2 | 11.6 | 1.6 |
+
+  At the 0.1 gate trainH still leads, so the weighting doesn't change the pre-committed result.
+  At 0.02–0.05 trainI0 is ahead of trainH at any gate. (Script:
+  `tools/overnight/reweight13.py`.)
+- **labelM (21:37 to 04:42):** 6,342 labels, 0 run errors, split-half 80.7% (fight) and 83.4%
+  (tactic), all-tie 3.3% and 21.8%. Not used yet.
+- **reportL** (trainH on its own states, pool-weighted, 7,852 disagreements): overrides H-c10
+  acted on went 1,021–721 (mean +0.045). Those the cooldown blocked went 1,220–863 (mean +0.159),
+  and those the gate blocked went 1,545–1,668 (+0.015). By pair: flee>melee 2,027–2,051 (mean
+  +0.091, from a few large wins); throw>melee 929–615; melee>throw 330–190; heal>fight 351–340.
+- **finalM (04:47 to 10:18 on 10-25):** every canary passed. 1,143 of 1,150 starts complete in
+  every main arm (913 fresh, 230 bank), 0 errors, 5 cut by the deadline per arm; replay 24 of 24
+  identical. rules+: 820 deaths, mean depth 5.22.
+
+| H-c10 vs rules+ | W–L | Mean diff | Deaths | Mean depth | Sweep | Sign p |
+|---|---|---|---|---|---|---|
+| Fresh (913) | 390–383 | +0.07 | 663 vs 659 | 4.73 vs 4.65 | trade-off | 0.41 |
+| Bank (230) | 57–58 | −0.12 | 172 vs 161 | 7.49 vs 7.47 | trade-off | 0.57 |
+| All (1,143) | 447–441 | +0.03 | 835 vs 820 | 5.29 vs 5.22 | trade-off | 0.43 |
+
+| Death penalty | 0 | 1 | 2 | 3 | 6 | 20 |
+|---|---|---|---|---|---|---|
+| H-c10 (W–L, sign p) | 445–392, 0.036 | 444–406, 0.10 | 448–425, 0.23 | 447–441, 0.43 | 459–448, 0.37 | 460–450, 0.38 |
+
+| H-c10 vs rules+, pooled | Pairs | W–L | Deaths (rules+, H-c10) | Sign p |
+|---|---|---|---|---|
+| Session 11 | 1,633 | 637–627 | 1,182, 1,225 | 0.40 |
+| Session 12 | 1,611 | 647–579 | 1,198, 1,161 | 0.028 |
+| Session 13 | 1,143 | 447–441 | 820, 835 | 0.43 |
+| Sessions 11–13 | 4,387 | 1,731–1,647 | 3,200, 3,221 | 0.077 |
+
+  H-c10: 5.9 changes per game, 38,672 overrides blocked by the gate and 11,026 by the cooldown.
+  Commonest changes: flee>melee 2,972, throw>melee 1,866, melee>throw 1,109, heal>fight 391.
+  Starvation: rules+ 32, H-c10 48. Top killers for rules+: poison 76, soldier 75, apprentice 67.
+
+### Verdicts
+1. **No new model.** None of the three new models beat trainH's gate score, so finalM had no
+   candidate and trainH stays the model for session 14. Training on more labels made models
+   that are more accurate everywhere: trainI0 gains 3 points on held-out labelL, 2 on held-out
+   labelJ and 3.6 on trainH's held-out. But at the 0.1 gate, which was tuned for trainH, they act
+   less often. Continuing trainH (trainHJL) was the weakest of the three; training from the base
+   on everything (trainI0) was the most accurate.
+2. **No promotion.** H-c10 against rules+ in finalM is 447–441 (p = 0.43), dies 15 more and
+   sweeps "trade-off". Pooled over three sessions it wins 51.2% of decided pairs (p = 0.077) and
+   dies 21 more in 4,387 pairs. The gated trainH is not clearly better than rules+.
+3. **Label gains don't become game gains.** The overrides H-c10 acts on win their labels
+   1,021–721, and it changes about 6 decisions a game. But the games it plays are even with
+   rules+. Each label scores one decision with rules+ playing on, so this suggests that overrides
+   which help one at a time don't add up over a game, or that the labels' K = 8 rollouts are too
+   short-sighted for decisions whose cost comes later (starvation: 48 against 32 here).
+4. **Possible next steps** (not pre-committed): play trainI0 at a lower gate (0.02–0.05), where
+   the reweighted held-out score is ahead of trainH at any gate. Before training more, check
+   whether labels predict game outcomes at all: for H-c10's labelled games, does the sum of its
+   overrides' label gains predict whether the game beat its rules+ pair?
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

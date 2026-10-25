@@ -202,8 +202,9 @@ def new_labels(run):
 
 
 # ── phase 2: GPU ──
-def train_eval(run, d, data, held, epochs, seed, deadline, smoke_items=300):
-    """Train laya from the base model and evaluate on `held`. Returns metrics plus seconds per item-epoch."""
+def train_eval(run, d, data, held, epochs, seed, deadline, smoke_items=300, base="english"):
+    """Train laya from `base` (the base model, or a checkpoint to continue) and evaluate on `held`. Returns metrics
+    plus seconds per item-epoch."""
     n = sum(1 for _ in open(data))
     if run.smoke:
         small = os.path.join(d, "train.smoke.jsonl")
@@ -212,7 +213,8 @@ def train_eval(run, d, data, held, epochs, seed, deadline, smoke_items=300):
     out = os.path.join(d, f"ckpt-e{epochs}-s{seed}")
     t0 = time.time()
     rc = subprocess.run([sys.executable, "-I", os.path.join(HERE, "train.py"), "--data", data, "--out", out,
-                         "--epochs", str(epochs), "--loss", "soft-ce", "--seed", str(seed), "--deadline", str(deadline)]).returncode
+                         "--epochs", str(epochs), "--loss", "soft-ce", "--seed", str(seed), "--deadline", str(deadline),
+                         "--base", base]).returncode
     secs = time.time() - t0
     if rc != 0 or not os.path.isdir(out + ".final"):
         return {"failed": f"training failed (rc={rc})", "epochs": epochs, "seed": seed}
