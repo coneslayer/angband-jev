@@ -2416,6 +2416,79 @@ rule fires.
     a game in 1,500 actions.
   - With nothing adopted in so short a test, the smoke test forced a combo (fire, lowheal,
     restockboth) to exercise confirmN: 10 games, 0 errors.
+- **Full run** (`runs/session14/2026-10-25`, 16:13 on 10-25 to 01:21 on 10-26, 9.1 h; 13 slots,
+  CPU only; 0 errors). ruleN (3,596 games) ended at 22:50, and confirmN took 2.5 h.
+  - **Replay canary:** 20 of 20 full-length rules+ re-runs identical to finalM. Passed.
+  - **ruleN, each variant alone** (pairs against finalM's rules+ on the same start; W–L,
+    mean difference and sign p at penalty 3):
+
+    | Variant | Pairs | Changed | W–L | Mean diff | p | Deaths | Mean depth | Poison deaths | Mean actions | Per game |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | fire, Rangers | 184 | 183 | 116–49 | **+1.55** | < 0.0001 | 159 → 135 | 3.73 → 4.89 | 25 → 23 | 6,570 → 10,634 | 149 shots |
+    | fire, other sample starts | 592 | 145 | 71–53 | +0.06 | 0.06 | 408 → 404 | 5.53 → 5.58 | 37 → 31 | | |
+    | fire, the 700 sample starts | 700 | 252 | 143–79 | +0.34 | < 0.0001 | 504 → 479 | 5.23 → 5.46 | 50 → 42 | 9,247 → 10,365 | 53 shots |
+    | lowheal | 700 | 178 | 86–27 | +0.28 | < 0.0001 | 504 → 470 | 5.23 → 5.36 | 50 → 51 | 9,247 → 10,134 | |
+    | restock100 | 700 | 204 | 94–79 | +0.06 | 0.14 | 504 → 510 | 5.23 → 5.31 | 50 → 53 | 9,247 → 9,210 | 3.8 trips, 10.5 descents |
+    | restockboth | 700 | 460 | 173–229 | **−0.34** | 1.00 | 504 → 528 | 5.23 → 4.99 | 50 → 63 | 9,247 → 9,123 | 0.3 trips, 6.2 descents |
+    | clgate1 | 700 | 264 | 115–117 | −0.02 | 0.58 | 504 → 510 | 5.23 → 5.23 | 50 → 52 | 9,247 → 9,079 | 8.3 trips, 14.7 descents |
+
+    (Trips and descents per game are counted over the whole game, from the player logs. lowheal
+    and fire, with the default restock rule, make 9.1–9.6 trips and 16.4–16.5 descents a game.)
+    The ordering holds at penalties 0, 1, 3 and 6 for every variant.
+  - **confirmN, combo = rules+ with fire and lowheal** (`RULEFIX=danger,restock,escape,upnavfood,fire,lowheal`):
+
+    | Starts | Pairs | Changed | W–L (k3) | Mean diff (k0 / k1 / k3 / k6) | p (k3) | Deaths | Mean depth | Starvation | Poison | Mean actions |
+    |---|---|---|---|---|---|---|---|---|---|---|
+    | **445 held-out** | 445 | 229 | **116–72** | +0.26 / +0.32 / **+0.45** / +0.64 | 0.0008 | 317 → 289 | 5.21 → 5.47 | 10 → 23 | 26 → 27 | 9,372 → 10,875 |
+    | 700 sample | 700 | 368 | 201–92 | +0.36 / +0.46 / +0.65 / +0.94 | < 0.0001 | 504 → 436 | 5.23 → 5.59 | 22 → 25 | 50 → 45 | 9,247 → 11,218 |
+    | all | 1,145 | 597 | 317–164 | +0.32 / +0.41 / +0.57 / +0.82 | < 0.0001 | 821 → 725 | 5.22 → 5.54 | 32 → 48 | 76 → 72 | 9,296 → 11,084 |
+
+    Per game: 57 shots, 6.2 restock trips, 13.9 descents. The mean score rises from 3.07 to 3.64.
+  - **By class (all 1,145 starts, score at penalty 3):**
+
+    | Class | Pairs | W–L | rules+ | combo | Deaths |
+    |---|---|---|---|---|---|
+    | Ranger | 184 | 117–47 | 1.14 | **2.82** | 159 → 128 |
+    | Blackguard | 182 | 46–26 | 2.44 | 3.10 | 129 → 111 |
+    | Paladin | 183 | 42–22 | 2.34 | 2.84 | 133 → 118 |
+    | Rogue | 183 | 44–23 | 2.30 | 2.65 | 134 → 123 |
+    | Warrior | 183 | 39–30 | 4.23 | 4.43 | 105 → 88 |
+    | bank (DL5–6 savepoints) | 230 | 29–16 | 5.37 | 5.52 | 161 → 157 |
+
+  - **Death causes (all starts):** poison 76 → 72, soldier 75 → 55, apprentice 67 → 33,
+    **starvation 32 → 48**. Games that reach the action cap alive: 320 → 416.
+
+### Verdicts
+- **Q1:** fire and lowheal each raise the score; restock100 and clgate1 make no difference;
+  restockboth lowers it.
+  - **fire** was adopted. Rangers gain +1.55 a game (116–49), about 7 times the +0.21 predicted
+    for H-c10's overrides. Rangers still score below the other classes (2.82 in the combo), so
+    there is more to find in how they shoot (range, ammo, retreating to shoot).
+  - **lowheal** was adopted. It changes few games (178 of 700) but wins those 86–27. Poison
+    deaths didn't fall (50 → 51), so the gain is from healing earlier in general, not from
+    curing poison. Cure Light Wounds doesn't cure poison; poison is still the top killer.
+  - **restock100** was not adopted (+0.06, p 0.14). It cut trips from about 9 to 3.8 a game
+    and descents from about 16 to 10.5, but the score didn't change.
+  - **restockboth** was not adopted. Waiting until both potions and escapes run out cost
+    0.34 a game: more deaths (528 against 504), most of them poison (63 against 50).
+  - **clgate1** was not adopted (115–117).
+- **Q2: yes.** On the 445 held-out starts the combo wins 116–72 (p 0.0008), +0.45 a game, so
+  under the pre-committed rule it is the **new default rules+**. `busho-player.ts` now
+  defaults to `RULEFIX=danger,restock,escape,upnavfood,fire,lowheal`. Session 15's baseline
+  and labels use it, so earlier rules+ games no longer replay (pass the old `RULEFIX` to
+  replay them).
+- **Scale:** this one change (+0.57 on all starts) is about 6 times H-c10's pooled edge over
+  rules+ (+0.09). Rule fixes aimed at where the score goes have moved the score more than
+  fine-tuning has.
+- **Next levers:**
+  - **Starvation** rose from 32 to 48 deaths, because 96 more games survive long enough to run
+    out of food. Session 12's upnavfood fix doesn't cover them all.
+  - **Poison** (72 deaths): buy Neutralize Poison (alchemist, 75 gold), or rest or leave the
+    level while poisoned.
+  - **Rangers' shooting:** more ammo, retreating to keep range.
+  - **Soldiers** (55 deaths).
+- **For the model:** trainH was trained on labels made against the old rules. A model on top of
+  the new default needs new labels on its states before it can be compared against it.
 
 ## C Angband engine: spike (2026-10-15)
 

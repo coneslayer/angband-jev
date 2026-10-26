@@ -280,10 +280,10 @@ function hurtsOnContact(m: any): boolean {
   if (!STATIONARY_RE.test(name)) return false;
   return /floating eye/i.test(name) || (m.maxhp ?? m.hp ?? 99) > 5;
 }
-// ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ) ──
-const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood").split(",").map((t) => t.trim()));
-// 明示した時だけ (session 14 の検証): fire (射撃武器で撃つ + 矢弾を買う), lowheal (HP 危険域・毒は停滞脱出より回復),
-// restock100 (補給帰還は 100G 以上), restockboth (回復薬と Phase/油の両方が切れたら帰還), clgate1 (DL1-3 は CL >= DL+1 で降下)
+// ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood,fire,lowheal。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ。fire, lowheal はセッション14で採用) ──
+const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood,fire,lowheal").split(",").map((t) => t.trim()));
+// 既定 (session 14 で採用): fire (射撃武器で撃つ + 矢弾を買う), lowheal (HP 危険域・毒は停滞脱出より回復)。
+// 明示した時だけ (session 14 で不採用): restock100 (補給帰還は 100G 以上), restockboth (回復薬と Phase/油の両方が切れたら帰還), clgate1 (DL1-3 は CL >= DL+1 で降下)
 const EARLY_CL_MARGIN = RULEFIX.has("clgate1") ? 1 : 2;
 // モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
 const MON_BLOW_AVG: Map<string, number> = (() => {
