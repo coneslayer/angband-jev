@@ -2490,6 +2490,100 @@ rule fires.
 - **For the model:** trainH was trained on labels made against the old rules. A model on top of
   the new default needs new labels on its states before it can be compared against it.
 
+## Session 15 (24 h, planned 2026-10-26)
+
+Session 14's new default rules+ (`danger,restock,escape,upnavfood,fire,lowheal`) scores 3.64 a
+game on finalM's starts and still loses 725 of 1,145 games. The first half of this session tries a
+second round of rule changes aimed at what kills those games. The second half makes the first
+labels whose rollouts continue with the rules in use, and continues trainH on them.
+
+| Where the score goes (session 14's combo, 1,145 games) | Evidence | Variant |
+|---|---|---|
+| Poison is still the top killer (72; 22 Rangers, 20 Rogues, 1 Warrior) | In C 4.2 Cure Light and Cure Serious Wounds don't cure poison, and while poisoned HP doesn't regenerate (`player-util.c`). Replays: HP falls from 90 to 15 with no monster in view, or right after the last potion | **neutpois**, **poisonhold** |
+| Starvation rose from 32 to 48 deaths: 96 more games now live long enough | Mostly on DL5–8: 34 of the 48 were on a restock walk, 21 re-making levels to find an up staircase. The town shopping keeps 6 rations; session 11 showed starting the walk earlier doesn't help | **food8** |
+| Rangers score 2.82, against Warriors' 4.43 | Rangers fire about 150 shots a game, so 30 bought arrows run short; fire only shoots at 2+ squares, and a Ranger's melee is weak | **fireadj**, **ammo60** |
+
+### Questions
+1. Which of these rule changes raise the score on top of the new default, each on its own?
+2. Do the adopted ones together raise it on new starts?
+3. Trained on labels made with the rules in use, does trainH's continuation beat trainH offline?
+
+### Variants (`RULEFIX` flags, off by default)
+- **food8:** keep 8 rations (now 6), in the early kit and on later town visits.
+- **neutpois:** buy Neutralize Poison (alchemist, 75 gold, when stocked): 1 after the first 3
+  Cure Light Wounds, then up to 2; on later town visits up to 2 before Cure Critical Wounds.
+  Poisoned below 50% HP with no monster adjacent: drink Neutralize Poison or Cure Critical Wounds
+  before any other potion.
+- **poisonhold:** poisoned below 50% HP, with no healing potion and no monster in view: rest (10
+  turns at a time) instead of exploring or walking back to town. Uses only the "Poisoned" status
+  the UI shows.
+- **fireadj:** with a launcher and ammo, shoot adjacent monsters too (now only 2+ squares away).
+  4.2 has no penalty for shooting at an adjacent monster.
+- **ammo60:** buy ammo up to 60 (now 30).
+
+### Plan (`driver15.py`, 13 slots)
+| Stage | Track | Time | What |
+|---|---|---|---|
+| ruleO | CPU | first 7 h | First, rules+ re-run on 20 starts (replay canary against session 14's combo games). Then food8, neutpois and poisonhold each on a new sample of 700 of finalM's 1,145 starts; fireadj and ammo60 each on the 184 Ranger starts and the 269 others whose combo game fired at least once. About 3,000 games |
+| answerO | GPU | alongside ruleO | trainH answers 60,000 of the 140,000 fight/tactic decisions of session 14's combo games (chunks of 5,000), so labelO can choose records as labelL did |
+| confirmO | CPU | 2.5 h | rules+ and rules+ with the adopted variants, start by start, on **new starts** (fresh 3300000+, bank 3350000+; finalM's starts have now been used to select twice). Skipped if nothing is adopted |
+| labelO | CPU | until 3 h before the end | rollout labels (K = 8, as before) on session 14's combo states, the **final** default rules continuing. trainH's disagreements alternate between confidence ≥ 0.1 and below; agreements 1 in 4. Expect about 10,000 labels |
+| trainO | GPU | last 3 h | trainH continued on labelO's train games (three quarters, by game), 2 epochs (capped to fit). trainH and trainO answer held-out labelO and trainH's held-out set |
+
+The labelO states come from session 14's combo games, not from the confirmO games, so labelling
+needs no model answers after ruleO. If confirmO changes the default, those states are from a
+slightly different player (the variants change about a quarter of games), and the rollouts still
+continue with the new default.
+
+**Disk** (88 GB free at the start): each game deletes its replay and snapshots once played (about
+8 MB a game in session 14); player logs, decisions and reports stay. The labels use session 14's
+snapshots. A guard stops new games below 30 GB free and stops the run below 15 GB; the driver
+won't start below 40 GB. Expected use: under 5 GB.
+
+### Pre-committed decision rules
+- **Replay canary:** at least 18 of the 20 rules+ re-runs identical to session 14's combo games,
+  else no ruleO result counts and confirmO is skipped.
+- **Adopt a variant** if, on its pairs, W > L at a death penalty of 3, one-sided sign p < 0.05
+  and the mean difference is above 0. fireadj and ammo60 are judged on the Ranger starts and
+  must not lose on the other shooters (L > W with p < 0.05). If both poison variants pass, only
+  the one with the larger mean difference is adopted.
+- **New default rules+:** the adopted variants together, if on confirmO's new starts (at least
+  300 complete pairs) W > L and the mean difference is above 0.
+- **Session 16's model:** trainO, if its gate score on held-out labelO beats trainH's, its
+  held-out labelO accuracy beats the majority, and its accuracy on trainH's held-out set is no
+  more than 2 points below trainH's. Otherwise trainH. Session 16 plays it, gated as H-c10,
+  against the final default rules+.
+- **Canaries:** labels as before (at least 300, split-half at least 65%, all-tie at most 25%,
+  run errors at most 2%); answerO at least 5,000 answered.
+- **Reported:** per variant W–L, mean difference and sign p at penalties 0, 1, 3 and 6; deaths,
+  depth, starvation and poison deaths; mean actions; shots, poison cures, restock trips and
+  descents per game. labelO's pool and labels by type; both models' held-out accuracy and gate
+  score.
+
+### Run log
+- **Smoke test** (`runs/session15/smoke`, 17:31–17:38 on 10-26; 4 sample starts, 2 Rangers and 1
+  other shooter; games capped at 1,500 actions except the replays; answerO on 200 decisions in
+  chunks of 100; 300 training items for 1 epoch): every stage ran end to end, with 0 errors.
+  - Replay canary: 3 of 3 full-length rules+ re-runs (2 bank starts and 1 fresh) identical to
+    session 14's combo games.
+  - fireadj: 37 shots a game; ammo60: 61 shots a game in 1,500 actions.
+  - answerO: trainH disagreed with the rules on 84 of 200 decisions, 32 of them at confidence ≥
+    0.1. Over 60,000, that is about 25,000 disagreements to choose from.
+  - With nothing adopted in so short a test, the smoke test forced a combo (food8, neutpois,
+    fireadj) to exercise confirmO: 18 pairs. labelO then labelled 24 records (0 run errors), and
+    trainO trained and answered both held-out sets.
+  - Disk: games kept only player.log, decisions and the report; 86 GB free at the end.
+- **Found and fixed during the smoke tests:**
+  - The first try ran ruleO's start list by switching `run.smoke` off for a moment, and answerO,
+    in the other thread, read it and built its full 60,000-record pool. The start list is now
+    built without touching `run.smoke`.
+  - In C the alchemist is store type 4, not 5, so the later town visits' list wouldn't have
+    bought Neutralize Poison. Fixed; the early kit now buys it only there, since the black market
+    sells it at 225 gold. Checked by hand with two Paladin games: the early kit bought 1 (seed
+    15), and a later town visit with 1,205 gold bought 2 before Cure Critical Wounds (seed 11).
+    No game in these tests was poisoned below 50% HP holding a cure, so the drink itself is
+    checked only in the full run (`poison_cures_per_game`).
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

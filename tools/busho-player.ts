@@ -283,8 +283,11 @@ function hurtsOnContact(m: any): boolean {
 // ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood,fire,lowheal。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ。fire, lowheal はセッション14で採用) ──
 const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood,fire,lowheal").split(",").map((t) => t.trim()));
 // 既定 (session 14 で採用): fire (射撃武器で撃つ + 矢弾を買う), lowheal (HP 危険域・毒は停滞脱出より回復)。
+// 明示した時だけ (session 15 の検証): food8 (食料を 8 個まで), neutpois (Neutralize Poison を買い、毒で HP 半分未満なら飲む),
+// poisonhold (毒で HP 半分未満・回復薬なし・敵が見えない → 休む), fireadj (隣接する敵も撃つ), ammo60 (矢弾を 60 本まで)
 // 明示した時だけ (session 14 で不採用): restock100 (補給帰還は 100G 以上), restockboth (回復薬と Phase/油の両方が切れたら帰還), clgate1 (DL1-3 は CL >= DL+1 で降下)
 const EARLY_CL_MARGIN = RULEFIX.has("clgate1") ? 1 : 2;
+const FOOD_KEEP = RULEFIX.has("food8") ? 8 : 6; // 町で買う食料の目標 (深い階の帰り道で餓死していた)
 // モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
 const MON_BLOW_AVG: Map<string, number> = (() => {
   const m = new Map<string, number>();
@@ -1132,12 +1135,14 @@ function spareTorchSlot(inv: any[]): number | null {
 }
 
 // 食料を最優先 (vanilla は初期資金が少なく、食料が後回しだと餓死する)
+// RULEFIX=neutpois: CLW/CSW は毒を治さない (4.2)。Neutralize Poison (錬金術店、75G) を CLW 3 個の次に 1 個、最後に 2 個まで
 const EARLY_KIT_STEPS: [string, number][] = [["food", 3], ["torch", 2], ["oil", 5], ["phase", 2], ["digger", 1], ["oil", 10], ["phase", 5],
-  ["clw", 3], ["clw", 5], ["csw", 2], ["food", 6]];
+  ["clw", 3], ...(RULEFIX.has("neutpois") ? [["neut", 1] as [string, number]] : []), ["clw", 5], ["csw", 2],
+  ...(RULEFIX.has("neutpois") ? [["neut", 2] as [string, number]] : []), ["food", FOOD_KEEP]];
 async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise<void> {
-  // RULEFIX=fire: 射撃武器があれば、光源の次に矢弾を 30 本まで (雑貨屋に常にある)
+  // RULEFIX=fire: 射撃武器があれば、光源の次に矢弾を 30 本まで (雑貨屋に常にある。ammo60 なら 60 本)
   const ammoTval = RULEFIX.has("fire") ? launcherAmmoTval((await getState()).player) : null;
-  if (ammoTval !== null && steps === EARLY_KIT_STEPS) steps = [...steps.slice(0, 2), ["ammo", 30], ...steps.slice(2)];
+  if (ammoTval !== null && steps === EARLY_KIT_STEPS) steps = [...steps.slice(0, 2), ["ammo", RULEFIX.has("ammo60") ? 60 : 30], ...steps.slice(2)];
   const kinds: Record<string, (i: any) => boolean> = {
     food: i => i.tval === TVAL.FOOD && (i.name ?? "").includes("Ration"),
     torch: i => i.tval === TVAL.LIGHT && (i.name ?? "").includes("Wooden Torch"),
@@ -1147,12 +1152,13 @@ async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise
     clw: i => i.tval === TVAL.POTION && (i.name ?? "") === "Cure Light Wounds",
     csw: i => i.tval === TVAL.POTION && (i.name ?? "") === "Cure Serious Wounds", // CLW が置いてない店の代用
     ammo: i => ammoTval !== null && i.tval === ammoTval,
+    neut: i => i.tval === TVAL.POTION && (i.name ?? "") === "Neutralize Poison",
   };
   const haveOf = (inv: any[], kind: string) =>
     kind === "digger"
       ? inv.filter(i => i.tval === TVAL.DIGGING && i.qty > 0).reduce((a, i) => a + i.qty, 0)
       : inv.filter(i => kinds[kind]!(i) && i.qty > 0).reduce((a, i) => a + i.qty, 0);
-  const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0, ammo: 0 };
+  const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0, ammo: 0, neut: 0 };
   let spent = 0, n = 0;
   for (const [kind, target] of steps) {
     const test = kinds[kind]!;
@@ -1164,6 +1170,7 @@ async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise
       let best: { storeType: number; item: any } | null = null;
       for (const store of st.stores as any[]) {
         if (![0, 3, 4, 5, 6].includes(store.type)) continue;
+        if (kind === "neut" && store.type !== 4) continue; // 錬金術店だけ (闇市は 225G)
         for (const it of store.stock) {
           if (!test(it) || it.price <= 0 || it.price > st.player.gold) continue;
           if (!best || it.price < best.item.price) best = { storeType: store.type, item: it };
@@ -1182,7 +1189,7 @@ async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise
     }
   }
   const after = await getState();
-  console.log(`  [序盤購入] food+${bought.food} torch+${bought.torch} oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw} csw+${bought.csw} (${spent}G使用, 残金${after.player.gold}G)`);
+  console.log(`  [序盤購入] food+${bought.food} torch+${bought.torch} oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw} csw+${bought.csw} neut+${bought.neut} ammo+${bought.ammo} (${spent}G使用, 残金${after.player.gold}G)`);
   addLesson(0, 0, "序盤購入", `food+${bought.food} oil+${bought.oil} phase+${bought.phase} digger+${bought.digger} clw+${bought.clw}。残金${after.player.gold}G`);
 }
 
@@ -1902,10 +1909,11 @@ async function buySupplies(state: any) {
   // Shopping list: name match, valid tvals (to avoid buying staves/wands), store IDs
   // tval 25=scroll, 26=potion, 28=food
   const shoppingList = [
-    { name: "Ration" as string | null, tvals: [28], target: 6, stores: [0] }, // food first: starvation
+    { name: "Ration" as string | null, tvals: [28], target: FOOD_KEEP, stores: [0] }, // food first: starvation
     { name: "Wooden Torch", tvals: [TVAL.LIGHT], target: 3, stores: [0] }, // vanilla torches burn out
     // RULEFIX=wor: 帰還の巻物 1 枚を回復薬より先に。無いと食料切れのとき上り階段を歩いて餓死していた
     ...(RULEFIX.has("wor") ? [{ name: "Word of Recall" as string | null, tvals: [25], target: 1, stores: [4, 5] }] : []),
+    ...(RULEFIX.has("neutpois") ? [{ name: "Neutralize Poison" as string | null, tvals: [26], target: 2, stores: [4] }] : []), // 錬金術店 (闇市は 3 倍)
     { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [4, 5] },
     { name: "Phase Door", tvals: [25], target: 20, stores: [4, 5] },
     { name: "Teleportation", tvals: [25], target: 12, stores: [4, 5, 6] },
@@ -2226,7 +2234,7 @@ async function playGame() {
         console.log(`  [町到着] Gold:${state.player.gold} Cure:${cureQty} Phase:${phaseQty}`);
         await sellJunk(state); // 先に不要品を売却してゴールド確保
         state = await getState();
-        await buyEarlyKit([["food", 5], ["torch", 3]]); // 装備で資金を使い切る前に食料と光源
+        await buyEarlyKit([["food", RULEFIX.has("food8") ? FOOD_KEEP : 5], ["torch", 3]]); // 装備で資金を使い切る前に食料と光源
         state = await getState();
         await buyEquipment(state); // 装備品を先に購入（ゴールド消費前）
         state = await getState();
@@ -2346,7 +2354,21 @@ async function playGame() {
     // (毒で HP が減り続けるのに停滞脱出で壁を掘り続け、回復薬 6 個を持ったまま死んでいた)
     const lowHpHold = RULEFIX.has("lowheal") && state.depth >= 1 && (hpPct < 0.35 || (p.timed.poisoned > 0 && hpPct < 0.5));
     if (lowHpHold && !monsters.some((m: any) => m.distance <= 1)) {
+      // RULEFIX=neutpois: 毒なら毒を治す薬 (Neutralize Poison、CCW) を先に。毒の間は HP が自然回復しない
+      const poisonCure = RULEFIX.has("neutpois") && p.timed.poisoned > 0
+        ? inv.find((i: any) => i.tval === TVAL.POTION && i.qty > 0 && (i.name === "Neutralize Poison" || i.name === "Cure Critical Wounds"))?.slot ?? null
+        : null;
+      if (poisonCure !== null) {
+        addLesson(state.turn, state.depth, "解毒", `HP${Math.round(hpPct * 100)}%、毒。解毒薬を使用`);
+        state = await sendCommand({ type: CMD.QUAFF, itemIndex: poisonCure });
+        continue;
+      }
       const healSlot = hpPct < 0.35 ? findStrongHealingPotion(inv) : findHealingPotion(inv);
+      // RULEFIX=poisonhold: 毒で HP 半分未満、回復薬なし、敵が見えない → 探索や帰還の歩きで新しい敵に会う前に、毒が抜けるまで休む
+      if (healSlot === null && RULEFIX.has("poisonhold") && p.timed.poisoned > 0 && hpPct < 0.5 && monsters.length === 0) {
+        state = await sendCommand({ type: CMD.REST, turns: 10 });
+        continue;
+      }
       if (healSlot !== null) {
         healingsUsed++;
         addLesson(state.turn, state.depth, "緊急回復", `HP${Math.round(hpPct * 100)}%${p.timed.poisoned > 0 ? "、毒" : ""}。停滞脱出より先に回復薬`);
@@ -3175,7 +3197,8 @@ async function playGame() {
         let choice: FightChoice | null = fightPlan.get(key) ?? null;
         const planned = choice !== null;
         // RULEFIX=fire: 射撃武器と矢弾があれば、離れた敵 (2 マス以上、射線あり) は殴りに行く前に撃つ。逃げる相手と油を投げる相手は除く
-        if (RULEFIX.has("fire") && state.depth >= 1 && m.distance >= 2 && choice !== "flee"
+        // RULEFIX=fireadj: 隣接する敵も撃つ (4.2 は隣接射撃に不利がない。レンジャーの近接は弱い)
+        if (RULEFIX.has("fire") && state.depth >= 1 && m.distance >= (RULEFIX.has("fireadj") ? 1 : 2) && choice !== "flee"
           && !(choice === "throw" && findOilFlask(inv) !== null)) {
           const ammo = findAmmo(p);
           const losKey = `${px},${py}>${m.x},${m.y}`;
