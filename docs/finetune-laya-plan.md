@@ -2776,7 +2776,7 @@ the variant isn't better):
   worse. restock100's raw-C gain is noise: PH and both components are flat.
 
 ### Decision rules from here (replacing the capped score)
-- **Primary score: PH(10).** DL10 is about where a careful first trip should reach (the Players' Guide).
+- **Primary score: PH(10)** (confirmed by the user, 2026-10-27). DL10 is about where a careful first trip should reach (the Players' Guide).
   It is deeper than the rules now reach, so a death is weighed as it will be in deeper play, and the
   baseline table still has 40–90 events a stage up to stage 9. PH(5), PH(8), raw C(10), the two ratios
   and the capped score are reported alongside.
