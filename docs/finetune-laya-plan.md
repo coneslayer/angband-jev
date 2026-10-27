@@ -2724,6 +2724,86 @@ checks the code, not the size of the gain.
 **Disk** (84 GB free at the start): ruleP and finalQ delete replays and snapshots; confirmP keeps
 snapshots for labelP (about 10 GB). The guard stops new games below 30 GB free and the run below 15 GB.
 
+## Measurement: a score without the action cap (2026-10-27, before ruleP's results)
+
+An outside review (`docs/review-2026-10-27.md` on branch `claude/rule-model-improvements-bymira`)
+pointed out that the replacement-cost score from the roadmap after session 3 was never adopted. 36% of
+games are still alive at the 20,000-action cap, so anything that changes pace is judged at an arbitrary
+cutoff. `tools/overnight/hazard.py` now scores every logged game without the cap.
+
+- **Stages.** A game's stage is the deepest level it has reached so far. player.log gives the depth and
+  action count every 200 actions and every depth change, so each game becomes stage segments ending in
+  an advance, a death or the cap (censored: exposure only).
+- **Rates.** For each stage d: deaths and advances per action. Under constant hazards the chance of
+  advancing is p_d = A_d / (A_d + D_d) and the mean stay is τ_d = E_d / (A_d + D_d).
+- **C(k)**, the replacement cost: the expected actions for a fresh character to first reach DL k,
+  counting deaths and restarts: C(d+1) = (C(d) + τ_d) / p_d. Lower is better. Session 14's default
+  rules: C(5) 11k, C(8) 48k, C(10) 204k actions.
+- **PH(k)**, the proportional-hazards version used for verdicts: one death-rate ratio and one
+  advance-rate ratio for the variant, each a Mantel–Haenszel ratio stratified by stage. They are applied
+  to the baseline's own table, and the result is reported as C_var(k) / C_base(k). A paired bootstrap
+  over starts gives the interval and a one-sided p.
+
+**What the rescoring of sessions 14 and 15 showed** (ratios variant/base; 80% intervals; p is the chance
+the variant isn't better):
+
+| Variant | Capped score t | Death rate | Pace | Raw C(8) | PH(8) | PH(10) |
+|---|---|---|---|---|---|---|
+| combo14 (fire + lowheal) | +8.27 | 0.743 (0.71–0.78) | 0.965 (0.94–0.99) | 0.962, p 0.25 | 0.881, p 0.000 | 0.710, p 0.000 |
+| fire | +5.11 | 0.836 | 0.988 | 0.994, p 0.45 | 0.902, p 0.000 | 0.790, p 0.000 |
+| lowheal | +5.27 | 0.851 | 0.980 | 0.967, p 0.18 | 0.927, p 0.000 | 0.829, p 0.000 |
+| restock100 | +0.78 | 1.034 | 1.010 | 0.909, p 0.05 | 1.007, p 0.54 | 1.028, p 0.62 |
+| restockboth | −3.02 | 1.113 | 0.844 | 1.124, p 0.88 | 1.489, p 1.00 | 1.914, p 1.00 |
+| clgate1 | −0.23 | 1.032 | 1.038 (p 0.013) | 0.999, p 0.47 | 0.959, p 0.09 | 0.954, p 0.19 |
+| ammo60 | −0.81 | 0.959 | 0.927 | 1.062, p 0.74 | 1.101, p 0.95 | 1.126, p 0.88 |
+| fireadj | −3.74 | 1.327 | 1.022 | 1.036, p 0.63 | 1.156, p 0.98 | 1.386, p 1.00 |
+| neutpois | −1.49 | 1.042 | 0.991 | 1.124, p 0.97 | 1.039, p 0.93 | 1.084, p 0.96 |
+| food8, poisonhold | about 0 | about 1 | about 1 | about 1 | about 1 | about 1 |
+
+- **Raw C(k) is much noisier than the capped score, not less noisy as the review expected.** Most of
+  its weight falls on stages 7–10, which have only tens to hundreds of events. The 1,145-pair
+  combination has a capped t of 8.3 but a raw C(8) interval that crosses 1. The per-game replacement-cost
+  score is worse still (|t| < 1.3 for every variant): a handful of deep games dominate it.
+- **The two components are precise.** The death-rate ratio and the pace ratio have intervals of about
+  ±3%. PH(k) combines them with the baseline's well-estimated table, so it keeps that precision. It
+  assumes a variant changes rates by the same factor at every stage. For combo14 the stage-by-stage death
+  ratios were 0.6–0.9 throughout, so that holds roughly.
+- **Rule improvements so far trade pace for safety.** The combination cut deaths by 26% and slowed
+  descent by 3.5%. The target k sets the exchange rate: PH(5) 0.99 (neutral), PH(8) 0.88, PH(10) 0.71.
+  Near the baseline, at k = 10, 1% faster descent is worth about 3% of C and 1% fewer deaths about 1.5%.
+- **Where the verdicts differ:** clgate1 (CL gate one level lower) descends 3.8% faster at no clear cost,
+  so PH leans its way, against "no effect" from the capped score. ammo60 slows descent 7% and comes out
+  worse. restock100's raw-C gain is noise: PH and both components are flat.
+
+### Decision rules from here (replacing the capped score)
+- **Primary score: PH(10).** DL10 is about where a careful first trip should reach (the Players' Guide).
+  It is deeper than the rules now reach, so a death is weighed as it will be in deeper play, and the
+  baseline table still has 40–90 events a stage up to stage 9. PH(5), PH(8), raw C(10), the two ratios
+  and the capped score are reported alongside.
+- **Adopt a variant** if PH(10) < 1 with one-sided bootstrap p < 0.05 on its starts. Flag it, and don't
+  adopt it, if its death-rate ratio over stages 7 and deeper alone is above 1 with p < 0.05. That is the
+  check on the proportional-hazards assumption where it matters most.
+- **Session 16** runs as launched: its driver applies the capped rules, and both scores are reported. If
+  the two disagree, PH(10) decides which rules become the default for session 17. The new default
+  needs at least 300 complete confirmP pairs with PH(10) < 1, p < 0.05.
+
+### Revised plan to noon 2026-10-30
+- **The 16-hour model tournament (finalQ) is cancelled.** At about 3,000 starts it had about 45% power
+  for the +0.09 that H-c10 has shown, on the capped score. On PH it would be weaker still, and if trainH
+  is the model, its labels predate fire and lowheal.
+- **Session 16:** ruleP, trainO2 and confirmP finish as launched (to about 05:51 on 10-28). labelP runs
+  only until the replacement session is ready, then the driver is stopped between games.
+- **Session 17 (replacement, from 10-28 to about 10:30 on 10-30):** a rule screen judged by PH(10).
+  - The review's stairs-first variants: `arrive` (leave on a bad level feeling or a listed early
+    killer in view) and `stairsfirst`.
+  - Leave-level triggers, replacing the switch to forced fighting after repeated flees with leaving.
+  - `seal`: close a door behind a retreat from breeders, and close a door at once if it opens onto
+    known breeders (monster nests have exactly one door). Sealed doors are walls for the rest of the
+    level.
+  - `sling` for classes without a launcher.
+  - clgate1 again, now that pace counts.
+  - Then a confirmation on new starts.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
