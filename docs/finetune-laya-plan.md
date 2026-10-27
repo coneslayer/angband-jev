@@ -2583,6 +2583,69 @@ won't start below 40 GB. Expected use: under 5 GB.
     15), and a later town visit with 1,205 gold bought 2 before Cure Critical Wounds (seed 11).
     No game in these tests was poisoned below 50% HP holding a cure, so the drink itself is
     checked only in the full run (`poison_cures_per_game`).
+- **Full run** (`runs/session15/2026-10-26`, 17:40 on 10-26 to 15:33 on 10-27; 0 errors; 2.8 GB
+  in the end, 83 GB free; the disk guard never fired).
+  - **answerO** (done 19:11): trainH answered all 60,000 decisions; it disagreed with the rules on
+    24,941, 6,633 of them at confidence ≥ 0.1. Canary passed.
+  - **ruleO** (done 00:11): replay canary 20 of 20 identical. Results at a death penalty of 3;
+    rules+ is session 14's combo game on the same start. Penalties 0, 1 and 6 agree in sign except
+    ammo60 on Rangers (−0.22 at 0, +0.33 at 6: fewer deaths, less depth):
+
+    | Variant | Starts | Changed | W–L | Mean | Sign p | Deaths | Mean depth | Starvation | Poison |
+    |---|---|---|---|---|---|---|---|---|---|
+    | food8 | 700 | 215 | 91–85 | +0.03 | 0.35 | 444 → 445 | 5.59 → 5.62 | 30 → 25 | 44 → 43 |
+    | neutpois | 700 | 234 | 95–113 | −0.10 | 0.91 | 444 → 454 | 5.59 → 5.54 | 30 → 34 | 44 → 39 |
+    | poisonhold | 700 | 34 | 9–8 | +0.01 | 0.50 | 444 → 441 | 5.59 → 5.59 | 30 → 31 | 44 → 44 |
+    | fireadj, Rangers | 184 | 182 | 62–96 | −0.94 | 0.997 | 128 → 138 | 4.91 → 4.14 | 3 → 7 | 22 → 22 |
+    | fireadj, other shooters | 269 | 241 | 93–115 | −0.30 | 0.94 | 120 → 143 | 6.09 → 6.04 | 16 → 15 | 9 → 9 |
+    | ammo60, Rangers | 184 | 178 | 79–77 | +0.05 | 0.47 | 128 → 111 | 4.91 → 4.68 | 3 → 4 | 22 → 11 |
+    | ammo60, other shooters | 269 | 132 | 60–65 | −0.22 | 0.70 | 120 → 126 | 6.09 → 5.94 | 16 → 16 | 9 → 8 |
+
+    Per game: neutpois drank a poison cure 0.18 times and made 10.7 restock trips (food8 8.3,
+    poisonhold 7.3); fireadj Rangers fired 137 shots, ammo60 Rangers 195, with 3.7 restock trips
+    and 12.4 descents.
+  - **confirmO:** skipped, nothing adopted.
+  - **labelO** (00:11–14:40): 15,813 labels (13,459 fight, 2,354 tactic) on session 14's combo
+    states, rollouts with the unchanged default rules+; 0 run errors; split-half agreement 81.4%
+    (fight) and 84.7% (tactic); all options tie on 4.2% and 22.9%. Canary passed.
+  - **trainO** (14:40–15:33): 11,110 train items, 3,599 held out (by game). It trained for **1
+    epoch**, not 2: the cap uses session 10's rate with labelling on the CPU (0.469 s an item),
+    and with the CPU idle it ran at 0.219 s, so 2 epochs would have fitted in about 81 minutes.
+
+    | | Held-out labelO acc. (majority 52.8%, rules 51.0%) | Brier | Overrides at conf ≥ 0.1 | Their W–L, mean | Gate score | trainH's held-out set acc. |
+    |---|---|---|---|---|---|---|
+    | trainH | 60.7% | 0.206 | 1,312 | 707–550, +0.075 | **27.3** | 62.1% |
+    | trainO | **63.4%** | **0.193** | 522 | 330–167, +0.102 | 14.8 | 61.8% |
+
+### Verdicts
+- **Q1: none of the five changes raises the score**, so the default rules+ stays
+  `danger,restock,escape,upnavfood,fire,lowheal`, and Q2 had nothing to test.
+  - **food8** cut starvation (30 → 25 deaths) but not the score. Food isn't what limits these games.
+  - **neutpois** works as written: it drinks cures and poison deaths fall (44 → 39). But the extra
+    shopping makes more trips (10.7 against about 8) and starvation rises (30 → 34), and net the
+    score falls. A cheaper version, buying it only when already in the alchemist's, might not cost
+    the trips.
+  - **poisonhold** rarely applies (34 games): a poisoned character below half HP with no potion
+    and nothing in view is rare. Poison deaths happen in fights.
+  - **fireadj** is clearly worse (Rangers −0.94, p 0.997). Shooting an adjacent monster instead
+    of hitting it or stepping away loses, for Rangers too. Rangers shooting only at 2+ squares
+    stays.
+  - **ammo60** halves Rangers' poison deaths (22 → 11) and cuts their deaths 128 → 111, but they
+    restock less often (3.7 trips) and descend less (12.4 descents), so mean depth falls. Whether
+    it helps depends on the death penalty (−0.22 at 0, +0.05 at 3, +0.33 at 6), and at the
+    pre-committed 3 it doesn't move the score.
+- **Q3: trainO is more accurate, but trainH stays** under the pre-committed rule (gate score
+  27.3 against 14.8). trainO beats the majority and is within 2 points of trainH on trainH's
+  held-out set, but it overrides the rules at confidence ≥ 0.1 on 522 held-out records against
+  trainH's 1,312. Its overrides win more often (+0.102 against +0.075 each), but there are too few
+  of them to add up to as much. Two caveats, both against trainO: the held-out pool was chosen
+  from trainH's disagreements, half of them at trainH's confidence ≥ 0.1, which favours trainH's
+  gate score; and trainO trained for 1 epoch, not 2. **Session 16 plays trainH**, gated as
+  H-c10, against the default rules+.
+- **Where the score goes now:** the rules+ changes in sessions 12 to 14 each took a cause of
+  death the rules handled badly; this round's targets (food, poison, Rangers' ammo) moved deaths
+  around between causes without raising depth. Speed is not a lever yet: no game drank a Potion
+  of Speed (the rule only applies from DL10, which 46 of 1,145 games reach; the deepest is DL13).
 
 ## C Angband engine: spike (2026-10-15)
 
