@@ -288,6 +288,20 @@ const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood
 // 明示した時だけ (session 14 で不採用): restock100 (補給帰還は 100G 以上), restockboth (回復薬と Phase/油の両方が切れたら帰還), clgate1 (DL1-3 は CL >= DL+1 で降下)
 const EARLY_CL_MARGIN = RULEFIX.has("clgate1") ? 1 : 2;
 const FOOD_KEEP = RULEFIX.has("food8") ? 8 : 6; // 町で買う食料の目標 (深い階の帰り道で餓死していた)
+// RULEFIX=breed: 繁殖する敵 (思い出に「爆発的に繁殖する」と出たもの = C サーバーの breeds。繁殖を見た後だけ) を
+// 少ないうちに最優先で倒し、増え始めたら (4 体以上見える、またはこの階で 150 行動見え続けた) 最寄りの階段から階を去る
+const BREED = RULEFIX.has("breed");
+const BREED_LEAVE_SEEN = 4, BREED_LEAVE_TICKS = 150, BREED_WALK_MAX = 300;
+let breedDepth = -1, breedTicks = 0, breedLeaving = false, breedWalk = 0;
+const breedHunted = new Set<string>();
+function knownBreeder(m: any): boolean { return BREED && m.breeds === true; }
+// RULEFIX=whirl: ブラックガードは隣接 2 体以上で Whirlwind Attack (CL5、隣接全体を攻撃)
+const WHIRL = RULEFIX.has("whirl");
+// RULEFIX=earlyrun: CL4 以下で 1 手に最大 HP の 1/3 以上減り、敵が隣接 → 階段/Phase で離れる (序盤の soldier/apprentice 死)
+const EARLYRUN = RULEFIX.has("earlyrun");
+let earlyLastHp: number | null = null;
+// RULEFIX=neutshop: Neutralize Poison は町の買い物の最後に 1 個だけ (neutpois は買い物で補給帰還が増えた)。飲み方は neutpois と同じ
+// RULEFIX=cutcure: 出血中 HP 50% 未満も lowheal の回復対象に ("a fatal wound" 死)
 // モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
 const MON_BLOW_AVG: Map<string, number> = (() => {
   const m = new Map<string, number>();
@@ -1918,6 +1932,7 @@ async function buySupplies(state: any) {
     { name: "Phase Door", tvals: [25], target: 20, stores: [4, 5] },
     { name: "Teleportation", tvals: [25], target: 12, stores: [4, 5, 6] },
     { name: "Word of Recall", tvals: [25], target: 5, stores: [4, 5] },
+    ...(RULEFIX.has("neutshop") ? [{ name: "Neutralize Poison" as string | null, tvals: [26], target: 1, stores: [4] }] : []),
     { name: null as string | null, tvals: [28], target: 10, stores: [0] }, // food top-up
   ];
 
@@ -2267,7 +2282,7 @@ async function playGame() {
 
     // === 最最最優先: ブリーダー群れ検知 → 即フロア脱出 ===
     // サーバーからのisBreederフラグで正確に検知 (フォールバック: 20体以上)
-    const hasBreeder = monsters.some((m: any) => m.isBreeder && m.distance <= 10);
+    const hasBreeder = monsters.some((m: any) => (m.isBreeder || knownBreeder(m)) && m.distance <= 10);
     if (monsters.length >= 20 || (hasBreeder && monsters.length >= 10)) {
       // 20体以上 = ブリーダー群れ。戦っても増殖するだけ → 即脱出
       const onDown = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.DOWN_STAIR);
@@ -2352,10 +2367,11 @@ async function playGame() {
 
     // === RULEFIX=lowheal: HP 危険域 (35% 未満、毒なら 50% 未満) では停滞脱出より先に回復。隣接敵がいれば下の緊急回復/逃走に任せる ===
     // (毒で HP が減り続けるのに停滞脱出で壁を掘り続け、回復薬 6 個を持ったまま死んでいた)
-    const lowHpHold = RULEFIX.has("lowheal") && state.depth >= 1 && (hpPct < 0.35 || (p.timed.poisoned > 0 && hpPct < 0.5));
+    const lowHpHold = RULEFIX.has("lowheal") && state.depth >= 1 && (hpPct < 0.35 || (p.timed.poisoned > 0 && hpPct < 0.5)
+      || (RULEFIX.has("cutcure") && (p.timed.cut ?? 0) > 0 && hpPct < 0.5));
     if (lowHpHold && !monsters.some((m: any) => m.distance <= 1)) {
       // RULEFIX=neutpois: 毒なら毒を治す薬 (Neutralize Poison、CCW) を先に。毒の間は HP が自然回復しない
-      const poisonCure = RULEFIX.has("neutpois") && p.timed.poisoned > 0
+      const poisonCure = (RULEFIX.has("neutpois") || RULEFIX.has("neutshop")) && p.timed.poisoned > 0
         ? inv.find((i: any) => i.tval === TVAL.POTION && i.qty > 0 && (i.name === "Neutralize Poison" || i.name === "Cure Critical Wounds"))?.slot ?? null
         : null;
       if (poisonCure !== null) {
@@ -2374,6 +2390,35 @@ async function playGame() {
         addLesson(state.turn, state.depth, "緊急回復", `HP${Math.round(hpPct * 100)}%${p.timed.poisoned > 0 ? "、毒" : ""}。停滞脱出より先に回復薬`);
         state = await sendCommand({ type: CMD.QUAFF, itemIndex: healSlot });
         continue;
+      }
+    }
+
+    // === RULEFIX=breed: 既知の繁殖敵が増え始めたら階段へ。階段の上なら上り下りどちらでも使う ===
+    if (BREED) {
+      if (state.depth !== breedDepth) { breedDepth = state.depth; breedTicks = 0; breedLeaving = false; breedWalk = 0; }
+      const kb = monsters.filter(knownBreeder);
+      if (kb.length > 0) breedTicks++;
+      if (!breedLeaving && state.depth >= 1 && (kb.length >= BREED_LEAVE_SEEN || breedTicks >= BREED_LEAVE_TICKS)) {
+        breedLeaving = true;
+        addLesson(state.turn, state.depth, "繁殖脱出", `既知の繁殖敵${kb.length}体 (${kb[0]?.name ?? "-"})、この階で${breedTicks}行動。階段へ`);
+      }
+      if (breedLeaving && !lowHpHold) {
+        const here = tiles.find((t: any) => t.x === px && t.y === py);
+        if (here?.feat === FEAT.DOWN_STAIR || here?.feat === FEAT.UP_STAIR) {
+          state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+          visited.clear(); lastVisitedSize = 0; noProgressCount = 0; stuckCount = 0;
+          killsThisLevel = 0; levelEntryTurn = state.turn; explorationRateWindow = [];
+          levelEntryDetected = false; unreachableItems.clear();
+          if (state.depth > maxDepthReached) maxDepthReached = state.depth;
+          continue;
+        }
+        // 歩いて階段へ (繁殖敵に塞がれたら歩きが攻撃になる)。他の敵が隣接していれば下の戦闘に任せる
+        const st = nearestStair(tiles, px, py);
+        if (st && breedWalk < BREED_WALK_MAX && !monsters.some((m: any) => m.distance <= 1 && !knownBreeder(m))) {
+          breedWalk++;
+          state = await sendCommand({ type: CMD.WALK, direction: st.dir });
+          continue;
+        }
       }
     }
 
@@ -3186,12 +3231,29 @@ async function playGame() {
         if (ch === "flee") nearDangerous = [sus];
       }
     }
+    // === RULEFIX=earlyrun: 前回ここを通ってから最大 HP の 1/3 以上減った (CL4 以下) → 隣接敵から階段/Phase で離れる ===
+    if (EARLYRUN) {
+      const drop = earlyLastHp === null ? 0 : earlyLastHp - p.hp;
+      earlyLastHp = p.hp;
+      const adj = monsters.filter((m: any) => m.distance <= 1 && !knownBreeder(m)).sort((a: any, b: any) => b.level - a.level)[0];
+      if (adj && p.level <= 4 && state.depth >= 1 && drop >= p.maxHp / 3) {
+        const fl = earlyFleeCommand(tiles, px, py, inv, adj, actionCount);
+        if (fl) {
+          earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
+          addLesson(state.turn, state.depth, "序盤離脱", `${adj.name}(Lv${adj.level})に1手でHP${drop}/${p.maxHp}。${fl.kind}`);
+          state = await sendCommand(fl.cmd);
+          earlyLastHp = state.player.hp;
+          continue;
+        }
+      }
+    }
+
     // === 序盤トルクキット: fight = {melee, throw, flee} の実行 ===
     // 判断済み個体 (fightPlan) はそれに従う。未判断の序盤高速/強敵はルール分類 (油 > 逃走 > 殴る)
     {
       let acted = false;
       const cands = monsters.filter((m: any) => m.distance <= 8)
-        .sort((a: any, b: any) => a.distance - b.distance);
+        .sort((a: any, b: any) => (knownBreeder(b) ? 1 : 0) - (knownBreeder(a) ? 1 : 0) || a.distance - b.distance);
       for (const m of cands) {
         const key = fkey(m);
         let choice: FightChoice | null = fightPlan.get(key) ?? null;
@@ -3448,7 +3510,17 @@ async function playGame() {
       }
     }
     if (adjacentMonsters.length > 0) {
-      // ターゲット選択: 召喚/ブレス持ちを優先排除、次に最弱
+      if (WHIRL && p.level >= 5 && adjacentMonsters.length >= 2 && canCastSpells) {
+        const whirl = findCastableSpell(spells, ["Whirlwind Attack"], p.level, sp);
+        if (whirl) {
+          const turnBefore = state.turn;
+          spellsUsed++;
+          state = await sendCommand({ type: CMD.CAST, spellIndex: whirl.index, direction: 5 });
+          if (state.turn !== turnBefore) continue;
+          spellsUsed--;
+        }
+      }
+      // ターゲット選択: 既知の繁殖敵 (RULEFIX=breed) と召喚持ちを優先排除、次にブレス持ち、次に最弱
       const target = adjacentMonsters.sort((a: any, b: any) => {
         // 召喚持ちは最優先で排除（放置すると増殖）
         const aSummon = a.hasSummon ? -1000 : 0;
@@ -3456,9 +3528,11 @@ async function playGame() {
         // ブレス持ちは次に優先
         const aBreath = (a.breathElements?.length ?? 0) > 0 ? -500 : 0;
         const bBreath = (b.breathElements?.length ?? 0) > 0 ? -500 : 0;
+        const aBreed = knownBreeder(a) ? -2000 : 0;
+        const bBreed = knownBreeder(b) ? -2000 : 0;
         // 1体なら最弱狙い、複数なら脅威度優先
         if (adjacentMonsters.length === 1) return a.hp - b.hp;
-        return (a.hp + aSummon + aBreath) - (b.hp + bSummon + bBreath);
+        return (a.hp + aSummon + aBreath + aBreed) - (b.hp + bSummon + bBreath + bBreed);
       })[0];
       const dir = directionTo(px, py, target.x, target.y);
 
@@ -3723,6 +3797,20 @@ async function playGame() {
         console.log(`  [戦闘] Turn ${state.turn} DL${state.depth} CL${state.player.level} - 撃破 (累計${totalKills}, 階${killsThisLevel}) HP:${state.player.hp}/${state.player.maxHp}`);
       }
       continue;
+    }
+
+    // === RULEFIX=breed: 既知の繁殖敵は少ないうちに倒す。10 マス以内で届くなら、拾い物や他の敵より先に向かう ===
+    if (BREED && !breedLeaving && stuckCount < 5 && noProgressCount < 50 && !retreatMode) {
+      const prey = monsters.filter((m: any) => knownBreeder(m) && m.distance <= 10 && !hurtsOnContact(m)
+        && !isDangerousMonster(m, p.level, state.depth, playerResists))
+        .sort((a: any, b: any) => a.distance - b.distance)[0];
+      const huntDir = prey ? bfsNextStep(tiles, px, py, prey.x, prey.y) : null;
+      if (prey && huntDir !== null) {
+        const hk = `${state.depth}:${prey.midx}:${prey.name}`;
+        if (!breedHunted.has(hk)) { breedHunted.add(hk); addLesson(state.turn, state.depth, "繁殖狩り", `${prey.name}(dist${prey.distance})を先に倒す`); }
+        state = await sendCommand({ type: CMD.WALK, direction: huntDir });
+        continue;
+      }
     }
 
     // === 優先度4.5: 足元アイテム拾い + 装備最適化 (安全時のみ) ===

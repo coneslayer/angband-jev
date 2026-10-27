@@ -2647,6 +2647,83 @@ won't start below 40 GB. Expected use: under 5 GB.
   around between causes without raising depth. Speed is not a lever yet: no game drank a Potion
   of Speed (the rule only applies from DL10, which 46 of 1,145 games reach; the deepest is DL13).
 
+## Sessions 16 and 17 (to noon 2026-10-30, planned 2026-10-27)
+
+Unattended, back to back: session 16 (24 h, `driver16.py`), session 17's tournament (16 h,
+`driver17.py`), then a fourth round of rule variants chosen from session 16's games (about 18 h),
+and the write-up by noon Friday. Results are committed after each part.
+
+Where session 14's combo games (the default rules+, 1,145 games, 725 deaths) lose score:
+- 228 deaths in the first 2,500 actions, mostly fresh characters at CL 1–4 on DL1–3: poison 27,
+  soldiers 26, apprentices 16, cave spiders 14, floating eyes 8.
+- Breeders: giant white lice 19 deaths, worm masses 9. The rules' only answer is the swarm escape
+  (20 monsters in view, or 10 with a breeder within 10 squares), and on the C engine the breeder test
+  never fired: `isBreeder` came from the TS server only. The escape ran in 333 games.
+- Bleeding ("a fatal wound") 11.
+- Blackguards cast no spells (Whirlwind Attack, CL5, hits every adjacent monster, is in no spell list).
+  The classes played (Warrior, Rogue, Ranger, Paladin, Blackguard) have no area spells otherwise, and
+  no Spear of Light (a Priest spell).
+
+### Engine change
+`main-http.c` (angband-c `133251a69`) sends `breeds` for each monster: true once the character has
+seen that kind try to breed, which is exactly when monster recall shows "breeds explosively"
+(`mon-move.c` sets the lore flag; `mon-lore.c` shows race flags and lore flags). With the default
+rules, 5 of session 14's games replay identically on the new build.
+
+### Session 16 variants (`RULEFIX` flags, off by default)
+- **breed:** a known breeder within 10 squares comes before items, other monsters, stairs and
+  exploring; among adjacent monsters it is the first target; Rangers shoot it first. With 4 known
+  breeders in view, or 150 actions with one in view on the level, walk to the nearest known stairs
+  and take them, up or down. Known breeders also count for the swarm escape.
+- **earlyrun:** at CL ≤ 4, having lost a third of max HP since the last check with a monster adjacent:
+  stairs if standing on them, else Phase Door or a walk to the nearest stairs.
+- **neutshop:** one Neutralize Poison at the end of the town shopping list (neutpois bought it early
+  and made more trips); drink it as neutpois does.
+- **cutcure:** bleeding below 50% HP joins lowheal's triggers.
+- **whirl:** Blackguards cast Whirlwind Attack with 2 or more monsters adjacent.
+
+A hand check on 8 starts whose session 14 game died to breeders (`breed,whirl`): 7 avoided that
+death, 4 reached the action cap, 6 went deeper. These starts were chosen for breeder deaths, so this
+checks the code, not the size of the gain.
+
+### Session 16 plan (`driver16.py`, 13 slots)
+| Stage | Track | Time | What |
+|---|---|---|---|
+| ruleP | CPU | 8 h | rules+ re-run on 20 starts (replay canary against session 14's combo games); then breed, earlyrun, neutshop and cutcure each on a sample of 700 of finalM's starts, and whirl on finalM's Blackguard starts. About 3,050 games |
+| trainO2 | GPU | alongside ruleP | trainH continued on session 15's labelO train games for 2 epochs (trainO had 1). trainH, trainO and trainO2 scored on held-out labelO with each record weighted by its stratum's pool size over labels made (agreements, disagreements at confidence ≥ 0.1, below), so the set stands for all 60,000 decisions and not mostly trainH's disagreements |
+| confirmP | CPU | 3 h | rules+ and rules+ with the adopted variants, start by start, on new starts (fresh 3400000+, bank 3450000+); snapshots of the final default's games stay for labelP |
+| labelP | CPU | the rest | rollout labels (K = 8) on a uniform random sample of the final default's fight/tactic decisions: an unbiased set on the current rules for later training and scoring |
+
+### Session 17 plan
+| Part | Time | What |
+|---|---|---|
+| finalQ (`driver17.py`) | 16 h | tournament on new starts (fresh 3500000+, bank 3550000+): the final default rules+ against session 16's chosen model gated as H-c10, and a 24-start replay arm. About 3,000 starts; each game's replay and snapshots are deleted once played |
+| ruleQ, confirmQ | about 18 h | a fourth round of variants aimed at what kills session 16's confirm games, chosen and written while finalQ runs, then confirmed on new starts |
+
+### Pre-committed decision rules
+- **Replay canary:** at least 18 of 20 rules+ re-runs identical to session 14's combo games, else no
+  ruleP result counts.
+- **Adopt a variant** if, on its starts, W > L at a death penalty of 3, one-sided sign p < 0.05 and
+  the mean difference is above 0 (whirl on the Blackguard starts).
+- **New default rules+:** the adopted variants together, if on confirmP's new starts (at least 300
+  complete pairs) W > L and the mean difference is above 0. busho's default `RULEFIX` is then updated
+  before session 17.
+- **Session 17's model:** the highest weighted gate score among trainH, trainO and trainO2, if its
+  held-out labelO accuracy beats the majority and its accuracy on trainH's held-out set is no more
+  than 2 points below trainH's; otherwise trainH.
+- **Promotion** (finalQ): the gated model becomes the player if W > L with one-sided sign p < 0.05 on
+  the complete starts. If not, the model track moves to labels that value a whole policy (session
+  13's finding) instead of another tournament of the same kind.
+- **Canaries:** labels as before (at least 300, split-half at least 65%, all-tie at most 25%, run
+  errors at most 2%); finalQ as finalM (at least 600 complete starts and 75% of those started,
+  replay identical in at least 90%, consulted at least 0.9, at most 100 throws, the gate binds).
+- **Reported:** per variant W–L, mean difference and sign p at penalties 0, 1, 3 and 6; deaths by
+  cause against session 14's games on the same starts (breeders together); breeder hunts and exits,
+  early exits, poison cures, spells, restock trips and descents per game.
+
+**Disk** (84 GB free at the start): ruleP and finalQ delete replays and snapshots; confirmP keeps
+snapshots for labelP (about 10 GB). The guard stops new games below 30 GB free and the run below 15 GB.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
