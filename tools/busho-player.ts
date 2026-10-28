@@ -378,15 +378,22 @@ const MON_BLOW_AVG: Map<string, number> = (() => {
 // +1 で慎重 (高い回復閾値、格下でも油/逃走、殴り合いの許容ダメージ半減)、-1 で大胆
 const RULES_CAUTION = Math.max(-1, Math.min(1, Number(process.env.RULES_CAUTION ?? "0") || 0));
 // 殴り合いの見積もり: 倒すまでに受けるダメージが現HPの半分以上なら殴らない (CL<15)
+// RULEFIX=dangerml: 敵の 1 ターンの与ダメージを、ゲームデータの打撃平均 (MON_BLOW_AVG) ではなく学習した危険度モデルの
+// dmg_5 (この先 5 プレイヤーターンで失う HP / 最大 HP、DANGER_MODEL で読み込み、DANGER_LOG=1 の記録から毎手予測) から見積もる
+const DANGERML = RULEFIX.has("dangerml");
+let predDmg5: number | undefined; // 今の状態での dmg_5 の予測 (DANGERML の時だけ使う)
 function meleeTooCostly(m: any, p: any): boolean {
-  if (!RULEFIX.has("danger") || p.level >= 15 || !MON_BLOW_AVG.size) return false;
-  const blowAvg = MON_BLOW_AVG.get(String(m.name ?? "").toLowerCase());
+  if (!RULEFIX.has("danger") || p.level >= 15) return false;
+  if (!DANGERML && !MON_BLOW_AVG.size) return false;
+  // dangerml: 予測は実際に受けたダメージ (命中も速度も込み) なので、そのまま 1 プレイヤーターンあたりの HP にする
+  const predicted = DANGERML && predDmg5 !== undefined ? predDmg5 / 5 * (p.maxHp ?? p.hp) : undefined;
+  const blowAvg = DANGERML ? predicted : MON_BLOW_AVG.get(String(m.name ?? "").toLowerCase());
   if (!blowAvg) return false;
   const weapon = (p.equipment ?? []).find((e: any) => e && (e.dd ?? 0) > 0);
   const perBlow = weapon ? weapon.dd * (weapon.ds + 1) / 2 + (weapon.toD ?? 0) : 1.5;
   const myDmg = Math.max(1, (p.numBlows ?? 1) * (perBlow + (p.toD ?? 0)) * 0.75);
   const speedRatio = Math.max(0.5, ((m.speed ?? 110) - 100) / Math.max(5, (p.speed ?? 110) - 100));
-  const theirDmg = blowAvg * 0.7 * speedRatio;
+  const theirDmg = predicted ?? blowAvg * 0.7 * speedRatio;
   const turnsToKill = Math.ceil((m.hp ?? m.maxhp ?? 1) / myDmg);
   return theirDmg * turnsToKill >= 0.5 * (1 - 0.5 * RULES_CAUTION) * p.hp;
 }
@@ -2338,7 +2345,8 @@ async function playGame() {
     // 録画 (10アクション毎 + イベント時)
     lastRecordedState = state;
     if (actionCount % 10 === 0) recordFrame(state);
-    dangerLogger?.record(state, actionCount, dangerPredict);
+    const dangerRec = dangerLogger?.record(state, actionCount, dangerPredict);
+    if (DANGERML) predDmg5 = dangerRec?.pd?.dmg_5;
     const p = state.player;
     if (p.maxHp > 0) minHpFrac = Math.min(minHpFrac, p.hp / p.maxHp);
     rolloutDepthMax = Math.max(rolloutDepthMax, state.depth);

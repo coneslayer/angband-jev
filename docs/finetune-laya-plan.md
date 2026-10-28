@@ -3013,6 +3013,26 @@ replays. To use less disk:
 3. **Then:** retrain on the adopted variant's games. Next come V(state) from `adv_2000` and `die_2000`, and a Laya
    version on the GPU if the trees leave room.
 
+### First models (session 17's logs, 2026-10-28)
+Built from 2,952 session 17 games (base, the five variants and confirmQ's combo): 31.7 M records, 8.75 M rows kept,
+4.4 GB. Held-out: 616 games by start hash. Trained with 3 threads alongside session 18; each model took 7–8 minutes.
+
+| Model | Held-out | Hand estimate | Gate |
+|---|---|---|---|
+| `death_20` | log loss 0.00664, AUC 0.920, ECE 0.00027 | 0.00677, AUC 0.793 | **fails:** model − hand −0.00013, 90% −0.00056 to +0.00036 |
+| `death_20`, no identity | log loss 0.00711, AUC 0.936 | | worse log loss than with identity: names help calibration |
+| `dmg_5` | MSE 0.00040, R² 0.42 | 0.00058, R² 0.15 | **passes:** model − hand −0.00019, 90% −0.00020 to −0.00017 |
+
+`death_20` ranks states much better than the hand estimate, but deaths are 0.11% of rows and its log-loss edge is
+within noise on 616 games. It is retested on the gate, unchanged, once session 18's logs double the data.
+
+**`RULEFIX=dangerml`** (for `dmg_5`): `meleeTooCostly` takes the enemy's damage per player turn as `dmg_5` / 5 × max
+HP, predicted at the current state, instead of `MON_BLOW_AVG` × 0.7 × the speed ratio. The rest of the test is
+unchanged (turns to kill against half the current HP). This also removes the rule's read of blow averages from the game
+data, which the honest view doesn't show before lore does. One prediction takes 0.14 ms. driver17's `--danger-model`
+copies the model into the run and loads it in every game; the other arms only log its predictions (`pd`), which gives
+live calibration. A 12-game C smoke (6 starts, base and dangerml) ran without errors, and play differed.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

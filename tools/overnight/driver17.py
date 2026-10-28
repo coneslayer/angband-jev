@@ -57,7 +57,8 @@ def play_one(run, stage, s, arm, rulefix, slot, deadline):
     cap, maxa = (600, 15000) if s["restore"] else (900, 20000)
     if run.smoke: cap, maxa = 240, 1500
     env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rulefix,
-           "DANGER_LOG": "1"}  # the learned danger model's training data (tools/danger); play is unchanged
+           "DANGER_LOG": "1",  # the learned danger model's training data (tools/danger); play is unchanged
+           **({"DANGER_MODEL": run.danger_model} if run.danger_model else {})}  # read only by RULEFIX=dangerml
     out = run.d(stage, arm, s["id"])
     res = D.play_game(run, f"{stage}-{arm}", slot, s["seed"], s["cls"], env, out,
                       max(60, min(cap, deadline - time.time())), maxa, 4100, None, s["restore"])
@@ -198,6 +199,8 @@ def main():
     ap = argparse.ArgumentParser()
     for p in ("--run", "--prior5", "--prior16", "--base", "--canary-arm", "--variants"): ap.add_argument(p, required=True)
     ap.add_argument("--seed", type=int, default=3600000)
+    ap.add_argument("--danger-model", default="", help="model.json(s) from danger.py, copied into RUN; every game "
+                    "loads them (predictions go to the danger log; only RULEFIX=dangerml acts on them)")
     ap.add_argument("--canary-stage", default="ruleP", help="the stage of --prior16 whose games canaryQ replays")
     ap.add_argument("--canary-starts", default="finalM:3200000", help="that stage's starts, RNG:FRESH (bank +50000)")
     ap.add_argument("--hours", type=float, default=52); ap.add_argument("--screen-hours", type=float, default=24)
@@ -208,6 +211,12 @@ def main():
     run = D.Run(a.run, a.hours, a.smoke, a.slots)
     run.prior = run.prior5 = os.path.abspath(a.prior5)  # run.prior: session 5's C bank (D2.bank_files)
     run.prior16 = os.path.abspath(a.prior16)
+    run.danger_model = ""
+    if a.danger_model:
+        dst = [os.path.join(run.path, f"danger-model-{i}.json") for i, _ in enumerate(a.danger_model.split(","))]
+        for src, d in zip(a.danger_model.split(","), dst):
+            if not os.path.exists(d): shutil.copy(src, d)
+        run.danger_model = ",".join(dst)
     rng, fresh = a.canary_starts.split(":")
     run.canary_stage, run.canary_starts = a.canary_stage, {"rng": rng, "fresh": int(fresh), "bank": int(fresh) + 50000}
     run.base, run.canary_arm, run.variants, run.seed = a.base, a.canary_arm, a.variants.split(","), a.seed
