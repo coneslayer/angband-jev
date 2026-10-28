@@ -2901,6 +2901,29 @@ losses (p 0.0005), mean max depth 5.66 → 6.19.
 **New default:** `danger,restock,escape,upnavfood,fire,lowheal,leave,clgate1`, now busho's `RULEFIX`
 default.
 
+### Session 18 (2026-10-28, 10:34–17:15)
+Base: the new default. Variants: `clgate0` (`EARLY_CL_MARGIN` 0), `leave2` (`LEAVE_ESCAPES` 2), `leavemore` (eight more
+early uniques and dangerous groups on `LEAVE_LIST`), `food8` and `breed`. The canary replayed session 17's confirmQ
+combo arm (20 of 20 identical). Screen starts 3800000+ (bank 3850000+). Nothing was adopted, so confirmQ was skipped
+and the session ended after 6 h 41 m.
+
+| Variant | Closed at | Pairs | PH(10) | z | Deep death ratio | Decision |
+|---|---|---|---|---|---|---|
+| clgate0 | look 1 | 150 | 1.018 | −0.13 | 1.19 | reject (futility) |
+| leavemore | look 1 | 151 | 1.040 | −0.30 | 1.17 | reject (futility) |
+| leave2 | look 3 | 701 | 0.964 | 0.44 | 0.98 | reject (below the bound 1.67) |
+| breed | look 3 | 701 | 0.977 | 0.41 | 1.06 | reject |
+| food8 | look 3 | 700 | 1.014 | −0.25 | 0.97 | reject |
+
+leave2 looked strong early (PH 0.84 at 150 pairs, 0.76 and z 2.17 at 300) and fell back to 0.96 by 700: a reminder of
+why the bounds at early looks are wide. Neither change to the new rules' settings helped, so `leave` and `clgate1`
+stay as adopted.
+
+### Session 19 (launched 2026-10-28, 17:15)
+`dangerml` alone against the same default, with `--danger-model` set to session 17's `dmg_5`; seed 4000000+ (bank
+4050000+), 40 hours. The canary replays session 18's screenQ base arm (`--canary-stage screenQ --canary-arm base
+--canary-starts screenQ:3800000`). Every arm logs the model's predictions.
+
 ## Model track: a learned danger estimate (2026-10-28)
 
 The review's model-track item 1, with item 5's cheap baseline as the first model. The rules keep deciding, as the
@@ -3032,6 +3055,55 @@ unchanged (turns to kill against half the current HP). This also removes the rul
 data, which the honest view doesn't show before lore does. One prediction takes 0.14 ms. driver17's `--danger-model`
 copies the model into the run and loads it in every game; the other arms only log its predictions (`pd`), which gives
 live calibration. A 12-game C smoke (6 starts, base and dangerml) ran without errors, and play differed.
+
+
+### dangerml in play: rejected (session 19, 2026-10-28)
+The canary passed (20 of 20; the base arm's logged predictions didn't change its play). dangerml closed at look 1:
+150 pairs, PH(10) 1.495, z −2.19, deep death ratio 1.58 (p 0.018); deaths 90 → 102, mean max depth 6.10 → 5.75,
+capped score 36 wins to 57 losses. The session ended at 18:12.
+
+Why: `meleeTooCostly` asks a counterfactual (what will fighting this monster cost?) before contact. `dmg_5` answers a
+different question: HP lost over the next five turns from this state under the current play. Before contact that is
+near zero, so the rule said "fight" far more often than the blow-average estimate did. A state-level prediction under
+the logging policy can't stand in for a per-monster estimate of engaging. Uses of the model that act on its own
+question (am I in danger now?) don't have this problem.
+
+### death_20 retest on sessions 17 and 18 (2026-10-28)
+Dataset `runs/danger1718/ds`: 6,079 games (session 17's screenQ and confirmQ, session 18's screenQ), 66.8 M records,
+18.2 M rows, 9.1 GB. The gate is unchanged. Held-out: 1,230 games.
+
+| Model | Held-out | Hand estimate | Gate |
+|---|---|---|---|
+| `death_20` | log loss 0.00645, AUC 0.926, ECE 0.00013 | 0.00693, AUC 0.792 | **passes:** model − hand −0.00049, 90% −0.00079 to −0.00017 |
+
+`danger.py train` now also saves `test_pred.npy` and `test_rows.npy`. Finer reliability on the test rows (weighted):
+
+| Predicted p | Mean predicted | Observed death_20 |
+|---|---|---|
+| < 0.001 | 0.0001 | 0.0003 |
+| 0.001–0.003 | 0.0017 | 0.0061 |
+| 0.003–0.01 | 0.0052 | 0.0150 |
+| 0.01–0.03 | 0.0168 | 0.0407 |
+| 0.03–0.1 | 0.0552 | 0.1031 |
+| 0.1–0.3 | 0.180 | 0.168 |
+| ≥ 0.3 | 0.766 | 0.461 |
+
+The model is too low by 2–3× in the middle and too high at the top, so thresholds are set on observed rates, not on
+p. Rows at or above a threshold:
+
+| T | Share of rows | Observed rate | Deaths caught | HP < 50% | Enemy within 3 | On stairs |
+|---|---|---|---|---|---|---|
+| 0.002 | 1.36% | 0.062 | 72% | 19% | 40% | 2.0% |
+| 0.01 | 0.43% | 0.169 | 63% | 39% | 56% | 2.2% |
+| 0.1 | 0.16% | 0.358 | 48% | 65% | 64% | 2.8% |
+
+### RULEFIX=dangermlflee (thresholds fixed before any game, 2026-10-28)
+Borg-style triggers on `death_20`, placed before the HP-based emergency block, at DL1 and deeper:
+- p ≥ **0.002** (6% observed), standing on a staircase, an enemy within 5: take the stairs.
+- p ≥ **0.01** (17%), an enemy within 3, at most once every 3 actions: escape. Order: an escape spell, then Teleport
+  when p ≥ **0.1** (36%), DL18+, or a fast or wall-passing enemy is near, then Phase Door, then Teleport.
+
+Session 20 screens it with `--danger-model` set to this `death_20` and session 17's `dmg_5` (the other arms log both).
 
 ## C Angband engine: spike (2026-10-15)
 

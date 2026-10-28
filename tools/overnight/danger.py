@@ -203,6 +203,9 @@ def train(dataset, label, out, test_frac=0.2, drop=(), threads=4, params=None, m
     os.makedirs(out, exist_ok=True)
     export(booster, meta, label, binary, feats, cats, X["test"], pred, res, os.path.join(out, "model.json"))
     with open(os.path.join(out, "metrics.json"), "w") as f: json.dump(res, f, indent=1)
+    # test-set predictions and their dataset rows, for finer reliability tables and thresholds
+    np.save(os.path.join(out, "test_pred.npy"), pred.astype(np.float32))
+    np.save(os.path.join(out, "test_rows.npy"), sel["test"])
     log(summary(res))
     return res
 

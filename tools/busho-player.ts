@@ -382,6 +382,13 @@ const RULES_CAUTION = Math.max(-1, Math.min(1, Number(process.env.RULES_CAUTION 
 // dmg_5 (この先 5 プレイヤーターンで失う HP / 最大 HP、DANGER_MODEL で読み込み、DANGER_LOG=1 の記録から毎手予測) から見積もる
 const DANGERML = RULEFIX.has("dangerml");
 let predDmg5: number | undefined; // 今の状態での dmg_5 の予測 (DANGERML の時だけ使う)
+// RULEFIX=dangermlflee: 危険度モデルの death_20 (この先 20 プレイヤーターン以内に死ぬ確率、DANGER_MODEL で読み込み) が
+// MLFLEE_STAIRS 以上で 5 マス以内に敵 → 階段の上なら階段、MLFLEE_ESCAPE 以上で 3 マス以内に敵 → 逃走スペル/巻物。
+// 閾値は session 17+18 の検証用ゲームの信頼度表から実行前に固定 (docs/finetune-laya-plan.md)
+const DANGERMLFLEE = RULEFIX.has("dangermlflee");
+const MLFLEE_STAIRS = 0.002, MLFLEE_ESCAPE = 0.01, MLFLEE_TELE = 0.1; // 検証用で実際の死亡率 6% / 17% / 36% の行
+let predDeath20: number | undefined;
+let mlFleeStairs = 0, mlFleeEscapes = 0, lastMlFleeAction = -99;
 function meleeTooCostly(m: any, p: any): boolean {
   if (!RULEFIX.has("danger") || p.level >= 15) return false;
   if (!DANGERML && !MON_BLOW_AVG.size) return false;
@@ -2347,6 +2354,7 @@ async function playGame() {
     if (actionCount % 10 === 0) recordFrame(state);
     const dangerRec = dangerLogger?.record(state, actionCount, dangerPredict);
     if (DANGERML) predDmg5 = dangerRec?.pd?.dmg_5;
+    if (DANGERMLFLEE) predDeath20 = dangerRec?.pd?.death_20;
     const p = state.player;
     if (p.maxHp > 0) minHpFrac = Math.min(minHpFrac, p.hp / p.maxHp);
     rolloutDepthMax = Math.max(rolloutDepthMax, state.depth);
@@ -3205,6 +3213,38 @@ async function playGame() {
       }
     }
     if (state.depth === 0) { restockTrip = false; upRerolls = 0; upRerollDepth = -1; }
+
+    // === RULEFIX=dangermlflee: 予測した死亡確率が高い → 階段の上なら階段、敵が近ければ逃走 (Borg 式) ===
+    if (DANGERMLFLEE && predDeath20 !== undefined && predDeath20 >= MLFLEE_STAIRS && state.depth >= 1) {
+      const pct = `death_20 ${Math.round(predDeath20 * 1000) / 10}%`;
+      const here = tiles.find((t: any) => t.x === px && t.y === py);
+      if ((here?.feat === FEAT.DOWN_STAIR || here?.feat === FEAT.UP_STAIR) && monsters.some((m: any) => m.distance <= 5)) {
+        mlFleeStairs++; fleeAttempts++;
+        if (mlFleeStairs <= 3 || mlFleeStairs % 10 === 0) addLesson(state.turn, state.depth, "危険度逃走", `${pct}: 階段の上なので${here.feat === FEAT.DOWN_STAIR ? "下り" : "上り"}階段 (#${mlFleeStairs})`);
+        state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+        continue;
+      }
+      const near = monsters.filter((m: any) => m.distance <= 3);
+      if (predDeath20 >= MLFLEE_ESCAPE && near.length > 0 && actionCount - lastMlFleeAction >= 3) {
+        // 速い敵・壁抜け・DL18+・極めて危険 → Teleport、それ以外は Phase Door (逃走スペルがあれば先に)
+        const wantTele = predDeath20 >= MLFLEE_TELE || state.depth >= 18 || near.some((m: any) => m.hasPassWall || m.speed >= 120);
+        const escSpell = canCastSpells ? findCastableSpell(spells, ESCAPE_SPELLS, p.level, sp) : null;
+        const tele = findTeleportScroll(inv), phase = findPhaseScroll(inv);
+        let cmd: Record<string, unknown> | null = null, what = "";
+        if (escSpell && !(wantTele && tele !== null && !escSpell.name.includes("Teleport"))) { cmd = { type: CMD.CAST, spellIndex: escSpell.index, direction: 5 }; what = escSpell.name; spellsUsed++; }
+        else if (wantTele && tele !== null) { cmd = { type: CMD.READ, itemIndex: tele }; what = "Teleportation"; }
+        else if (phase !== null) { cmd = { type: CMD.READ, itemIndex: phase }; what = "Phase Door"; }
+        else if (tele !== null) { cmd = { type: CMD.READ, itemIndex: tele }; what = "Teleportation"; }
+        if (cmd) {
+          mlFleeEscapes++; fleeAttempts++; lastMlFleeAction = actionCount;
+          retreatMode = true; retreatStartTurn = state.turn;
+          if (mlFleeEscapes <= 3 || mlFleeEscapes % 10 === 0) addLesson(state.turn, state.depth, "危険度逃走", `${pct}、敵${near.length}体(dist<=3): ${what} (#${mlFleeEscapes})`);
+          state = await sendCommand(cmd);
+          if (what.includes("Teleport")) { stuckCount = 0; noProgressCount = 0; visited.clear(); lastVisitedSize = 0; }
+          continue;
+        }
+      }
+    }
 
     // === 優先度2: 緊急回復+逃走 (深層は閾値引き上げ) ===
     const isExtremeDeep = state.depth >= 20;
