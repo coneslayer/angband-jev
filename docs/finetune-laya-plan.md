@@ -2824,7 +2824,7 @@ the variant isn't better):
 
 | Stage | Length | What |
 |---|---|---|
-| canaryQ | up to 1 h | the base rules on 20 of session 16's confirmP starts. At least 18 must be identical to session 16's games, which checks that the merge and the new C field leave default play unchanged. Otherwise nothing else runs |
+| canaryQ | up to 1 h | the base rules on the 20 starts session 16's ruleP replayed (see below). At least 18 must be identical to ruleP's games, which checks that the merge and the new C field leave default play unchanged. Otherwise nothing else runs |
 | screenQ | up to 24 h | new starts (fresh 3600000+, bank 3650000+). Each start plays the base and every variant still open: stairsfirst, leave, arrive, seal and clgate1. `hazard.screen` tests each variant at 150, 300 and 700 complete pairs; a variant closes on adopt or reject, and its games go to the rest |
 | confirmQ | the rest | the base against the base plus every adopted variant, on new starts (fresh 3700000+, bank 3750000+), with the same looks |
 
@@ -2853,6 +2853,29 @@ feeling. A session of about 10,000 games should take 2–4 GB.
   updated.
 - **Reported:** per variant PH(5), PH(8) and PH(10), the death-rate and pace ratios, the capped score
   (W–L, mean), lesson-tag counts and deaths by cause.
+
+### Session 16's outcome and the launch (2026-10-28, 02:12)
+- **ruleP:** both scores agree that nothing is adopted. ruleP ended at 02:06, so confirmP was skipped
+  and the base stays the default (`danger,restock,escape,upnavfood,fire,lowheal`). By the sequential
+  screen, against session 14's combo games on the same starts:
+
+  | Variant | Pairs | PH(10) | 80% interval | Screen |
+  |---|---|---|---|---|
+  | breed | 700 | 0.958 | 0.886–1.032 | reject at the last look (z 0.72); breeder deaths 24 → 6, other deaths up |
+  | cutcure | 700 | 1.007 | 0.999–1.016 | reject |
+  | earlyrun | 700 | 1.022 | 0.975–1.077 | reject |
+  | neutshop | 700 | 1.018 | 0.990–1.045 | reject |
+  | whirl | 182 | 1.099 | 0.891–1.261 | futility at look 1 |
+
+- **trainO2 failed:** the loss went NaN. Single 100-step windows were NaN from epoch 1 step 7,100
+  while the weights stayed finite, so some items give a non-finite loss. From epoch 2 step 5,700 the
+  weights were NaN too. No checkpoint was made. To be traced to the items before the next training run.
+- **labelP** doesn't check the STOP file, so its rollout process group was killed after 58 labels.
+- **Canary source changed:** with confirmP skipped, canaryQ replays ruleP's 20 `rules+` games (session
+  14's starts, 3200000+ and bank 3250000+), which were themselves 20 of 20 identical to session 14.
+- **PR #1 (training cost) merged locally;** its 16 tests pass. Its adoption rule (`docs/training-cost.md`)
+  stands as written, with one change made before any numbers: trainO2 has no held-out result, so the
+  LoRA A/B trains its own full fine-tune reference, seeds 0 and 1 on the same data, once the NaN is fixed.
 
 
 ## Model track: a learned danger estimate (2026-10-28)

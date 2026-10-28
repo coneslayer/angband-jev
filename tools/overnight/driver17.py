@@ -4,8 +4,9 @@
 See docs/finetune-laya-plan.md, "Measurement: a score without the action cap" and "Session 17". Honest view
 (PLAYER_VIEW=1), C engine. Replaces the cancelled 16-hour model tournament (finalQ).
 
-  canaryQ  the base rules on 20 of session 16's confirmP starts: at least 18 identical to session 16's games, or
-           nothing else runs (the merged variants and the C engine's new levelFeeling must not change default play).
+  canaryQ  the base rules on the 20 session 14 starts that session 16's ruleP replayed (its rules+ arm; confirmP was
+           skipped, as nothing was adopted): at least 18 identical to ruleP's games, or nothing else runs (the merged
+           variants, the danger log and the C engine's new levelFeeling must not change default play).
   screenQ  new starts (fresh --seed+, bank --seed+50000, 4 to 1). Each start plays the base and every variant still
            open (sling only on classes without a launcher). Each variant is tested with hazard.screen (looks at 150,
            300 and 700 complete pairs) and closes on adopt or reject, freeing its games for the rest.
@@ -20,7 +21,7 @@ Usage: driver17.py --run runs/session17/<date> --prior5 runs/session5/2026-10-16
        --base RULEFIX --canary-arm ARM --variants a,b,c [--seed 3600000] [--hours 52] [--screen-hours 24]
        [--slots 13] [--smoke]
 """
-import argparse, json, os, shutil, signal, sys, threading, time  # noqa: E401
+import argparse, json, os, shutil, signal, sys, threading, time, types  # noqa: E401
 import concurrent.futures as cf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -79,11 +80,11 @@ def pool(run, deadline, next_job):
 
 
 def stage_canary(run, name, deadline):
-    prior = D14.load_outcomes(os.path.join(run.prior16, "driver.log"), "confirmP-").get(run.canary_arm) or {}
+    prior = D14.load_outcomes(os.path.join(run.prior16, "driver.log"), "ruleP-").get(run.canary_arm) or {}
     ids = [i for i in sorted(prior) if ok(prior[i])][:2 if run.smoke else CANARY_N]
-    if not ids: return {"failed": f"no confirmP games for arm {run.canary_arm} in session 16"}
-    D8.STARTS, D8.N_STARTS = {"rng": "finalP", "fresh": 3400000, "bank": 3450000}, N_STARTS  # session 16's confirmP
-    by_id = {s["id"]: s for s in D8.starts_for(run)}
+    if not ids: return {"failed": f"no ruleP games for arm {run.canary_arm} in session 16"}
+    D8.STARTS, D8.N_STARTS = D15.FINALM, N_STARTS  # session 14's starts, which ruleP replayed
+    by_id = {s["id"]: s for s in D8.starts_for(types.SimpleNamespace(smoke=False, path=run.path, prior=run.prior))}
     jobs = iter([(by_id[i], "base", run.base, name) for i in ids if i in by_id])
     lock = threading.Lock()
 
