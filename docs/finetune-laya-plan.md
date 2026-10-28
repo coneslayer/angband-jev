@@ -2804,6 +2804,52 @@ the variant isn't better):
   - clgate1 again, now that pace counts.
   - Then a confirmation on new starts.
 
+## Session 17 (to about 10:30 on 2026-10-30, planned 2026-10-27)
+
+**Where the code came from.** Claude Cloud wrote the five variants (branch
+`claude/session17-rule-variants`) and the sequential screen (branch `claude/hazard-sequential-screen`):
+`hazard.screen`, a hazard simulator and 14 tests. Both are merged into kev-docker.
+- **Change after review:** the C server now sends `levelFeeling`, the status bar's danger number
+  (LF:n, 1 quiet to 9 omens of death). It is UI information, given on arrival. With connected stairs a
+  player arrives on a staircase leading back the way they came, so an arrive bounce returns to the
+  previous depth, as Cloud's code assumes.
+- **What Cloud tested:**
+  - Default play is unchanged on the TS engine.
+  - leave, stairsfirst and sling fired in TS games.
+  - seal and arrive were checked only against a stub server.
+  - In simulation the screen holds type I error at 0.03–0.04. Its power is 0.84 for a 15% cut in deaths
+    at no cost in pace, and 0.96 for a fire + lowheal-sized effect.
+
+**Stages** (`driver17.py`):
+
+| Stage | Length | What |
+|---|---|---|
+| canaryQ | up to 1 h | the base rules on 20 of session 16's confirmP starts. At least 18 must be identical to session 16's games, which checks that the merge and the new C field leave default play unchanged. Otherwise nothing else runs |
+| screenQ | up to 24 h | new starts (fresh 3600000+, bank 3650000+). Each start plays the base and every variant still open: stairsfirst, leave, arrive, seal and clgate1. `hazard.screen` tests each variant at 150, 300 and 700 complete pairs; a variant closes on adopt or reject, and its games go to the rest |
+| confirmQ | the rest | the base against the base plus every adopted variant, on new starts (fresh 3700000+, bank 3750000+), with the same looks |
+
+**Smoke on the C engine** (12 games, all five variants together, 8,000 actions):
+- leave fired 7–21 times a game. The commonest reasons were 3 escapes on a level, then apprentice,
+  soldier, acolyte, cave spider and Maggot's dogs in view.
+- stairsfirst fired 0–3 times a game, arrive at most once (always on a listed monster: shallow levels
+  rarely feel worse than LF:4).
+- seal never fired.
+- **sling is left out of the screen:** only 1 of 10 eligible starts found a sling in the Weaponsmith,
+  and that one cost 150 gold. Paired games would almost all be identical, wasting their CPU.
+
+### Pre-committed decision rules
+- **Base rules:** session 16's final default, chosen by PH(10) as the measurement section says.
+- **Canary:** at least 18 of 20 identical, else stop and investigate.
+- **Adopt a variant** when `hazard.screen` says adopt: PH(10)'s z crosses the O'Brien–Fleming bound
+  (3.60, 2.55 or 1.67 at the three looks; overall one-sided α = 0.05), and deaths at stage 7 and deeper
+  are not up with p < 0.05. Reject at the futility bound or at the last look. A variant still open at the
+  deadline is unresolved and not adopted.
+- **New default:** the combination, if confirmQ's screen says adopt. busho's `RULEFIX` default is then
+  updated.
+- **Reported:** per variant PH(5), PH(8) and PH(10), the death-rate and pace ratios, the capped score
+  (W–L, mean), lesson-tag counts and deaths by cause.
+
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

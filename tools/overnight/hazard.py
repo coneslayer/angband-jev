@@ -352,7 +352,9 @@ def screen(base, var, look=None, sd="bootstrap", n_boot=1000, seed=0, looks=LOOK
     res.update({"z": z, "bound": up[look - 1], "futility": fut[look - 1], "PH": math.exp(lph), "sd": sd_ph,
                 "death_rr_deep": math.exp(ldeep) if math.isfinite(ldeep) else None, "deep_p": deep_p})
     last = look == len(looks)
-    deep_bad = deep_p is not None and ldeep > 0 and deep_p < 0.05
+    if not (math.isfinite(lph) and math.isfinite(sd_ph) and sd_ph > 0):  # too few events to estimate PH yet
+        return {**res, "decision": "reject" if last else "continue", "reason": "PH not estimable"}
+    deep_bad =deep_p is not None and ldeep > 0 and deep_p < 0.05
     if z >= up[look - 1] and not deep_bad:
         return {**res, "decision": "adopt", "reason": "efficacy bound crossed"}
     if z >= up[look - 1]:
