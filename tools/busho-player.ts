@@ -1246,7 +1246,9 @@ function spareTorchSlot(inv: any[]): number | null {
 // RULEFIX=neutpois: CLW/CSW は毒を治さない (4.2)。Neutralize Poison (錬金術店、75G) を CLW 3 個の次に 1 個、最後に 2 個まで
 const EARLY_KIT_STEPS: [string, number][] = [["food", 3], ["torch", 2], ["oil", 5], ["phase", 2], ["digger", 1], ["oil", 10], ["phase", 5],
   ["clw", 3], ...(RULEFIX.has("neutpois") ? [["neut", 1] as [string, number]] : []), ["clw", 5], ["csw", 2],
-  ...(RULEFIX.has("neutpois") ? [["neut", 2] as [string, number]] : []), ["food", FOOD_KEEP]];
+  ...(RULEFIX.has("neutpois") ? [["neut", 2] as [string, number]] : []), ["food", FOOD_KEEP],
+  // RULEFIX=kitmore: 残金があれば Phase 10 枚、CLW 8 個まで (session 20: 死亡の 8 割は Phase も回復薬もなし)
+  ...(RULEFIX.has("kitmore") ? [["phase", 10], ["clw", 8]] as [string, number][] : [])];
 async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise<void> {
   // RULEFIX=sling: 生まれた直後の買い物で、射撃武器がなければスリングを買って装備 (弾は下の ammo で 20 発)
   const slingBought = SLING && steps === EARLY_KIT_STEPS && (await getState()).turn < 100 ? await buySling() : false;
@@ -2487,6 +2489,8 @@ async function playGame() {
         await sellJunk(state); // 先に不要品を売却してゴールド確保
         state = await getState();
         await buyEarlyKit([["food", RULEFIX.has("food8") ? FOOD_KEEP : 5], ["torch", 3]]); // 装備で資金を使い切る前に食料と光源
+        // RULEFIX=restock8: CL15 未満は装備より先に序盤の一式 (油/Phase/CLW)。buySupplies は CLW を買わない
+        if (RULEFIX.has("restock8") && state.player.level < 15) { await buyEarlyKit(); state = await getState(); }
         state = await getState();
         await buyEquipment(state); // 装備品を先に購入（ゴールド消費前）
         state = await getState();
@@ -3165,7 +3169,8 @@ async function playGame() {
     }
 
     // === 優先度1.9: 浅層の補給帰還 (回復薬切れ or Phase/油切れ → 上り階段で町へ) ===
-    if (RULEFIX.has("restock") && !ROLLOUT && state.depth >= 1 && ((state.depth <= 4 && p.level < 15) || restockTrip)) {
+    // RULEFIX=restock8: 補給帰還を DL8 まで (session 20: Phase なしの死亡 165 件のうち 113 件は DL5 以深か CL15 以上)
+    if (RULEFIX.has("restock") && !ROLLOUT && state.depth >= 1 && ((state.depth <= (RULEFIX.has("restock8") ? 8 : 4) && p.level < 15) || restockTrip)) {
       const cureN = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
       const escN = inv.filter((i: any) => (i.name?.includes("Phase Door") || /Flask~? of oil/i.test(i.name ?? "")) && i.qty > 0)
         .reduce((s: number, i: any) => s + i.qty, 0);

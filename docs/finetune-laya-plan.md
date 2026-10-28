@@ -3105,6 +3105,33 @@ Borg-style triggers on `death_20`, placed before the HP-based emergency block, a
 
 Session 20 screens it with `--danger-model` set to this `death_20` and session 17's `dmg_5` (the other arms log both).
 
+
+### Session 20: dangermlflee rejected (2026-10-28, 18:15–19:51)
+The canary passed (session 19's screenQ base arm, 20 of 20). dangermlflee: look 1, 151 pairs, PH(10) 0.995; look 2,
+301 pairs, PH(10) 1.054, z −0.61: **reject** (futility). The flee fired in about 7 of 10 games.
+
+Why it didn't help (diagnosis on 304 paired games):
+
+| | Base | dangermlflee |
+|---|---|---|
+| Deaths | 201 | 194 |
+| ... with `death_20` ≥ 0.01 in the last 20 records | 196 | 191 |
+| ... with no Phase Door left | 164 | 163 |
+| ... with no Cure Light Wounds left | 168 | 153 |
+
+The model sees nearly every death coming, so detection isn't the limit. About four deaths in five come after the
+Phase Door and the CLW have run out, so fleeing earlier mostly spends the same few scrolls sooner. Of the 165 base
+deaths without Phase Door, 113 were outside the restock zone (DL ≤ 4 and CL < 15), mostly DL5–8. The early kit stops
+at 5 Phase Door and 5 CLW, even with hundreds of gold left. After the player has reached DL5, a town visit buys
+equipment and then `buySupplies`, whose list has Cure Critical Wounds but no CLW. Only 2 deaths came from oil counting
+as an escape in the restock test.
+
+### Session 21 variants (supplies)
+- `kitmore`: the early kit adds Phase Door up to 10 and CLW up to 8 after its other steps, so they only use gold that
+  is left over.
+- `restock8`: the restock trip covers DL ≤ 8 (CL < 15), and a CL < 15 town visit after DL5 buys the early kit before
+  equipment.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
