@@ -302,6 +302,51 @@ const EARLYRUN = RULEFIX.has("earlyrun");
 let earlyLastHp: number | null = null;
 // RULEFIX=neutshop: Neutralize Poison は町の買い物の最後に 1 個だけ (neutpois は買い物で補給帰還が増えた)。飲み方は neutpois と同じ
 // RULEFIX=cutcure: 出血中 HP 50% 未満も lowheal の回復対象に ("a fatal wound" 死)
+// RULEFIX=stairsfirst: 階段の上で、見えている敵が 2 手以内に HP を削り切れる (近接の見積もり) → 他の逃走より先に階段を使う。
+// CL10 未満で既存の逃走条件が成立したら、近い既知の階段 (6 歩以内、どの敵にも今より近づかない経路) へ Phase Door より先に歩く
+const STAIRSFIRST = RULEFIX.has("stairsfirst");
+const STAIRS_WALK_MAX = 6, STAIRS_WALK_FAR = 20;
+let stairsFirstWalks = 0;
+// 「近い」階段の歩数: 6 歩。脅威が全て 2 マス以上離れていて自分より速くなければ、歩く間に追いつかれないので 20 歩まで
+// (TS の煙テストでは逃走条件の成立時に最寄りの階段が 13-191 歩、6 歩以内は 0 回だった)
+function stairsWalkMax(threats: any[], pspeed: number | undefined): number {
+  return threats.every((m: any) => m.distance >= 2 && (m.speed ?? 110) <= (pspeed ?? 110)) ? STAIRS_WALK_FAR : STAIRS_WALK_MAX;
+}
+// RULEFIX=leave: 序盤の危険な敵 (4.2 の名前) が見えた、この階で 3 回逃げた (Phase Door/Teleport/逃走)、毒か出血で HP 半分未満
+// → 最寄りの既知の階段 (上下どちらでも) から階を去る。逃げ続けた後の強制戦闘 (forceFight) への切り替えも、階を去るに置き換える
+const LEAVE = RULEFIX.has("leave");
+const LEAVE_LIST: [RegExp, number][] = [ // [名前, この CL 以下で去る]
+  [/^(fang|grip), farmer maggot's dog$/, 5],
+  [/^(soldier|apprentice|acolyte)$/, 8],
+  [/^bullroarer the hobbit$/, 15],
+  [/^cave spider$/, 20],
+];
+const LEAVE_ESCAPES = 3, LEAVE_WALK_MAX = 300;
+let leaving = "", leaveWalk = 0, levelEscapes = 0;
+let leaveHurtDone = false; // 毒/出血での離脱はその毒/出血の間に 1 回だけ (着いた階段ですぐまた去るのを繰り返さない)
+function leaveListed(m: any, plevel: number): boolean {
+  const n = String(m.name ?? "").toLowerCase().replace(/^(the|an?) /, "");
+  return LEAVE_LIST.some(([rx, maxCl]) => plevel <= maxCl && rx.test(n));
+}
+// RULEFIX=arrive: 階段で着いた直後、危険の気配 (state.levelFeeling 1-9、9 が最悪。TS には無い = 情報なし) が閾値以上
+// (5、CL が DL を 4 超えるごとに +1)、または leave の敵が見えたら、その階段ですぐ引き返す。連続 3 回まで
+const ARRIVE = RULEFIX.has("arrive");
+const ARRIVE_MAX_BOUNCES = 3;
+let arrivePending = false, arriveBounces = 0;
+function arriveThreshold(plevel: number, depth: number): number {
+  return Math.min(10, 5 + Math.floor(Math.max(0, plevel - depth) / 4));
+}
+// RULEFIX=seal: 既知の繁殖敵 (breeds、思い出に出てから) から退く途中で扉を抜けたら、扉の上が空なら閉める。扉を開けて既知の繁殖敵
+// 3 体以上、または敵 8 体以上が新たに見えたら、扉の上が空ならすぐ閉める。閉めた扉はこの階では壁扱い (行き詰まった時だけ開け直す)
+const SEAL = RULEFIX.has("seal");
+const SEAL_BREEDERS = 3, SEAL_CROWD = 8;
+const sealedDoors = new Set<string>(); // この階で閉めた扉 "x,y" (経路探索では壁)
+const sealFailed = new Set<string>();  // 閉められなかった扉 (再試行しない)
+let sealPrev: { x: number; y: number; depth: number } | null = null;
+// RULEFIX=sling: 射撃武器のない職業は、最初の買い物でスリング (武器屋) と鉄の弾 20 発 (雑貨屋) を買い、装備して fire で撃つ。
+// 所持金が少なければ (スリング購入後 200G 未満) 油の目標を半分に
+const SLING = RULEFIX.has("sling");
+const SLING_SHOTS = 20, SLING_OIL_GOLD = 200;
 // モンスターの打撃 (gamedata/monster.json) → 1ターンあたり平均ダメージ
 const MON_BLOW_AVG: Map<string, number> = (() => {
   const m = new Map<string, number>();
@@ -552,6 +597,21 @@ let sendSeq = 0, noTimeStreak = 0;
 const noTimeUntil: Record<number, number> = {};
 function readBlocked(): boolean { return (noTimeUntil[CMD.READ] ?? 0) > sendSeq; }
 function castBlocked(): boolean { return (noTimeUntil[CMD.CAST] ?? 0) > sendSeq; }
+// RULEFIX=leave: 逃走の読み/詠唱か (Phase Door、Teleport 系の巻物、逃走スペル)。コマンド前の持ち物/スペルで判定
+function isEscapeCommand(cmd: Record<string, unknown>): boolean {
+  const pl = lastKnownState?.player;
+  if (!pl) return false;
+  if (cmd.type === CMD.READ) {
+    const it = (pl.inventory ?? []).find((i: any) => i.slot === cmd.itemIndex);
+    return /Phase Door|Teleport/.test(it?.name ?? "");
+  }
+  if (cmd.type === CMD.CAST) {
+    const s = (pl.spells ?? []).find((x: any) => x.index === cmd.spellIndex);
+    return /Phase Door|Teleport Self|Portal|Dimension Door/.test(s?.name ?? "");
+  }
+  return false;
+}
+
 async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
   sendSeq++;
   if (noTimeStreak >= 30) {
@@ -565,6 +625,7 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     console.log(`  [CMD-GUARD] confused中のREAD/CASTをRESTに差し替え`);
     cmd = { type: CMD.REST };
   }
+  const escapeCmd = LEAVE && isEscapeCommand(cmd); // RULEFIX=leave: この階の逃走回数に数える (時間が進んだら)
   if (cmdDebug || ++commandsSent >= CMD_DEBUG_AFTER) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
   for (let retry = 0; retry < 5; retry++) {
     const res = await fetch(`${API}/command${VIEW_QS}`, {
@@ -588,7 +649,10 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     if (typeof turnBefore === "number" && lastKnownState?.turn === turnBefore) {
       noTimeStreak++;
       if (cmd.type === CMD.READ || cmd.type === CMD.CAST) noTimeUntil[cmd.type as number] = sendSeq + 20;
-    } else noTimeStreak = 0;
+    } else {
+      noTimeStreak = 0;
+      if (escapeCmd) levelEscapes++;
+    }
     return lastKnownState;
   }
   // All retries failed — return refreshed state, don't loop
@@ -1154,9 +1218,15 @@ const EARLY_KIT_STEPS: [string, number][] = [["food", 3], ["torch", 2], ["oil", 
   ["clw", 3], ...(RULEFIX.has("neutpois") ? [["neut", 1] as [string, number]] : []), ["clw", 5], ["csw", 2],
   ...(RULEFIX.has("neutpois") ? [["neut", 2] as [string, number]] : []), ["food", FOOD_KEEP]];
 async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise<void> {
+  // RULEFIX=sling: 生まれた直後の買い物で、射撃武器がなければスリングを買って装備 (弾は下の ammo で 20 発)
+  const slingBought = SLING && steps === EARLY_KIT_STEPS && (await getState()).turn < 100 ? await buySling() : false;
   // RULEFIX=fire: 射撃武器があれば、光源の次に矢弾を 30 本まで (雑貨屋に常にある。ammo60 なら 60 本)
-  const ammoTval = RULEFIX.has("fire") ? launcherAmmoTval((await getState()).player) : null;
-  if (ammoTval !== null && steps === EARLY_KIT_STEPS) steps = [...steps.slice(0, 2), ["ammo", RULEFIX.has("ammo60") ? 60 : 30], ...steps.slice(2)];
+  const kitPlayer = (await getState()).player;
+  const ammoTval = RULEFIX.has("fire") ? launcherAmmoTval(kitPlayer) : null;
+  const slingAmmo = SLING && /Sling/i.test((kitPlayer.equipment ?? []).find((e: any) => e.tval === TVAL.BOW)?.name ?? "");
+  if (ammoTval !== null && steps === EARLY_KIT_STEPS) steps = [...steps.slice(0, 2), ["ammo", slingAmmo ? SLING_SHOTS : RULEFIX.has("ammo60") ? 60 : 30], ...steps.slice(2)];
+  // RULEFIX=sling: スリングと弾で所持金が減る分、油の目標を半分に
+  if (slingBought && kitPlayer.gold < SLING_OIL_GOLD) steps = steps.map(([k, n]) => [k, k === "oil" ? Math.ceil(n / 2) : n] as [string, number]);
   const kinds: Record<string, (i: any) => boolean> = {
     food: i => i.tval === TVAL.FOOD && (i.name ?? "").includes("Ration"),
     torch: i => i.tval === TVAL.LIGHT && (i.name ?? "").includes("Wooden Torch"),
@@ -1232,10 +1302,20 @@ function rulesFightChoice(m: any, plevel: number, inv: any[], tiles: any[], px: 
 }
 
 // 序盤の逃走: 足元の階段 > Phase Door (敵が近い時) > 最寄り階段へ歩く > Phase Door
-function earlyFleeCommand(tiles: any[], px: number, py: number, inv: any[], m: any, actionNo: number): { cmd: Record<string, unknown>; kind: string } | null {
+function earlyFleeCommand(tiles: any[], px: number, py: number, inv: any[], m: any, actionNo: number,
+  ctx?: { plevel: number; pspeed: number; monsters: any[]; turn: number; depth: number }): { cmd: Record<string, unknown>; kind: string } | null {
   const here = tiles.find((t: any) => t.x === px && t.y === py);
   if (here?.feat === FEAT.DOWN_STAIR) return { cmd: { type: CMD.GO_DOWN }, kind: "stairs" };
   if (here?.feat === FEAT.UP_STAIR) return { cmd: { type: CMD.GO_UP }, kind: "stairs" };
+  // RULEFIX=stairsfirst: CL10 未満は、近い既知の階段 (敵に近づかない経路) へ Phase Door より先に歩く
+  if (STAIRSFIRST && ctx && ctx.plevel < 10) {
+    const sf = safeStairPath(tiles, px, py, [m], ctx.monsters, stairsWalkMax([m], ctx.pspeed));
+    if (sf) {
+      stairsFirstWalks++;
+      if (stairsFirstWalks <= 3 || stairsFirstWalks % 10 === 0) addLesson(ctx.turn, ctx.depth, "階段優先", `${m.name}から逃走: Phase Door より先に階段へ歩く (${sf.len}歩, #${stairsFirstWalks})`);
+      return { cmd: { type: CMD.WALK, direction: sf.dir }, kind: "walk" };
+    }
+  }
   const phase = findPhaseScroll(inv);
   const phaseOk = phase !== null && actionNo - lastEarlyPhaseAction >= 4;
   const st = nearestStair(tiles, px, py);
@@ -1395,6 +1475,37 @@ function findAmmo(player: any): number | null {
   return a ? a.slot : null;
 }
 
+// RULEFIX=sling: 射撃武器 (装備・持ち物) がなければ、武器屋で一番安いスリングを買って装備する。装備できたら true
+async function buySling(): Promise<boolean> {
+  const st = await getState();
+  if (st.depth !== 0 || !st.stores) return false;
+  const pl = st.player;
+  if (launcherAmmoTval(pl) !== null || (pl.inventory ?? []).some((i: any) => i.tval === TVAL.BOW)) return false;
+  let best: { storeType: number; item: any } | null = null;
+  for (const store of st.stores as any[]) {
+    if (store.type !== 2) continue; // 武器屋
+    for (const it of store.stock) {
+      if (it.tval !== TVAL.BOW || !/Sling/i.test(it.name ?? "") || it.price <= 0 || it.price > pl.gold) continue;
+      if (!best || it.price < best.item.price) best = { storeType: store.type, item: it };
+    }
+  }
+  if (!best) {
+    console.log(`  [スリング] 武器屋にスリングなし (所持金${pl.gold}G)`);
+    return false;
+  }
+  const res = await fetch(`${API}/buy`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ storeType: best.storeType, itemIndex: best.item.index, quantity: 1 }),
+  });
+  const r: any = await res.json();
+  if (!r.success) return false;
+  const sl = ((await getState()).player.inventory ?? []).find((i: any) => i.tval === TVAL.BOW && /Sling/i.test(i.name ?? ""));
+  if (sl) await sendCommand({ type: CMD.EQUIP, itemIndex: sl.slot });
+  const ok = launcherAmmoTval((await getState()).player) === TVAL.SHOT;
+  addLesson(0, 0, "スリング", ok ? `スリングを${best.item.price}Gで購入して装備。鉄の弾を${SLING_SHOTS}発まで買う` : `スリングを買ったが装備できず`);
+  return ok;
+}
+
 // Bresenham でプレイヤー→目標の射線が通るか (中間タイルが全て通行可・扉閉でない)
 function hasLOS(tiles: any[], px: number, py: number, tx: number, ty: number): boolean {
   const feats = new Map<number, number>();
@@ -1423,6 +1534,7 @@ function nearestStair(tiles: any[], px: number, py: number): { dir: number; len:
     if (PASSABLE_FEATS.has(t.feat)) passable.add(`${t.x},${t.y}`);
     if (t.feat === FEAT.UP_STAIR || t.feat === FEAT.DOWN_STAIR) stairs.add(`${t.x},${t.y}`);
   }
+  for (const k of sealedDoors) passable.delete(k); // RULEFIX=seal: 閉めた扉は壁
   if (stairs.size === 0) return null;
   const offs: [number, number, number][] = [[-1, 1, 1], [0, 1, 2], [1, 1, 3], [-1, 0, 4], [1, 0, 6], [-1, -1, 7], [0, -1, 8], [1, -1, 9]];
   const seen = new Set<string>([`${px},${py}`]);
@@ -1433,6 +1545,61 @@ function nearestStair(tiles: any[], px: number, py: number): { dir: number; len:
       for (const [dx, dy, d] of offs) {
         const nx = c.x + dx, ny = c.y + dy, k = `${nx},${ny}`;
         if (!passable.has(k) || seen.has(k)) continue;
+        if (!canMoveDiag(passable, c.x, c.y, dx, dy)) continue;
+        seen.add(k);
+        const dir = c.dir === 5 ? d : c.dir;
+        if (stairs.has(k)) return { dir, len };
+        next.push({ x: nx, y: ny, dir });
+      }
+    }
+    frontier = next;
+  }
+  return null;
+}
+
+// RULEFIX=stairsfirst: 見えている情報だけの近接ダメージ (1 手): 思い出に出た打撃のダイス (10 回見た後)、まだなら Lv からの
+// 全モンスター共通の事前値 (打撃平均の Lv 別中央値 ≈ 1.0 × Lv)。meleeTooCostly と同じく命中 0.7、速度比を掛ける
+function seenMeleePerTurn(m: any): number {
+  let avg = 0;
+  for (const b of m.blowsSeen ?? []) {
+    const d = /(\d+)d(\d+)/.exec(String(b?.dice ?? ""));
+    if (d) avg += Number(d[1]) * (Number(d[2]) + 1) / 2;
+  }
+  return avg > 0 ? avg : Math.max(1, m.level ?? 1);
+}
+// 見えている敵が 2 手以内に現 HP を削り切れるか (遠い敵は近づく手数を引く。動かない敵は隣接時だけ)
+function lethalWithinTwo(monsters: any[], p: any): boolean {
+  let dmg = 0;
+  for (const m of monsters) {
+    if (m.distance > 8 || (m.distance > 1 && STATIONARY_RE.test(m.name ?? ""))) continue;
+    const speedRatio = Math.max(0.5, ((m.speed ?? 110) - 100) / Math.max(5, (p.speed ?? 110) - 100));
+    const attacks = Math.max(0, 2 * speedRatio - Math.max(0, m.distance - 1));
+    dmg += seenMeleePerTurn(m) * 0.7 * attacks;
+  }
+  return dmg >= p.hp;
+}
+// 既知の最寄り階段への BFS (maxLen 歩以内): 敵のいるマスは通らず、どの脅威にも今より近づかない (隣接していない脅威の隣も通らない)
+function safeStairPath(tiles: any[], px: number, py: number, threats: any[], monsters: any[], maxLen: number): { dir: number; len: number } | null {
+  const passable = new Set<string>();
+  const stairs = new Set<string>();
+  for (const t of tiles) {
+    if (PASSABLE_FEATS.has(t.feat)) passable.add(`${t.x},${t.y}`);
+    if (t.feat === FEAT.UP_STAIR || t.feat === FEAT.DOWN_STAIR) stairs.add(`${t.x},${t.y}`);
+  }
+  for (const k of sealedDoors) passable.delete(k);
+  for (const m of monsters) passable.delete(`${m.x},${m.y}`);
+  if (stairs.size === 0) return null;
+  const keep = threats.map((m: any) => ({ x: m.x, y: m.y, d: Math.min(2, distanceTo(px, py, m.x, m.y)) }));
+  const ok = (x: number, y: number) => keep.every(k => distanceTo(x, y, k.x, k.y) >= k.d);
+  const offs: [number, number, number][] = [[-1, 1, 1], [0, 1, 2], [1, 1, 3], [-1, 0, 4], [1, 0, 6], [-1, -1, 7], [0, -1, 8], [1, -1, 9]];
+  const seen = new Set<string>([`${px},${py}`]);
+  let frontier: { x: number; y: number; dir: number }[] = [{ x: px, y: py, dir: 5 }];
+  for (let len = 1; frontier.length > 0 && len <= maxLen; len++) {
+    const next: { x: number; y: number; dir: number }[] = [];
+    for (const c of frontier) {
+      for (const [dx, dy, d] of offs) {
+        const nx = c.x + dx, ny = c.y + dy, k = `${nx},${ny}`;
+        if (!passable.has(k) || seen.has(k) || !ok(nx, ny)) continue;
         if (!canMoveDiag(passable, c.x, c.y, dx, dy)) continue;
         seen.add(k);
         const dir = c.dir === 5 ? d : c.dir;
@@ -1591,6 +1758,7 @@ function bfsNextStepCore(
   }
   for (const k of avoidHard) passableSet.delete(k);
   if (avoidNear) for (const k of avoidSoft) if (k !== `${tx},${ty}`) passableSet.delete(k);
+  for (const k of sealedDoors) passableSet.delete(k); // RULEFIX=seal: 閉めた扉は壁
 
   const queue: { x: number; y: number; firstDir: number }[] = [];
   const visitedBFS = new Set<string>();
@@ -1689,6 +1857,7 @@ function dijkstraNextStepWithDigging(
       const nkey = `${nx},${ny}`;
       const feat = tileMap.get(nkey);
       if (feat === undefined) continue; // off-map
+      if (sealedDoors.has(nkey)) continue; // RULEFIX=seal: 閉めた扉は壁
       const mc = moveCost(feat);
       if (mc >= 9999) continue; // impassable
 
@@ -1730,6 +1899,7 @@ function bfsNextUnvisitedCore(
   }
   for (const k of avoidHard) passableSet.delete(k);
   if (avoidNear) for (const k of avoidSoft) passableSet.delete(k);
+  for (const k of sealedDoors) passableSet.delete(k); // RULEFIX=seal: 閉めた扉は壁
 
   const queue: { x: number; y: number; firstDir: number }[] = [];
   const seen = new Set<string>();
@@ -1745,7 +1915,7 @@ function bfsNextUnvisitedCore(
     const nx = px + dx;
     const ny = py + dy;
     const key = `${nx},${ny}`;
-    if (!passableSet.has(key) && !tiles.find((t: any) => t.x === nx && t.y === ny && t.feat === FEAT.CLOSED_DOOR)) continue;
+    if (!passableSet.has(key) && (sealedDoors.has(key) || !tiles.find((t: any) => t.x === nx && t.y === ny && t.feat === FEAT.CLOSED_DOOR))) continue;
     if (seen.has(key)) continue;
     if (!canMoveDiag(passableSet, px, py, dx, dy)) continue;
     if (!visited.has(key)) return dir; // 隣接未踏 → 直行
@@ -2190,6 +2360,24 @@ async function playGame() {
       }
       return null;
     };
+    // RULEFIX=stairsfirst: CL10 未満で逃走条件が成立 → 階段の上なら階段、近い既知の階段 (6 歩以内、敵に近づかない経路) へ
+    // Phase Door より先に歩く。何もしなければ false (呼び出し元の Phase Door へ)
+    const stairsFirstFlee = async (threats: any[], why: string): Promise<boolean> => {
+      if (!STAIRSFIRST || p.level >= 10 || state.depth < 1) return false;
+      const here = tiles.find((t: any) => t.x === px && t.y === py);
+      if (here?.feat === FEAT.DOWN_STAIR || here?.feat === FEAT.UP_STAIR) {
+        fleeAttempts++;
+        addLesson(state.turn, state.depth, "階段優先", `${why}: 階段の上なので Phase Door より先に${here.feat === FEAT.DOWN_STAIR ? "下り" : "上り"}階段`);
+        state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+        return true;
+      }
+      const sf = safeStairPath(tiles, px, py, threats, monsters, stairsWalkMax(threats, p.speed));
+      if (!sf) return false;
+      stairsFirstWalks++;
+      if (stairsFirstWalks <= 3 || stairsFirstWalks % 10 === 0) addLesson(state.turn, state.depth, "階段優先", `${why}: Phase Door より先に階段へ歩く (${sf.len}歩, #${stairsFirstWalks})`);
+      state = await sendCommand({ type: CMD.WALK, direction: sf.dir });
+      return true;
+    };
 
     // === 装備最適化 (500ターンに1回 + 深度変更時) ===
     // equippedNames: 現在装備中のアイテム名セット。同名アイテムの再装備ループを防止
@@ -2232,6 +2420,10 @@ async function playGame() {
       (globalThis as any).__herdFleeCount = 0;
       if (state.depth > maxDepthReached) maxDepthReached = state.depth;
       lastKnownDepth = state.depth;
+      // RULEFIX=leave/seal/arrive: 階ごとの状態 (フラグが無効なら使われない)
+      levelEscapes = 0; leaving = ""; leaveWalk = 0; sealedDoors.clear(); sealFailed.clear(); sealPrev = null;
+      const arrivedOn = tiles.find((t: any) => t.x === px && t.y === py)?.feat;
+      arrivePending = ARRIVE && state.depth >= 1 && (arrivedOn === FEAT.UP_STAIR || arrivedOn === FEAT.DOWN_STAIR);
       if (savepointBank.enabled && !ROLLOUT) await savepointBank.onLevelEntry(state, gameIdOf(state), GAME_SEED === null ? null : Number(GAME_SEED), fetchSnapshotBody);
 
       // 序盤の町帰還 (逃走で DL1→町 など): 残金で油/Phase/CLW を補充
@@ -2271,6 +2463,24 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=arrive: 階段で着いた直後、危険の気配が閾値以上か leave の敵が見えたら、その階段ですぐ引き返す (連続 3 回まで) ===
+    if (arrivePending) {
+      arrivePending = false;
+      const here = tiles.find((t: any) => t.x === px && t.y === py);
+      const feel = typeof state.levelFeeling === "number" ? state.levelFeeling : null;
+      const thr = arriveThreshold(p.level, state.depth);
+      const named = monsters.find((m: any) => leaveListed(m, p.level));
+      const badFeel = feel !== null && feel >= thr;
+      if ((badFeel || named) && arriveBounces < ARRIVE_MAX_BOUNCES && (here?.feat === FEAT.UP_STAIR || here?.feat === FEAT.DOWN_STAIR)) {
+        arriveBounces++;
+        addLesson(state.turn, state.depth, "到着引き返し",
+          `DL${state.depth}着、${badFeel ? `危険の気配${feel} (閾値${thr})` : `${named.name}(dist${named.distance})が見える`}。${here.feat === FEAT.DOWN_STAIR ? "下り" : "上り"}階段ですぐ引き返す (連続${arriveBounces}回目)`);
+        state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+        continue;
+      }
+      arriveBounces = 0; // この階に留まる: 連続回数を数え直す
+    }
+
     visited.add(`${px},${py}`);
     if (visited.size > lastVisitedSize) {
       noProgressCount = 0;
@@ -2279,6 +2489,31 @@ async function playGame() {
       noProgressCount++;
     }
     const levelDebug = turnsOnLevel < 300; // 各フロア最初の300ターンはデバッグ
+
+    // === RULEFIX=seal (a): 既知の繁殖敵から退く途中で扉を抜けた → 扉の上が空なら閉める (この階では壁扱い) ===
+    if (SEAL && state.depth >= 1) {
+      const prev = sealPrev;
+      sealPrev = { x: px, y: py, depth: state.depth };
+      if (prev && prev.depth === state.depth && distanceTo(prev.x, prev.y, px, py) === 1) {
+        const key = `${prev.x},${prev.y}`;
+        const door = tiles.find((t: any) => t.x === prev.x && t.y === prev.y);
+        const breeders = monsters.filter((m: any) => m.breeds === true);
+        if (door?.feat === FEAT.OPEN_DOOR && breeders.length > 0 && !sealFailed.has(key) && !sealedDoors.has(key) && !door.hasObj
+            && !monsters.some((m: any) => m.x === prev.x && m.y === prev.y)) {
+          const nb = breeders.reduce((a: any, b: any) => (a.distance <= b.distance ? a : b));
+          if (distanceTo(nb.x, nb.y, prev.x, prev.y) < nb.distance) { // 繁殖敵は扉の向こう側: 退いている
+            const turnBefore = state.turn;
+            state = await sendCommand({ type: CMD.CLOSE, direction: directionTo(px, py, prev.x, prev.y) });
+            const now = state.map.tiles.find((t: any) => t.x === prev.x && t.y === prev.y);
+            if (state.turn !== turnBefore && now?.feat === FEAT.CLOSED_DOOR) {
+              sealedDoors.add(key);
+              addLesson(state.turn, state.depth, "扉封鎖", `既知の繁殖敵 ${nb.name}(dist${nb.distance}) から退く途中、通った扉 (${key}) を閉めた。この階では壁扱い`);
+            } else sealFailed.add(key);
+            if (state.turn !== turnBefore) continue;
+          }
+        }
+      }
+    }
 
     // === 最最最優先: ブリーダー群れ検知 → 即フロア脱出 ===
     // サーバーからのisBreederフラグで正確に検知 (フォールバック: 20体以上)
@@ -2365,6 +2600,18 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=stairsfirst: 階段の上で、見えている敵が 2 手以内に HP を削り切れる → 回復や他の逃走より先に階段を使う ===
+    if (STAIRSFIRST && state.depth >= 1 && monsters.length > 0) {
+      const here = tiles.find((t: any) => t.x === px && t.y === py);
+      if ((here?.feat === FEAT.DOWN_STAIR || here?.feat === FEAT.UP_STAIR) && lethalWithinTwo(monsters, p)) {
+        fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
+        addLesson(state.turn, state.depth, "階段優先",
+          `HP${p.hp}/${p.maxHp}、見えている敵${monsters.length}体 (最寄り ${[...monsters].sort((a: any, b: any) => a.distance - b.distance)[0].name}) が2手以内に致命的。${here.feat === FEAT.DOWN_STAIR ? "下り" : "上り"}階段で離脱`);
+        state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+        continue;
+      }
+    }
+
     // === RULEFIX=lowheal: HP 危険域 (35% 未満、毒なら 50% 未満) では停滞脱出より先に回復。隣接敵がいれば下の緊急回復/逃走に任せる ===
     // (毒で HP が減り続けるのに停滞脱出で壁を掘り続け、回復薬 6 個を持ったまま死んでいた)
     const lowHpHold = RULEFIX.has("lowheal") && state.depth >= 1 && (hpPct < 0.35 || (p.timed.poisoned > 0 && hpPct < 0.5)
@@ -2422,6 +2669,36 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=leave: 序盤の危険な敵が見えた / この階で 3 回逃げた / 毒か出血で HP 半分未満 → 最寄りの既知の階段から階を去る ===
+    if (LEAVE && state.depth >= 1) {
+      const afflicted = p.timed.poisoned > 0 || (p.timed.cut ?? 0) > 0;
+      if (!afflicted) leaveHurtDone = false;
+      if (!leaving) {
+        const named = monsters.find((m: any) => leaveListed(m, p.level));
+        const hurt = afflicted && hpPct < 0.5 && !leaveHurtDone;
+        leaving = named ? `${named.name}(Lv${named.level},dist${named.distance})が見えた`
+          : levelEscapes >= LEAVE_ESCAPES ? `この階で${levelEscapes}回逃走`
+          : hurt ? `${p.timed.poisoned > 0 ? "毒" : "出血"}でHP${Math.round(hpPct * 100)}%` : "";
+        if (leaving && !named && levelEscapes < LEAVE_ESCAPES) leaveHurtDone = true;
+        if (leaving) { leaveWalk = 0; addLesson(state.turn, state.depth, "階離脱", `${leaving}。最寄りの階段から階を去る`); }
+      }
+      if (leaving) {
+        const here = tiles.find((t: any) => t.x === px && t.y === py);
+        if (here?.feat === FEAT.DOWN_STAIR || here?.feat === FEAT.UP_STAIR) {
+          state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+          continue;
+        }
+        // 歩いて階段へ (できれば敵に近づかない経路)。隣接する敵がいれば下の戦闘/逃走に任せる。階段が未発見なら通常の探索で探す
+        const threats = monsters.filter((m: any) => leaveListed(m, p.level));
+        const st = safeStairPath(tiles, px, py, threats, monsters, 200) ?? nearestStair(tiles, px, py);
+        if (st && leaveWalk < LEAVE_WALK_MAX && !monsters.some((m: any) => m.distance <= 1)) {
+          leaveWalk++;
+          state = await sendCommand({ type: CMD.WALK, direction: st.dir });
+          continue;
+        }
+      }
+    }
+
     // === 最最優先: 極端な停滞 → 強制脱出 ===
     if (noProgressCount >= 500 && !lowHpHold) {
       // 500回停滞 → visited クリアで探索リセット (同じパターンを打破)
@@ -2455,6 +2732,13 @@ async function playGame() {
       const stairPath = nearestStair(tiles, px, py);
       if (stairPath && stairPath.len <= 150) {
         state = await sendCommand({ type: CMD.WALK, direction: stairPath.dir });
+        continue;
+      }
+      // RULEFIX=seal: 行き詰まった (階段へも歩けない) → 最後の手段として閉めた扉を壁扱いから外し、探索に戻る
+      if (SEAL && sealedDoors.size > 0) {
+        addLesson(state.turn, state.depth, "扉再開放", `${noProgressCount}回停滞、階段にも行けない。閉めた扉${sealedDoors.size}枚を開け直す`);
+        sealedDoors.clear();
+        noProgressCount = 0;
         continue;
       }
       // 階段上にいない → 壁を掘って脱出 (方向を少しずつ変える)
@@ -2916,8 +3200,13 @@ async function playGame() {
           (closestEnemy.isUnique && closestEnemy.level > p.level + 3)
         );
         if (emFleeCount >= 10 && closestEnemy && !isTooStrongToFight) {
-          forceFightMonsters.add(closestEnemy.name);
-          fleeCountByMonster.delete(closestEnemy.name);
+          if (LEAVE && state.depth >= 1) {
+            // RULEFIX=leave: 強制戦闘の代わりに階を去る (上の leave ブロックが次の手から階段へ向かう)
+            if (!leaving) { leaving = `${closestEnemy.name}から${emFleeCount + 1}回逃走`; leaveWalk = 0; addLesson(state.turn, state.depth, "階離脱", `${leaving}。強制戦闘の代わりに階を去る`); }
+          } else {
+            forceFightMonsters.add(closestEnemy.name);
+            fleeCountByMonster.delete(closestEnemy.name);
+          }
           // 回復してから戦闘 (逃走せずに下のヒーリングコードへ)
         }
 
@@ -3025,6 +3314,7 @@ async function playGame() {
             continue;
           }
         }
+        if (await stairsFirstFlee(nearbyEnemies, `HP${Math.round(hpPct * 100)}%、敵${nearbyEnemies.length}体(dist<=3)`)) continue;
         const phaseSlot = findPhaseScroll(inv);
         if (phaseSlot !== null) {
           fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
@@ -3079,6 +3369,7 @@ async function playGame() {
           continue;
         }
       }
+      if (monsters.length > 0 && await stairsFirstFlee(monsters.filter((m: any) => m.distance <= 5), `HP${Math.round(hpPct * 100)}%、回復薬なし`)) continue;
       const phaseSlot = findPhaseScroll(inv);
       if (phaseSlot !== null && monsters.length > 0) {
         fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
@@ -3237,9 +3528,10 @@ async function playGame() {
       earlyLastHp = p.hp;
       const adj = monsters.filter((m: any) => m.distance <= 1 && !knownBreeder(m)).sort((a: any, b: any) => b.level - a.level)[0];
       if (adj && p.level <= 4 && state.depth >= 1 && drop >= p.maxHp / 3) {
-        const fl = earlyFleeCommand(tiles, px, py, inv, adj, actionCount);
+        const fl = earlyFleeCommand(tiles, px, py, inv, adj, actionCount, { plevel: p.level, pspeed: p.speed, monsters, turn: state.turn, depth: state.depth });
         if (fl) {
           earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
+          if (LEAVE && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: 歩いて逃げ始めた (Phase/Teleport は sendCommand で数える)
           addLesson(state.turn, state.depth, "序盤離脱", `${adj.name}(Lv${adj.level})に1手でHP${drop}/${p.maxHp}。${fl.kind}`);
           state = await sendCommand(fl.cmd);
           earlyLastHp = state.player.hp;
@@ -3308,9 +3600,10 @@ async function playGame() {
         if (choice === "flee") {
           const fleeN = (fleeSteps.get(key) ?? 0) + 1;
           fleeSteps.set(key, fleeN);
-          const fl = fleeN > 60 ? null : earlyFleeCommand(tiles, px, py, inv, m, actionCount); // 同一個体から60手逃げても振り切れない → 諦めて殴る
+          const fl = fleeN > 60 ? null : earlyFleeCommand(tiles, px, py, inv, m, actionCount, { plevel: p.level, pspeed: p.speed, monsters, turn: state.turn, depth: state.depth }); // 同一個体から60手逃げても振り切れない → 諦めて殴る
           if (fl) {
             earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
+            if (LEAVE && fleeN === 1 && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: この個体から歩いて逃げ始めた
             if (fl.kind === "stairs") earlyFleeStairs++;
             if (fl.kind === "phase") phasesRead++;
             if (earlyFleeActions <= 3 || fl.kind !== "walk") addLesson(state.turn, state.depth, "序盤逃走", `${m.name}(Lv${m.level},spd${m.speed},dist${m.distance})から${fl.kind}`);
@@ -3350,8 +3643,13 @@ async function playGame() {
 
       // 6回以上逃走 → もう逃げるのは無駄。forceFight登録して戦闘に移行 (強敵は除外)
       if (monFleeCount >= 6 && !isTooFastToFight && !isTooToughToFight) {
-        forceFightMonsters.add(dangerMon.name);
-        fleeCountByMonster.delete(dangerMon.name);
+        if (LEAVE && state.depth >= 1) {
+          // RULEFIX=leave: 強制戦闘の代わりに階を去る
+          if (!leaving) { leaving = `${dangerMon.name}から${monFleeCount + 1}回逃走`; leaveWalk = 0; addLesson(state.turn, state.depth, "階離脱", `${leaving}。強制戦闘の代わりに階を去る`); }
+        } else {
+          forceFightMonsters.add(dangerMon.name);
+          fleeCountByMonster.delete(dangerMon.name);
+        }
         // 下のisDangerousチェックを再評価 → 戦闘に移行 (逃走しない)
       }
 
@@ -3478,6 +3776,7 @@ async function playGame() {
           continue;
         }
       }
+      if (await stairsFirstFlee([dangerMon], `${dangerMon.name}(Lv${dangerMon.level})接近`)) continue;
       const phaseSlot = findPhaseScroll(inv);
       if (phaseSlot !== null) {
         fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
@@ -3647,8 +3946,13 @@ async function playGame() {
           const adjTooStrong = (target.speed >= 130 && (target.level >= p.level * 0.7 || target.level >= 15)) ||
             (target.isUnique && target.maxhp > 200) || (target.isUnique && target.level > p.level + 3);
           if (adjFleeCount >= 10 && !adjTooStrong) {
-            forceFightMonsters.add(target.name);
-            fleeCountByMonster.delete(target.name);
+            if (LEAVE && state.depth >= 1) {
+              // RULEFIX=leave: 強制戦闘の代わりに階を去る
+              if (!leaving) { leaving = `${target.name}から${adjFleeCount + 1}回逃走`; leaveWalk = 0; addLesson(state.turn, state.depth, "階離脱", `${leaving}。強制戦闘の代わりに階を去る`); }
+            } else {
+              forceFightMonsters.add(target.name);
+              fleeCountByMonster.delete(target.name);
+            }
             // shouldFleeが次回からfalseになるので、以降は戦闘に落ちる
           }
           // 3-9回 → Teleport
@@ -3680,6 +3984,7 @@ async function playGame() {
             continue;
           }
         }
+        if (await stairsFirstFlee(adjacentMonsters, `隣接敵${adjacentMonsters.length}体、HP${Math.round(hpPct * 100)}%`)) continue;
         const phaseSlot = findPhaseScroll(inv);
         if (phaseSlot !== null) {
           fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
@@ -4234,8 +4539,9 @@ async function playGame() {
     for (const dir of ALL_DIRS) {
       const [dx, dy] = dirOffsets[dir]!;
       const t = tiles.find((tt: any) => tt.x === px + dx && tt.y === py + dy);
-      if (t?.feat === FEAT.CLOSED_DOOR) {
+      if (t?.feat === FEAT.CLOSED_DOOR && !sealedDoors.has(`${px + dx},${py + dy}`)) { // RULEFIX=seal: 閉めた扉は開けない
         if (levelDebug) console.log(`  [DOOR] dir${dir}@(${px+dx},${py+dy}) stuck=${stuckCount}`);
+        const seenBefore = new Set(monsters.map((m: any) => m.midx ?? `${m.name}@${m.x},${m.y}`));
         if (stuckCount > 3) {
           state = await sendCommand({ type: CMD.TUNNEL, direction: dir });
         } else {
@@ -4244,6 +4550,22 @@ async function playGame() {
         // ドア開いた後の確認
         const newT = state.map.tiles.find((tt: any) => tt.x === px + dx && tt.y === py + dy);
         if (levelDebug && newT) console.log(`    → feat now: ${newT.feat}`);
+        // RULEFIX=seal (b): 開けた扉の向こうに既知の繁殖敵 3 体以上、または敵 8 体以上が新たに見えた → 扉の上が空ならすぐ閉める
+        if (SEAL && state.depth >= 1 && newT?.feat === FEAT.OPEN_DOOR && !newT.hasObj) {
+          const fresh = ((state.monsters ?? []) as any[]).filter((m: any) => !seenBefore.has(m.midx ?? `${m.name}@${m.x},${m.y}`));
+          const freshBreeders = fresh.filter((m: any) => m.breeds === true).length;
+          const key = `${px + dx},${py + dy}`;
+          if ((freshBreeders >= SEAL_BREEDERS || fresh.length >= SEAL_CROWD) && !sealFailed.has(key)
+              && !((state.monsters ?? []) as any[]).some((m: any) => m.x === px + dx && m.y === py + dy)) {
+            const turnBefore = state.turn;
+            state = await sendCommand({ type: CMD.CLOSE, direction: dir });
+            const shut = state.map.tiles.find((tt: any) => tt.x === px + dx && tt.y === py + dy);
+            if (state.turn !== turnBefore && shut?.feat === FEAT.CLOSED_DOOR) {
+              sealedDoors.add(key);
+              addLesson(state.turn, state.depth, "扉封鎖", `扉 (${key}) を開けたら新たに敵${fresh.length}体 (既知の繁殖敵${freshBreeders}体)。すぐ閉めた。この階では壁扱い`);
+            } else sealFailed.add(key);
+          }
+        }
         doorHandled = true;
         break;
       }
