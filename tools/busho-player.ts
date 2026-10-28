@@ -288,7 +288,9 @@ const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood
 // 明示した時だけ (session 15 の検証): food8 (食料を 8 個まで), neutpois (Neutralize Poison を買い、毒で HP 半分未満なら飲む),
 // poisonhold (毒で HP 半分未満・回復薬なし・敵が見えない → 休む), fireadj (隣接する敵も撃つ), ammo60 (矢弾を 60 本まで)
 // 明示した時だけ (session 14 で不採用): restock100 (補給帰還は 100G 以上), restockboth (回復薬と Phase/油の両方が切れたら帰還), clgate1 (DL1-3 は CL >= DL+1 で降下)
-const EARLY_CL_MARGIN = RULEFIX.has("clgate1") ? 1 : 2;
+// 明示した時だけ (セッション18で検証): clgate0 (DL1-3 は CL >= DL で降下)、leave2 (この階で 2 回逃げたら去る)、
+// leavemore (leave の名前に、セッション17の新しい既定で多かった死因を加える)
+const EARLY_CL_MARGIN = RULEFIX.has("clgate0") ? 0 : RULEFIX.has("clgate1") ? 1 : 2;
 const FOOD_KEEP = RULEFIX.has("food8") ? 8 : 6; // 町で買う食料の目標 (深い階の帰り道で餓死していた)
 // RULEFIX=breed: 繁殖する敵 (思い出に「爆発的に繁殖する」と出たもの = C サーバーの breeds。繁殖を見た後だけ) を
 // 少ないうちに最優先で倒し、増え始めたら (4 体以上見える、またはこの階で 150 行動見え続けた) 最寄りの階段から階を去る
@@ -322,8 +324,12 @@ const LEAVE_LIST: [RegExp, number][] = [ // [名前, この CL 以下で去る]
   [/^(soldier|apprentice|acolyte)$/, 8],
   [/^bullroarer the hobbit$/, 15],
   [/^cave spider$/, 20],
+  ...(RULEFIX.has("leavemore") ? [ // セッション17の confirmQ (新しい既定) で 4 回以上殺した敵
+    [/^snaga$/, 10], [/^lagduf, the snaga$/, 14], [/^mughash the kobold lord$/, 15], [/^gallant$/, 10],
+    [/^scout$/, 8], [/^battle-scarred veteran$/, 10], [/^large kobold$/, 8],
+  ] as [RegExp, number][] : []),
 ];
-const LEAVE_ESCAPES = 3, LEAVE_WALK_MAX = 300;
+const LEAVE_ESCAPES = RULEFIX.has("leave2") ? 2 : 3, LEAVE_WALK_MAX = 300;
 let leaving = "", leaveWalk = 0, levelEscapes = 0;
 let leaveHurtDone = false; // 毒/出血での離脱はその毒/出血の間に 1 回だけ (着いた階段ですぐまた去るのを繰り返さない)
 function leaveListed(m: any, plevel: number): boolean {

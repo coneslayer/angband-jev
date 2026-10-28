@@ -19,7 +19,9 @@ Disk guard as session 15; replays and snapshots are deleted after each game. Res
 
 Usage: driver17.py --run runs/session17/<date> --prior5 runs/session5/2026-10-16 --prior16 runs/session16/<date>
        --base RULEFIX --canary-arm ARM --variants a,b,c [--seed 3600000] [--hours 52] [--screen-hours 24]
-       [--slots 13] [--smoke]
+       [--canary-stage ruleP] [--canary-starts finalM:3200000] [--slots 13] [--smoke]
+Session 18 reuses it: --prior16 is then session 17's run, with --canary-stage confirmQ --canary-arm combo
+--canary-starts confirmQ:3700000.
 """
 import argparse, json, os, shutil, signal, sys, threading, time, types  # noqa: E401
 import concurrent.futures as cf
@@ -80,10 +82,10 @@ def pool(run, deadline, next_job):
 
 
 def stage_canary(run, name, deadline):
-    prior = D14.load_outcomes(os.path.join(run.prior16, "driver.log"), "ruleP-").get(run.canary_arm) or {}
+    prior = D14.load_outcomes(os.path.join(run.prior16, "driver.log"), f"{run.canary_stage}-").get(run.canary_arm) or {}
     ids = [i for i in sorted(prior) if ok(prior[i])][:2 if run.smoke else CANARY_N]
-    if not ids: return {"failed": f"no ruleP games for arm {run.canary_arm} in session 16"}
-    D8.STARTS, D8.N_STARTS = D15.FINALM, N_STARTS  # session 14's starts, which ruleP replayed
+    if not ids: return {"failed": f"no {run.canary_stage} games for arm {run.canary_arm} in {run.prior16}"}
+    D8.STARTS, D8.N_STARTS = run.canary_starts, N_STARTS  # the prior stage's starts
     by_id = {s["id"]: s for s in D8.starts_for(types.SimpleNamespace(smoke=False, path=run.path, prior=run.prior))}
     jobs = iter([(by_id[i], "base", run.base, name) for i in ids if i in by_id])
     lock = threading.Lock()
@@ -196,6 +198,8 @@ def main():
     ap = argparse.ArgumentParser()
     for p in ("--run", "--prior5", "--prior16", "--base", "--canary-arm", "--variants"): ap.add_argument(p, required=True)
     ap.add_argument("--seed", type=int, default=3600000)
+    ap.add_argument("--canary-stage", default="ruleP", help="the stage of --prior16 whose games canaryQ replays")
+    ap.add_argument("--canary-starts", default="finalM:3200000", help="that stage's starts, RNG:FRESH (bank +50000)")
     ap.add_argument("--hours", type=float, default=52); ap.add_argument("--screen-hours", type=float, default=24)
     ap.add_argument("--slots", type=int, default=13); ap.add_argument("--smoke", action="store_true")
     a = ap.parse_args()
@@ -204,6 +208,8 @@ def main():
     run = D.Run(a.run, a.hours, a.smoke, a.slots)
     run.prior = run.prior5 = os.path.abspath(a.prior5)  # run.prior: session 5's C bank (D2.bank_files)
     run.prior16 = os.path.abspath(a.prior16)
+    rng, fresh = a.canary_starts.split(":")
+    run.canary_stage, run.canary_starts = a.canary_stage, {"rng": rng, "fresh": int(fresh), "bank": int(fresh) + 50000}
     run.base, run.canary_arm, run.variants, run.seed = a.base, a.canary_arm, a.variants.split(","), a.seed
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
     app = D.app_dir(run)  # first: freezing the source recreates RUN/src
