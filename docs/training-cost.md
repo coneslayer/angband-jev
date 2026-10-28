@@ -191,3 +191,47 @@ OVN_NATIVE=1 python3 -I tools/overnight/evaluate.py --heldout runs/session15/202
   no more than 1.5 points below trainO2's with a Brier score no more than 0.005 worse.
 - Every training stage from session 18 on passes `fit_end` (the stage deadline minus the
   evaluation reserve) to `train_eval`, instead of capping epochs from a stored rate.
+
+## Results (2026-10-28, under session 17's game farm)
+
+**Benchmark** (`runs/bench/farm`, 2,000 rows of session 5's trainE data, 384 timed items per config,
+13 game slots running, no `--cpu-burn`). The base row, 0.68 s per item, is about three times
+trainO's idle 0.22: under the farm, micro-batch 1 is CPU-bound.
+
+| Config | s / item | vs base | Peak reserved MiB |
+|---|---|---|---|
+| base (fp16, checkpointing, 1 x 64) | 0.683 | 1.00x | 8,064 |
+| bf16 | 0.577 | 1.18x | 8,064 |
+| nockpt | 0.303 | 2.25x | 8,234 |
+| fused | 0.579 | 1.18x | 7,344 |
+| threads2 | 0.563 | 1.21x | 8,064 |
+| sync64 | 0.589 | 1.16x | 8,064 |
+| mb2 | 0.277 | 2.46x | 8,056 |
+| mb4 | 0.140 | 4.89x | 8,046 |
+| lora16-mb8 | 0.099 | 6.92x | 2,902 |
+| lora16-mb8-nockpt | 0.068 | 10.07x | 8,426 |
+| lora16-bf16-mb8-nockpt | 0.059 | 11.55x | 8,426 |
+| lora16-mb8-sync8 | 0.096 | 7.12x | 2,902 |
+| heads-mb8 | 0.021 | 32.85x | 2,286 |
+
+8bit-mb4 was not run (bitsandbytes is not in the lock).
+
+**Quality A/B.** trainO2 failed (its weights went NaN under fp16 autocast, see the plan), so it
+has no held-out result. As recorded in the plan before these numbers, the reference is a full fine-tune
+trained here on the same data. Both arms use bf16, which has fp32's exponent range, so that the
+reference doesn't hit trainO2's overflow. Both arms: 2 epochs from trainH on session 15's trainO train
+data (10,710 + 400 calibration items), scored on its 3,599 `heldout.O` records.
+
+| Arm | Flags | Seed 0 acc / Brier | Seed 1 acc / Brier | Train time |
+|---|---|---|---|---|
+| lora16 | `--lora 16 --amp bf16 --grad-ckpt off --micro-batch 8 --grad-accum 8 --bucket 16 --sync-every 8` | 0.6302 / 0.1928 | 0.6293 / 0.1928 | 29 min |
+| full | `--amp bf16 --micro-batch 4 --grad-accum 16 --bucket 16 --sync-every 16` | 0.6382 / 0.1911 | 0.6296 / 0.1917 | 61–64 min |
+
+Means: lora16 0.6298 / 0.1928, full 0.6339 / 0.1914. LoRA is 0.4 points lower in accuracy (limit
+1.5) and 0.0014 worse in Brier (limit 0.005), and 6.9–11.6 times faster in the benchmark (bar 1.5).
+No NaN in any of the four runs.
+
+**Decision:** by the adoption rule, LoRA is adopted for training stages from session 18 on, in the
+lora16 arm's form (bf16, checkpointing off, 8 x 8). The full fine-tune, when one is wanted, runs in
+bf16 at micro-batch 4. fp16 autocast is not used for training again. The checkpoints are in
+`runs/bench/ab/`.
