@@ -12,6 +12,8 @@ import {
 import type { DecisionType, DecisionRequest } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
 import { adaptPlayerView } from "./honest-view.js";
+import { DangerLogger, DANGER_RECORD_VERSION } from "./danger/record.js";
+import { DangerModel } from "./danger/model.js";
 
 const API = process.env.API ?? "http://localhost:3000";
 // PLAYER_VIEW=1: play from what the UI shows (/state?view=player), as a human player would
@@ -539,6 +541,13 @@ let deathCause = "";
 const BUSHO_TMP = process.env.BUSHO_TMP ?? "/tmp";
 const RECORD_PATH = `${BUSHO_TMP}/busho-replay.jsonl`;
 let recordEnabled = process.env.ROLLOUT_FORCE ? false : true; // ロールアウト中は録画しない
+// DANGER_LOG=1: what the player sees before every action, to ${BUSHO_TMP}/danger.jsonl.gz (training data for the learned
+// danger model, tools/danger/record.ts). It only reads the state, so play is unchanged
+const DANGER_LOG_PATH = process.env.DANGER_LOG === "1" && !process.env.ROLLOUT_FORCE ? `${BUSHO_TMP}/danger.jsonl.gz` : "";
+let dangerLogger: DangerLogger | null = null;
+// DANGER_MODEL=a.json[,b.json]: models from tools/overnight/danger.py. For now their predictions only go into the danger
+// log (pd), so live calibration can be checked against the offline scores before any rule reads them
+const DANGER_MODELS: DangerModel[] = (process.env.DANGER_MODEL ?? "").split(",").filter(Boolean).map((f) => DangerModel.load(f.trim()));
 let frameNumber = 0;
 const recordedFrames: string[] = [];
 
@@ -627,6 +636,7 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
   }
   const escapeCmd = LEAVE && isEscapeCommand(cmd); // RULEFIX=leave: この階の逃走回数に数える (時間が進んだら)
   if (cmdDebug || ++commandsSent >= CMD_DEBUG_AFTER) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
+  dangerLogger?.noteCommand(cmd.type as number);
   for (let retry = 0; retry < 5; retry++) {
     const res = await fetch(`${API}/command${VIEW_QS}`, {
       method: "POST",
@@ -2301,6 +2311,18 @@ async function playGame() {
 
   // 初期フレーム録画
   recordFrame(state, "start");
+  if (DANGER_LOG_PATH) {
+    dangerLogger = new DangerLogger(DANGER_LOG_PATH, {
+      h: 1, v: DANGER_RECORD_VERSION, engine: state.engine ?? "ts", view: state.view ?? "omniscient",
+      class: state.player?.class ?? "?", race: state.player?.race ?? "?", seed: String(GAME_SEED ?? ""),
+      rulefix: [...RULEFIX].join(","),
+      ...(DANGER_MODELS.length ? { model: process.env.DANGER_MODEL } : {}),
+    });
+  }
+  const dangerCharacter = { class: state.player?.class ?? "?", race: state.player?.race ?? "?" };
+  const dangerPredict = DANGER_MODELS.length
+    ? (rec: any) => Object.fromEntries(DANGER_MODELS.map((m) => [m.label, Math.round(m.predict(rec, dangerCharacter) * 1e5) / 1e5]))
+    : undefined;
 
   while (!state.dead && !state.won && state.turn < turnLimit && actionCount < MAX_ACTIONS
          && !(ROLLOUT && (actionCount >= ROLLOUT_HORIZON || (!rolloutFired && actionCount >= ROLLOUT_MAX_WAIT)))) {
@@ -2310,6 +2332,7 @@ async function playGame() {
     // 録画 (10アクション毎 + イベント時)
     lastRecordedState = state;
     if (actionCount % 10 === 0) recordFrame(state);
+    dangerLogger?.record(state, actionCount, dangerPredict);
     const p = state.player;
     if (p.maxHp > 0) minHpFrac = Math.min(minHpFrac, p.hp / p.maxHp);
     rolloutDepthMax = Math.max(rolloutDepthMax, state.depth);
@@ -4704,6 +4727,7 @@ async function playGame() {
   // === ゲーム終了 ===
   const finalState = await getState();
   const fp = finalState.player;
+  dangerLogger?.finish(finalState);
 
   if (finalState.dead) {
     // 死因分析

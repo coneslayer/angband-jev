@@ -2804,6 +2804,118 @@ the variant isn't better):
   - clgate1 again, now that pace counts.
   - Then a confirmation on new starts.
 
+## Model track: a learned danger estimate (2026-10-28)
+
+The review's model-track item 1, with item 5's cheap baseline as the first model. The rules keep deciding, as the
+Borg does with its hand-computed `borg_danger`; the model only estimates danger from what the player sees. Its labels
+are observed outcomes on every turn of every logged game, so they are dense and cheap, need no rollouts, and nothing
+compounds. Experience lives in the weights: the model reads monster names, never race stats, so it can replace
+`MON_BLOW_AVG`, which `meleeTooCostly` reads from the game data whether or not lore has shown the blows.
+
+### What it predicts
+| Label | Meaning | Meant for |
+|---|---|---|
+| `death_5`, `death_20`, `death_50` | the fatal action starts within 5, 20 or 50 player turns (10 game turns each) | flee, stairs and teleport thresholds, Borg-style; the arrival check |
+| `dmg_1`, `dmg_5`, `dmg_20` | HP lost in the actions starting within that many player turns, over max HP; drops are summed, so healing within the window doesn't hide damage | `meleeTooCostly` without `MON_BLOW_AVG`; heal-or-act |
+| `adv_2000`, `die_2000` | within 2,000 actions, the next stage (a new deepest level) comes first, or death does | a first V(state) for pace (item 6): hazard.py's per-stage rates, conditioned on the state |
+
+A window that runs past the end of a game alive at the action cap is censored (left out), not counted as survival.
+
+**The labels describe the policy that played.** A model trained on rules+ games predicts what happens under rules+.
+Once a variant acts on its predictions, the policy has changed and the model is retrained on that variant's games,
+one round per adopted variant, much like DAgger.
+
+### Pieces (branch `claude/danger-model`)
+- **Log:** `DANGER_LOG=1` makes busho write `danger.jsonl.gz` next to `player.log` (`tools/danger/record.ts`). There
+  is one record per action, from the player view only:
+  - the sidebar numbers;
+  - status-bar grades: Poisoned, the cut and stun grades as `player_timed.txt` names them, and the hunger word;
+  - the inventory as named, known stairs, the level feeling (C engine only), and turns on the level;
+  - each visible monster's name, distance and health word, and its recall as the UI shows it: level and speed when
+    known, blow dice once known, spells seen, "breeds explosively";
+  - the command sent next.
+
+  The log only reads the state. On two seeds the replays and reports were byte-identical with and without it.
+- **Features:** `tools/danger/features.ts` builds 123 features, and the same code is used for training and in busho.
+  - `hand_two` is the rules' own kind of estimate over current HP: busho's `lethalWithinTwo`, computed from the
+    view, with blow dice when known and the monster's level as a prior otherwise.
+  - The 4 nearest monsters get one slot each. Race and glyph class are categorical features, so the model works out
+    what a name means from the games.
+- **Dataset:** `tools/danger/labels.ts` and `build.ts` turn logs into a dataset (`.npy` files and `meta.json`).
+  - States that passed no time are dropped.
+  - Records where nothing happened are subsampled and weighted back: quiet ones at 10% by default, others
+    (`--calm-keep`) all by default.
+  - Records with damage or a death are always kept.
+- **Training:** `tools/overnight/danger.py train` runs LightGBM.
+  - Starts are split by a stable hash: 20% are held out, and early stopping uses 10% of the rest.
+  - It writes `model.json` (trees, feature names, vocabulary, metrics and parity rows) and `metrics.json`.
+- **In busho:** `tools/danger/model.ts` evaluates the exported trees. `DANGER_MODEL=a.json,b.json` writes the
+  predictions into the danger log (`pd`) and changes nothing else yet, so live calibration can be checked before any
+  rule reads them.
+  - The TypeScript evaluator matches LightGBM to 1e-12 on the exported rows, including categorical splits and NaN.
+  - On a smoke game, busho's live predictions matched the offline ones on all 2,500 states.
+- **Tests:** `npx vitest run tools/danger` (14 tests) and `python3 -I tools/overnight/test_danger.py` (9 tests, on
+  synthetic data).
+  - With `DANGER_FIXTURE=tools/danger/fixtures/parity-model.json`, the Python tests also regenerate the parity
+    fixture the TypeScript tests use.
+
+### Scoring (set before any data)
+- **Baselines.** Each model is scored on the held-out starts against two baselines fitted on the training starts:
+  the base rate, and `hand_two` calibrated by binning (20 quantile bins).
+- **Metrics.** Binary labels: log loss (primary), Brier score, AUC, expected calibration error and a reliability
+  table. Damage labels: MSE, MAE and R².
+- **Gate for wiring it into the rules:** `death_20`'s log loss beats the hand estimate's, with the whole 90%
+  bootstrap interval over held-out starts below 0. `dmg_5` is judged the same way on MSE.
+- **Identity ablation** (`--drop identity`): the same model without monster race and glyph class. The difference is
+  what experience of individual monsters adds to the visible numbers. If it adds nothing, a hand formula on the view
+  may do as well.
+
+### How to run
+```
+# every game: DANGER_LOG=1 in the player env (a driver's env_for); D.play_game's cleanup keeps the log
+npx tsx tools/danger/build.ts --out RUN/danger/ds RUN/<stage>/games [--quiet-keep 0.1] [--calm-keep 1]
+python3 -I tools/overnight/danger.py describe RUN/danger/ds
+python3 -I tools/overnight/danger.py train RUN/danger/ds --label death_20 --out RUN/danger/death20 --threads 4
+python3 -I tools/overnight/danger.py train RUN/danger/ds --label death_20 --drop identity --out RUN/danger/death20-noid
+python3 -I tools/overnight/danger.py train RUN/danger/ds --label dmg_5 --out RUN/danger/dmg5
+```
+- The native environment needs `numpy` and `lightgbm`; this was built with lightgbm 4.7.0.
+- Training is CPU-only, and `--threads` keeps it to a few of the farm's cores.
+- LightGBM's peak memory is about 1.5 times the training rows' share of `X.npy`.
+- **C engine.** The logger was run on the TS engine only; the C build was not available in the session where it was
+  written. From `main-http.c`, the C view sends every field the record reads, and the health words are
+  `look_mon_desc`'s. Run one C game with `DANGER_LOG=1` and look at a few records before a farm uses it.
+
+### Disk
+Measured on 14 TS-engine games (DL1–4, 45,000 actions).
+
+| Item | Size |
+|---|---|
+| Danger log | 13 B per action gzipped (260 B raw). A 20,000-action game is 0.26 MB. Deeper levels show more monsters per record (here 0.07 on average), so plan on up to about 25 B per action |
+| One session's logs (about 3,000 games averaging about 12,000 actions) | 0.5–0.9 GB |
+| Dataset | 532 B per kept row (123 float32 features, 8 labels, weight, game). The defaults kept 21% of these early-game records, which is about 1.3 GB per 1,000 games; budget 2.5 GB, since deeper games keep more rows |
+| Model JSON | 2–11 KB per tree; 5–15 MB for a full model |
+
+For comparison, a 4,000-action game's replay is 1.8 MB, 34 times its danger log, and the drivers already delete
+replays. To use less disk:
+- `--quiet-keep 0.05`; `--calm-keep 0.5` saves little early on, because most records with a monster in view are
+  followed by damage, which is always kept;
+- build from a sample of games;
+- delete a dataset once its models are trained, since it can be rebuilt from the logs in seconds.
+
+### Next
+1. **Session A:** turn on `DANGER_LOG=1` for every CPU-farm game. About 1,000 games is enough for a first model: at
+   session 14's death rate, roughly 600 deaths and 15–25k `death_20`-positive rows. Train `death_20`, its identity
+   ablation and `dmg_5`.
+2. **Session B, if the gate passes:** variants judged by PH(10), like any rule change:
+   - `dangerml-melee`: `meleeTooCostly` reads predicted damage instead of `MON_BLOW_AVG`;
+   - `dangerml-flee`: Borg-style triggers on `death_20` (take the stairs when standing on them above one
+     threshold, escape above another).
+
+   Thresholds come from the reliability table and are fixed before the run.
+3. **Then:** retrain on the adopted variant's games. Next come V(state) from `adv_2000` and `die_2000`, and a Laya
+   version on the GPU if the trees leave room.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
