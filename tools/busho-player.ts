@@ -305,8 +305,13 @@ let earlyLastHp: number | null = null;
 // RULEFIX=stairsfirst: 階段の上で、見えている敵が 2 手以内に HP を削り切れる (近接の見積もり) → 他の逃走より先に階段を使う。
 // CL10 未満で既存の逃走条件が成立したら、近い既知の階段 (6 歩以内、どの敵にも今より近づかない経路) へ Phase Door より先に歩く
 const STAIRSFIRST = RULEFIX.has("stairsfirst");
-const STAIRS_WALK_MAX = 6;
+const STAIRS_WALK_MAX = 6, STAIRS_WALK_FAR = 20;
 let stairsFirstWalks = 0;
+// 「近い」階段の歩数: 6 歩。脅威が全て 2 マス以上離れていて自分より速くなければ、歩く間に追いつかれないので 20 歩まで
+// (TS の煙テストでは逃走条件の成立時に最寄りの階段が 13-191 歩、6 歩以内は 0 回だった)
+function stairsWalkMax(threats: any[], pspeed: number | undefined): number {
+  return threats.every((m: any) => m.distance >= 2 && (m.speed ?? 110) <= (pspeed ?? 110)) ? STAIRS_WALK_FAR : STAIRS_WALK_MAX;
+}
 // RULEFIX=leave: 序盤の危険な敵 (4.2 の名前) が見えた、この階で 3 回逃げた (Phase Door/Teleport/逃走)、毒か出血で HP 半分未満
 // → 最寄りの既知の階段 (上下どちらでも) から階を去る。逃げ続けた後の強制戦闘 (forceFight) への切り替えも、階を去るに置き換える
 const LEAVE = RULEFIX.has("leave");
@@ -1298,13 +1303,13 @@ function rulesFightChoice(m: any, plevel: number, inv: any[], tiles: any[], px: 
 
 // 序盤の逃走: 足元の階段 > Phase Door (敵が近い時) > 最寄り階段へ歩く > Phase Door
 function earlyFleeCommand(tiles: any[], px: number, py: number, inv: any[], m: any, actionNo: number,
-  ctx?: { plevel: number; monsters: any[]; turn: number; depth: number }): { cmd: Record<string, unknown>; kind: string } | null {
+  ctx?: { plevel: number; pspeed: number; monsters: any[]; turn: number; depth: number }): { cmd: Record<string, unknown>; kind: string } | null {
   const here = tiles.find((t: any) => t.x === px && t.y === py);
   if (here?.feat === FEAT.DOWN_STAIR) return { cmd: { type: CMD.GO_DOWN }, kind: "stairs" };
   if (here?.feat === FEAT.UP_STAIR) return { cmd: { type: CMD.GO_UP }, kind: "stairs" };
   // RULEFIX=stairsfirst: CL10 未満は、近い既知の階段 (敵に近づかない経路) へ Phase Door より先に歩く
   if (STAIRSFIRST && ctx && ctx.plevel < 10) {
-    const sf = safeStairPath(tiles, px, py, [m], ctx.monsters, STAIRS_WALK_MAX);
+    const sf = safeStairPath(tiles, px, py, [m], ctx.monsters, stairsWalkMax([m], ctx.pspeed));
     if (sf) {
       stairsFirstWalks++;
       if (stairsFirstWalks <= 3 || stairsFirstWalks % 10 === 0) addLesson(ctx.turn, ctx.depth, "階段優先", `${m.name}から逃走: Phase Door より先に階段へ歩く (${sf.len}歩, #${stairsFirstWalks})`);
@@ -2366,7 +2371,7 @@ async function playGame() {
         state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
         return true;
       }
-      const sf = safeStairPath(tiles, px, py, threats, monsters, STAIRS_WALK_MAX);
+      const sf = safeStairPath(tiles, px, py, threats, monsters, stairsWalkMax(threats, p.speed));
       if (!sf) return false;
       stairsFirstWalks++;
       if (stairsFirstWalks <= 3 || stairsFirstWalks % 10 === 0) addLesson(state.turn, state.depth, "階段優先", `${why}: Phase Door より先に階段へ歩く (${sf.len}歩, #${stairsFirstWalks})`);
@@ -3523,7 +3528,7 @@ async function playGame() {
       earlyLastHp = p.hp;
       const adj = monsters.filter((m: any) => m.distance <= 1 && !knownBreeder(m)).sort((a: any, b: any) => b.level - a.level)[0];
       if (adj && p.level <= 4 && state.depth >= 1 && drop >= p.maxHp / 3) {
-        const fl = earlyFleeCommand(tiles, px, py, inv, adj, actionCount, { plevel: p.level, monsters, turn: state.turn, depth: state.depth });
+        const fl = earlyFleeCommand(tiles, px, py, inv, adj, actionCount, { plevel: p.level, pspeed: p.speed, monsters, turn: state.turn, depth: state.depth });
         if (fl) {
           earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
           if (LEAVE && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: 歩いて逃げ始めた (Phase/Teleport は sendCommand で数える)
@@ -3595,7 +3600,7 @@ async function playGame() {
         if (choice === "flee") {
           const fleeN = (fleeSteps.get(key) ?? 0) + 1;
           fleeSteps.set(key, fleeN);
-          const fl = fleeN > 60 ? null : earlyFleeCommand(tiles, px, py, inv, m, actionCount, { plevel: p.level, monsters, turn: state.turn, depth: state.depth }); // 同一個体から60手逃げても振り切れない → 諦めて殴る
+          const fl = fleeN > 60 ? null : earlyFleeCommand(tiles, px, py, inv, m, actionCount, { plevel: p.level, pspeed: p.speed, monsters, turn: state.turn, depth: state.depth }); // 同一個体から60手逃げても振り切れない → 諦めて殴る
           if (fl) {
             earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
             if (LEAVE && fleeN === 1 && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: この個体から歩いて逃げ始めた
