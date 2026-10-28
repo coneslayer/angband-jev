@@ -2878,6 +2878,29 @@ feeling. A session of about 10,000 games should take 2–4 GB.
   LoRA A/B trains its own full fine-tune reference, seeds 0 and 1 on the same data, once the NaN is fixed.
 
 
+### Session 17's results (ended 2026-10-28, 10:30)
+The canary passed (20 of 20 identical). The whole session took 8 h 18 m instead of 52 h: every
+variant closed early, and confirmQ adopted at its second look. 2,972 games wrote danger logs (1.3 GB).
+
+**screenQ** (fresh 3600000+, bank 3650000+; PH(10) against the base on the same starts):
+
+| Variant | Closed at | Pairs | PH(10) | z | Deep death ratio | Decision |
+|---|---|---|---|---|---|---|
+| arrive | look 1 | 150 | 1.237 | −2.35 | 1.25 | reject (futility) |
+| seal | look 1 | 150 | 1.020 | −0.55 | 0.94 | reject (futility) |
+| stairsfirst | look 2 | 300 | 1.002 | −0.02 | 0.98 | reject (futility) |
+| leave | look 2 | 300 | 0.647 | 3.20 | 0.88 | **adopt** |
+| clgate1 | look 3 | 701 | 0.878 | 2.06 | 0.94 | **adopt** |
+
+leave on 306 pairs: death rate 0.82 (p 0.03), pace 1.11 (p 0.01), capped score 152 wins to 99
+losses (p 0.0005), mean max depth 5.66 → 6.19.
+
+**confirmQ** (fresh 3700000+, bank 3750000+): base against base + leave + clgate1 adopted at look 2,
+302 pairs: PH(10) 0.653, z 2.86 (bound 2.55), deep death ratio 1.10 (p 0.29, so not up).
+
+**New default:** `danger,restock,escape,upnavfood,fire,lowheal,leave,clgate1`, now busho's `RULEFIX`
+default.
+
 ## Model track: a learned danger estimate (2026-10-28)
 
 The review's model-track item 1, with item 5's cheap baseline as the first model. The rules keep deciding, as the
