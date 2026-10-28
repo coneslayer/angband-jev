@@ -6,6 +6,7 @@ name = "pypi"
 [packages]
 torch = "==2.14.1"
 laya = {version = "==0.4.6", extras = ["serve"]}
+lightgbm = "*"
 
 [requires]
 python_version = "3.12"
