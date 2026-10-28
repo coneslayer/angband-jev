@@ -318,6 +318,7 @@ const LEAVE_LIST: [RegExp, number][] = [ // [名前, この CL 以下で去る]
 ];
 const LEAVE_ESCAPES = 3, LEAVE_WALK_MAX = 300;
 let leaving = "", leaveWalk = 0, levelEscapes = 0;
+let leaveHurtDone = false; // 毒/出血での離脱はその毒/出血の間に 1 回だけ (着いた階段ですぐまた去るのを繰り返さない)
 function leaveListed(m: any, plevel: number): boolean {
   const n = String(m.name ?? "").toLowerCase().replace(/^(the|an?) /, "");
   return LEAVE_LIST.some(([rx, maxCl]) => plevel <= maxCl && rx.test(n));
@@ -2665,12 +2666,15 @@ async function playGame() {
 
     // === RULEFIX=leave: 序盤の危険な敵が見えた / この階で 3 回逃げた / 毒か出血で HP 半分未満 → 最寄りの既知の階段から階を去る ===
     if (LEAVE && state.depth >= 1) {
+      const afflicted = p.timed.poisoned > 0 || (p.timed.cut ?? 0) > 0;
+      if (!afflicted) leaveHurtDone = false;
       if (!leaving) {
         const named = monsters.find((m: any) => leaveListed(m, p.level));
-        const hurt = (p.timed.poisoned > 0 || (p.timed.cut ?? 0) > 0) && hpPct < 0.5;
+        const hurt = afflicted && hpPct < 0.5 && !leaveHurtDone;
         leaving = named ? `${named.name}(Lv${named.level},dist${named.distance})が見えた`
           : levelEscapes >= LEAVE_ESCAPES ? `この階で${levelEscapes}回逃走`
           : hurt ? `${p.timed.poisoned > 0 ? "毒" : "出血"}でHP${Math.round(hpPct * 100)}%` : "";
+        if (leaving && !named && levelEscapes < LEAVE_ESCAPES) leaveHurtDone = true;
         if (leaving) { leaveWalk = 0; addLesson(state.turn, state.depth, "階離脱", `${leaving}。最寄りの階段から階を去る`); }
       }
       if (leaving) {
