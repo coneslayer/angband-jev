@@ -16,10 +16,22 @@ game becomes a list of stage segments, each ending in an advance, a death or the
             if alive, -C(start stage) - actions if dead. Zero on average for the reference policy; paired by start.
             Reported only: a few deep games dominate it.
 
+  screen    group-sequential adoption test on PH(10), with looks at 150, 300 and 700 complete paired starts.
+            z = -log PH(10) / sd (positive: the variant is better), sd from a paired bootstrap over starts.
+            Efficacy: O'Brien-Fleming bounds, overall one-sided alpha 0.05, from exact recursive integration.
+            Futility (non-binding, so it doesn't enter the alpha): stop when the conditional power under the
+            current trend falls below 2%, which is about "the variant isn't ahead" at looks 1 and 2.
+            Never "adopt" while the death-rate ratio over stages 7+ (death_rr_deep) is above 1 with p < 0.05.
+  simulate  synthetic games (the dict shape parse_game returns) from a per-stage hazard table, with death and pace
+            ratios for the variant, paired starts sharing randomness: test_hazard.py uses it for the estimator,
+            type I error, power and expected sample size.
+
 Usage: hazard.py table DIR...                     rates and C for the games in the DIRs (one arm)
        hazard.py compare BASE_DIR VAR_DIR [--ref DIR...]  paired comparison of two arms on their common starts
+       hazard.py screen BASE_DIR VAR_DIR [--look K]   the sequential decision on their common complete starts
+                                                       (default: the last look the pair count has reached)
 """
-import json, math, os, random, re, sys  # noqa: E401
+import functools, json, math, os, random, re, statistics, sys  # noqa: E401
 
 STATUS = re.compile(r"\[状態\] A(\d+) .*?\| DL(\d+) ")
 CHANGE = re.compile(r"\[深度変更\] DL(\d+) → DL(\d+)")
@@ -30,8 +42,8 @@ DEEP_STAGE = 7
 def parse_game(path):
     """{id, bank, start, end, actions, dead, segs: [(stage, exposure, 'adv'|'death'|'cens', next stage)]} or None."""
     try:
-        s = json.load(open(os.path.join(path, "busho-play-report.json")))["summary"]
-        lines = open(os.path.join(path, "player.log"), encoding="utf-8", errors="replace").read().splitlines()
+        with open(os.path.join(path, "busho-play-report.json")) as f: s = json.load(f)["summary"]
+        with open(os.path.join(path, "player.log"), encoding="utf-8", errors="replace") as f: lines = f.read().splitlines()
     except (OSError, ValueError, KeyError):
         return None
     total = int(s.get("actions") or 0)
@@ -178,6 +190,264 @@ def policy(base, var, ks=(5, 8, 10), n_boot=1000, seed=0):
     return res
 
 
+# ── Sequential screening ──
+
+LOOKS = (150, 300, 700)   # complete paired starts at each look
+ALPHA = 0.05              # overall one-sided type I error
+FUTILITY_CP = 0.02        # stop for futility below this conditional power (current trend); non-binding
+SCREEN_K = 10             # the verdict score is PH(SCREEN_K)
+_ND = statistics.NormalDist()
+
+
+def _Phi(x):
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def _phi(x):
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def _simpson(lo, hi, h):
+    n = max(2, int(math.ceil((hi - lo) / h)))
+    n += n % 2
+    step = (hi - lo) / n
+    return ([lo + i * step for i in range(n + 1)],
+            [step / 3 * (1 if i in (0, n) else 4 if i % 2 else 2) for i in range(n + 1)])
+
+
+def exit_probs(up, lo, t, theta=0.0, per_sd=16):
+    """Stopping probabilities of a group-sequential z-test: ([P(stop above at look k)], [P(stop below at look k)]).
+    Canonical joint distribution: Z_k = S_k / sqrt(t_k) with independent increments S_k - S_k-1 ~ N(theta dt, dt),
+    t_k the information fractions (t_K = 1, so theta is the expected final z). up/lo are z-scale bounds, lo[k] None
+    for none. Recursive numerical integration of the continuation density (Simpson's rule, per_sd points per sd)."""
+    pu, pl, xs, ws, f = [], [], None, None, None
+    for k, tk in enumerate(t):
+        sd = math.sqrt(tk)
+        b = up[k] * sd
+        a = lo[k] * sd if lo[k] is not None else -math.inf
+        if k == 0:
+            m = theta * tk
+            pu.append(1 - _Phi((b - m) / sd)); pl.append(_Phi((a - m) / sd) if a > -math.inf else 0.0)
+        else:
+            dt = tk - t[k - 1]; sdd, mu = math.sqrt(dt), theta * dt
+            wf = [w * fx for w, fx in zip(ws, f)]
+            pu.append(sum(c * (1 - _Phi((b - x - mu) / sdd)) for x, c in zip(xs, wf)))
+            pl.append(sum(c * _Phi((a - x - mu) / sdd) for x, c in zip(xs, wf)) if a > -math.inf else 0.0)
+        if k == len(t) - 1: break
+        nx, nw = _simpson(max(a, theta * tk - 8 * sd), b, sd / per_sd)
+        if k == 0:
+            f = [_phi((u - m) / sd) / sd for u in nx]
+        else:
+            f = [sum(c * _phi((u - x - mu) / sdd) for x, c in zip(xs, wf)) / sdd for u in nx]
+        xs, ws = nx, nw
+    return pu, pl
+
+
+@functools.lru_cache(maxsize=None)
+def obf_bounds(looks=LOOKS, alpha=ALPHA):
+    """O'Brien-Fleming efficacy bounds z_k = c / sqrt(t_k), c set so that the chance of crossing any of them under
+    H0 (with no futility stopping) is alpha."""
+    t = tuple(n / looks[-1] for n in looks)
+    lo, hi = 1.0, 6.0
+    for _ in range(50):
+        c = (lo + hi) / 2
+        if sum(exit_probs([c / math.sqrt(x) for x in t], [None] * len(t), t)[0]) > alpha: lo = c
+        else: hi = c
+    return tuple(hi / math.sqrt(x) for x in t)
+
+
+@functools.lru_cache(maxsize=None)
+def futility_bounds(looks=LOOKS, alpha=ALPHA, cp=FUTILITY_CP):
+    """Stop for futility at look k < K when z_k is below this: the conditional power under the current trend,
+    1 - Phi((b_K - z_k / sqrt(t_k)) / sqrt(1 - t_k)), is below cp. The last look's bound is the efficacy bound."""
+    t = [n / looks[-1] for n in looks]
+    bK, zc = obf_bounds(looks, alpha)[-1], _ND.inv_cdf(1 - cp)
+    return tuple([math.sqrt(x) * (bK - zc * math.sqrt(1 - x)) for x in t[:-1]] + [bK])
+
+
+def _start_vectors(base, var, ids):
+    """Per start: its stage totals [E, D, A per stage] for the base game, then for the variant game."""
+    rows = []
+    for i in ids:
+        tb, tv = rates([base[i]]), rates([var[i]])
+        rows.append((tb, tv))
+    S = 1 + max([d for tb, tv in rows for d in list(tb) + list(tv)] or [0])
+    vecs = []
+    for tb, tv in rows:
+        v = [0.0] * (6 * S)
+        for off, t in ((0, tb), (3 * S, tv)):
+            for d, r in t.items(): v[off + 3 * d:off + 3 * d + 3] = r
+        vecs.append(v)
+    return vecs, S
+
+
+def _screen_stats(tot, S, k=SCREEN_K):
+    """(log PH(k), log death_rr_deep) from summed start vectors."""
+    tb = {d: tot[3 * d:3 * d + 3] for d in range(S)}
+    tv = {d: tot[3 * S + 3 * d:3 * S + 3 * d + 3] for d in range(S)}
+    dr, pr = mh_ratio(tb, tv, 1), mh_ratio(tb, tv, 2)
+    deep = mh_ratio(tb, tv, 1, DEEP_STAGE)
+    lph = float("nan")
+    if dr > 0 and pr > 0:
+        lph = math.log(ctable(scaled(tb, dr, pr))[k] / ctable(tb)[k])
+    return lph, (math.log(deep) if deep > 0 and math.isfinite(deep) else float("nan"))
+
+
+def _boot_sd(vecs, S, n_boot, seed):
+    rng, n, ph, dp = random.Random(seed), len(vecs), [], []
+    for _ in range(n_boot):
+        tot = [sum(c) for c in zip(*[vecs[rng.randrange(n)] for _ in range(n)])]
+        a, b = _screen_stats(tot, S)
+        if math.isfinite(a): ph.append(a)
+        if math.isfinite(b): dp.append(b)
+    sd = lambda xs: statistics.stdev(xs) if len(xs) > 2 else float("nan")  # noqa: E731
+    return sd(ph), sd(dp)
+
+
+def _delta_sd(vecs, S, tot):
+    """Linearised (infinitesimal jackknife) sd: the start-level influence of each total, by central differences.
+    It estimates the same quantity as the paired bootstrap, in milliseconds; the simulation studies use it."""
+    n = len(vecs)
+    mean = [x / n for x in tot]
+    # only totals that vary across starts carry any variance
+    live = [j for j in range(len(tot)) if any(v[j] != mean[j] for v in vecs)]
+    grads = {}
+    for j in live:
+        h = 1e-4 * max(abs(tot[j]), 1.0)
+        up, dn = list(tot), list(tot)
+        up[j] += h; dn[j] -= h
+        a1, b1 = _screen_stats(up, S); a0, b0 = _screen_stats(dn, S)
+        ga, gb = (a1 - a0) / (2 * h), (b1 - b0) / (2 * h)
+        grads[j] = (ga if math.isfinite(ga) else 0.0, gb if math.isfinite(gb) else 0.0)
+    va = vb = 0.0
+    for v in vecs:
+        ia = sum(g[0] * (v[j] - mean[j]) for j, g in grads.items())
+        ib = sum(g[1] * (v[j] - mean[j]) for j, g in grads.items())
+        va += ia * ia; vb += ib * ib
+    return math.sqrt(va), math.sqrt(vb)
+
+
+def screen(base, var, look=None, sd="bootstrap", n_boot=1000, seed=0, looks=LOOKS, ids=None):
+    """The sequential adoption decision for a variant against the baseline on their common complete starts.
+
+    look: 1-based look number; None picks the last look the pair count has reached. A look uses every common start
+    available (at least looks[look-1]); the bounds are those of the planned information fractions.
+    sd: "bootstrap" (paired over starts, n_boot resamples) or "delta" (linearised; the simulation studies).
+    Returns {"decision": "adopt"|"reject"|"continue", "look", "pairs", "z", "bound", "futility", "PH", "sd",
+    "death_rr_deep", "deep_p", "reason"}."""
+    ids = sorted(set(base) & set(var)) if ids is None else list(ids)
+    n = len(ids)
+    if look is None:
+        look = sum(n >= x for x in looks)
+    res = {"look": look, "pairs": n, "planned": looks[look - 1] if look else looks[0]}
+    if look == 0 or n < looks[look - 1]:
+        return {**res, "decision": "continue", "reason": f"need {looks[max(look, 1) - 1]} complete pairs"}
+    vecs, S = _start_vectors(base, var, ids)
+    tot = [sum(c) for c in zip(*vecs)]
+    lph, ldeep = _screen_stats(tot, S)
+    sd_ph, sd_deep = _boot_sd(vecs, S, n_boot, seed) if sd == "bootstrap" else _delta_sd(vecs, S, tot)
+    z = -lph / sd_ph if sd_ph > 0 and math.isfinite(lph) else 0.0
+    up, fut = obf_bounds(looks), futility_bounds(looks)
+    deep_p = 1 - _Phi(ldeep / sd_deep) if math.isfinite(ldeep) and sd_deep > 0 else None
+    res.update({"z": z, "bound": up[look - 1], "futility": fut[look - 1], "PH": math.exp(lph), "sd": sd_ph,
+                "death_rr_deep": math.exp(ldeep) if math.isfinite(ldeep) else None, "deep_p": deep_p})
+    last = look == len(looks)
+    deep_bad = deep_p is not None and ldeep > 0 and deep_p < 0.05
+    if z >= up[look - 1] and not deep_bad:
+        return {**res, "decision": "adopt", "reason": "efficacy bound crossed"}
+    if z >= up[look - 1]:
+        return {**res, "decision": "reject" if last else "continue", "reason": "efficacy bound crossed, but deep deaths up"}
+    if last:
+        return {**res, "decision": "reject", "reason": "final look below the efficacy bound"}
+    if z < fut[look - 1]:
+        return {**res, "decision": "reject", "reason": "futility"}
+    return {**res, "decision": "continue", "reason": "between the bounds"}
+
+
+# ── Simulation ──
+
+# Session 14's default rules (combo14), 1,145 games: stage: (exposure in actions, deaths, advances).
+BASELINE_14 = {0: (83980, 0, 915), 1: (885941, 34, 880), 2: (1454957, 84, 790), 3: (1783518, 82, 680),
+               4: (2241846, 80, 518), 5: (1876779, 97, 433), 6: (1896435, 82, 333), 7: (1224519, 99, 209),
+               8: (793071, 86, 94), 9: (279043, 40, 42), 10: (143182, 21, 11)}
+
+
+def hazard_rates(table=BASELINE_14):
+    """[(death rate, advance rate) per action] for stages 0..MAX_STAGE; stages past the table keep its last rates."""
+    last = max(table)
+    return [(table[min(d, last)][1] / table[min(d, last)][0], table[min(d, last)][2] / table[min(d, last)][0])
+            for d in range(MAX_STAGE + 1)]
+
+
+def true_ph(death_rr, pace_rr, k=SCREEN_K, table=BASELINE_14):
+    """PH(k) of the generating model: the table with both ratios applied, against the table itself."""
+    t = {d: list(r) for d, r in table.items()}
+    return ctable(scaled(t, death_rr, pace_rr))[k] / ctable(t)[k]
+
+
+def _sim_game(gid, bank, start, cap, hz, frail, pfrail, drr, prr, shared, priv, tau):
+    """One game: competing exponential death and advance times per stage. Stage d's draw comes from shared[d]
+    until time tau, after which (memoryless) the rest is drawn from priv."""
+    t, st, segs = 0.0, start, []
+    while True:
+        lam, mu = hz[min(st, MAX_STAGE)][0] * frail * drr, hz[min(st, MAX_STAGE)][1] * pfrail * prr
+        tot = lam + mu
+        u1, u2 = shared[min(st, MAX_STAGE)] if t < tau else (1 - priv.random(), priv.random())
+        end = t - math.log(u1) / tot
+        if t < tau < end:
+            end, u2 = tau - math.log(1 - priv.random()) / tot, priv.random()
+        if end >= cap:
+            segs.append((st, cap - t, "cens", None)); return _game(gid, bank, start, st, cap, False, segs)
+        if u2 < lam / tot:
+            segs.append((st, end - t, "death", None)); return _game(gid, bank, start, st, end, True, segs)
+        segs.append((st, end - t, "adv", st + 1)); st, t = st + 1, end
+
+
+def _game(gid, bank, start, end, actions, dead, segs):
+    return {"id": gid, "bank": bank, "start": start, "end": end, "actions": int(round(actions)), "dead": dead,
+            "segs": segs}
+
+
+def simulate(n, death_rr=1.0, pace_rr=1.0, seed=0, table=BASELINE_14, bank_share=0.2, bank_stages=(5, 12),
+             caps=(20000, 15000), frailty=0.0, pace_frailty=0.0, diverge_mean=10000.0):
+    """n paired starts: ({id: base game}, {id: variant game}). The variant's death and advance rates are the
+    baseline's times death_rr and pace_rr at every stage (proportional hazards). bank_share of the starts begin at a
+    stage drawn uniformly from bank_stages, with the bank cap; the rest at stage 0 with the fresh cap.
+
+    Pairs share randomness, as real paired games do: the same per-stage random draws until a divergence time
+    (exponential, mean diverge_mean actions), after which the variant's game draws its own. With both ratios 1 the
+    arms are identical up to that time and independent after it, as games are once a rule first changes an action.
+    frailty and pace_frailty (sd on the log scale, mean 1) add a per-character factor on the death and advance rates,
+    shared by the pair. They default to 0: with frailty the stage-stratified ratio that PH measures is pulled toward
+    1 (survivors of the safer arm are frailer), so death_rr and pace_rr would no longer be the measured ratios."""
+    hz, base, var = hazard_rates(table), {}, {}
+    for i in range(n):
+        rng = random.Random((seed * 1_000_003 + i) * 7919 + 17)
+        bank = rng.random() < bank_share
+        start = rng.randint(*bank_stages) if bank else 0
+        cap = caps[1] if bank else caps[0]
+        frail = math.exp(frailty * rng.gauss(0, 1) - frailty ** 2 / 2)
+        pfrail = math.exp(pace_frailty * rng.gauss(0, 1) - pace_frailty ** 2 / 2)
+        tau = rng.expovariate(1 / diverge_mean) if diverge_mean else 0.0
+        shared = [(1 - rng.random(), rng.random()) for _ in range(MAX_STAGE + 1)]
+        priv = random.Random(rng.getrandbits(64))
+        gid = f"{'bank-' if bank else ''}sim{seed}-{i:05d}"
+        base[gid] = _sim_game(gid, bank, start, cap, hz, frail, pfrail, 1.0, 1.0, shared, None, math.inf)
+        var[gid] = _sim_game(gid, bank, start, cap, hz, frail, pfrail, death_rr, pace_rr, shared, priv, tau)
+    return base, var
+
+
+def run_screen(base, var, looks=LOOKS, sd="delta", **kw):
+    """Play the sequential design on starts in id order (the order they were simulated): the result of the first
+    look that stops, with the pairs it used."""
+    ids = sorted(set(base) & set(var), key=lambda g: g.split("-")[-1])
+    r = None
+    for k, n in enumerate(looks, 1):
+        r = screen(base, var, k, sd=sd, looks=looks, ids=ids[:n], **kw)
+        if r["decision"] != "continue": return r
+    return r
+
+
 def show_table(t, C, upto=15):
     print("stage  exposure  deaths  advances  deaths/1k  p_adv   tau     C(stage+1)")
     for d in range(upto):
@@ -190,7 +460,14 @@ def show_table(t, C, upto=15):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ("table", "compare"): sys.exit(__doc__)
+    if not a or a[0] not in ("table", "compare", "screen"): sys.exit(__doc__)
+    if a[0] == "screen":
+        if len(a) < 3: sys.exit(__doc__)
+        look = int(a[a.index("--look") + 1]) if "--look" in a else None
+        r = screen(load([a[1]]), load([a[2]]), look)
+        r["bounds"], r["futility_bounds"], r["looks"] = obf_bounds(), futility_bounds(), LOOKS
+        print(json.dumps(r, indent=1))
+        return
     if a[0] == "table":
         games = list(load(a[1:]).values())
         for label, gs in (("all", games), ("fresh", [g for g in games if not g["bank"]])):
