@@ -202,24 +202,37 @@ def new_labels(run):
 
 
 # ── phase 2: GPU ──
-def train_eval(run, d, data, held, epochs, seed, deadline, smoke_items=300, base="english"):
+def train_eval(run, d, data, held, epochs, seed, deadline, smoke_items=300, base="english", fit_end=None,
+               min_epochs=1, knobs=None):
     """Train laya from `base` (the base model, or a checkpoint to continue) and evaluate on `held`. Returns metrics
-    plus seconds per item-epoch."""
+    plus seconds per item-epoch. With `fit_end`, `epochs` is the most to train: train.py measures the rate once the run
+    starts and trains as many as end by `fit_end` (at least `min_epochs`, or the result says skipped). `knobs` are
+    extra train.py flags, e.g. {"amp": "bf16"}."""
     n = sum(1 for _ in open(data))
     if run.smoke:
         small = os.path.join(d, "train.smoke.jsonl")
         with open(small, "w") as f: f.writelines(open(data).readlines()[:smoke_items])
         data, n, epochs = small, min(n, smoke_items), 1
     out = os.path.join(d, f"ckpt-e{epochs}-s{seed}")
+    extra = ["--fit-end", str(fit_end), "--min-epochs", str(min_epochs)] if fit_end else []
+    for k, v in (knobs or {}).items(): extra += ["--" + k.replace("_", "-"), str(v)]
     t0 = time.time()
     rc = subprocess.run([sys.executable, "-I", os.path.join(HERE, "train.py"), "--data", data, "--out", out,
                          "--epochs", str(epochs), "--loss", "soft-ce", "--seed", str(seed), "--deadline", str(deadline),
-                         "--base", base]).returncode
+                         "--base", base, *extra]).returncode
     secs = time.time() - t0
+    rate_file = os.path.join(out, "rate.json")
+    rate = json.load(open(rate_file)) if os.path.exists(rate_file) else None
+    if rate and rate.get("s_per_item"): run.state["s_per_item_measured"] = rate["s_per_item"]
+    if rc == 3:
+        return {"skipped": f"fewer than {min_epochs} epoch(s) fit before the fit end", "epochs_wanted": epochs,
+                "seed": seed, "rate": rate}
     if rc != 0 or not os.path.isdir(out + ".final"):
-        return {"failed": f"training failed (rc={rc})", "epochs": epochs, "seed": seed}
-    return {"epochs": epochs, "seed": seed, "ckpt": out + ".final", "train_items": n, "train_minutes": round(secs / 60, 1),
-            "s_per_item_epoch": round(secs / (n * epochs), 4), **evaluate_ckpt(out + ".final", held, data, out + ".offline.json")}
+        return {"failed": f"training failed (rc={rc})", "epochs": epochs, "seed": seed, "rate": rate}
+    trained = (rate or {}).get("epochs_trained") or epochs
+    return {"epochs": trained, "epochs_wanted": epochs, "seed": seed, "ckpt": out + ".final", "train_items": n,
+            "train_minutes": round(secs / 60, 1), "s_per_item_epoch": round(secs / (n * trained), 4),
+            **({"rate": rate} if rate else {}), **evaluate_ckpt(out + ".final", held, data, out + ".offline.json")}
 
 
 def evaluate_ckpt(ckpt, held, train, out):
