@@ -12,6 +12,7 @@ See docs/finetune-laya-plan.md, "Measurement: a score without the action cap" an
   confirmQ the base against base + the adopted variants on new starts (--seed+100000, bank +150000), with the same
            looks. Adopt means a new default.
 
+Every game writes a danger log (DANGER_LOG=1, about 13 bytes an action) for the learned danger model.
 Disk guard as session 15; replays and snapshots are deleted after each game. Resumable via RUN/state.json;
 `touch RUN/STOP` stops between games. Never restart it mid-stage.
 
@@ -52,7 +53,8 @@ def starts(run, rng, seed):
 def play_one(run, stage, s, arm, rulefix, slot, deadline):
     cap, maxa = (600, 15000) if s["restore"] else (900, 20000)
     if run.smoke: cap, maxa = 240, 1500
-    env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rulefix}
+    env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rulefix,
+           "DANGER_LOG": "1"}  # the learned danger model's training data (tools/danger); play is unchanged
     out = run.d(stage, arm, s["id"])
     res = D.play_game(run, f"{stage}-{arm}", slot, s["seed"], s["cls"], env, out,
                       max(60, min(cap, deadline - time.time())), maxa, 4100, None, s["restore"])

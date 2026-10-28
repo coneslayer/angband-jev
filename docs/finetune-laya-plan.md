@@ -2837,6 +2837,11 @@ the variant isn't better):
 - **sling is left out of the screen:** only 1 of 10 eligible starts found a sling in the Weaponsmith,
   and that one cost 150 gold. Paired games would almost all be identical, wasting their CPU.
 
+**Danger logs.** Every session 17 game writes `danger.jsonl.gz` for the learned danger model (Cloud's
+PR #2, merged). On the C engine, two 4,000-action games played identically with and without the log
+(same actions, final turn and depth). The log took about 13 bytes an action and carried the level
+feeling. A session of about 10,000 games should take 2–4 GB.
+
 ### Pre-committed decision rules
 - **Base rules:** session 16's final default, chosen by PH(10) as the measurement section says.
 - **Canary:** at least 18 of 20 identical, else stop and investigate.
