@@ -3320,6 +3320,18 @@ each, 193 to 263 of them 40 or more turns long. With digskill those games tunnel
 which broke through), none starves: three reach the 20,000-action cap (DL7, DL8, DL4) and one dies on DL7 to
 Mughash, where base starved on DL6. The futility backstop never fired in these games.
 
+The same escape also runs with a monster adjacent. It is the top-priority rule (500 stalls, skipped only below 35%
+HP), above the rule that steps away from contact-damage monsters below CL12, which busho deliberately doesn't melee.
+A replay (`runs/smoke31`) shows a CL8 Blackguard tunnelling granite with its swap digger while a blue jelly beside it
+touches it for cold every turn: one 9-turn tunnel took it from 32 to 2 HP, and it died with 9 Cure Light Wounds. In
+tryunknown's games, 11,434 tunnels (of 378,511) were made with a monster adjacent, in 160 games (6,741 beside
+floating eyes); 28 deaths had one in their last 6 actions (blue jelly 6 of them). So digskill also skips the stall
+escape while a visible monster is adjacent, leaving it to the combat and step-away rules.
+
+Replays of 8 of those deaths (`runs/smoke32`): base repeats all 8 exactly; with digskill 5 reach the 17,000-action
+cap, 2 die much later (giant black and white lice, at 14,136 and 12,318 actions against 12,150 and 5,564) and one dies
+the same way at the same action (its tunnels come from another rule).
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

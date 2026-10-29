@@ -606,6 +606,7 @@ function poisonCureSlot(inv: any[], hpPct: number): number | null {
 // RULEFIX=digskill: 99 回の自動繰り返しで掘れなかった岩 (同じ地形のまま 400 ゲームターン以上) は、掘削能力が上がるまで同じ種類を掘らない。
 // 停滞脱出と孤立脱出は掘れる向きだけを掘る (session 22 の tryunknown: 99 ターン掘って終わる掘削が 705 局中 212 局で 5,197 回、全ゲームターンの 6%。
 // 餓死 21 件のうち 19 件で 12-223 回)。C の digging は手に持った武器での値で、4.2 が自動で使う予備の掘削具を含まないので、表ではなく失敗から学ぶ
+// 停滞の強制脱出 (最優先) も、隣に敵がいる間はしない (tryunknown: 隣に敵がいる掘削 11,434 回、160 局。死亡 28 件で最後の 6 手に含まれた)
 const DIGSKILL = RULEFIX.has("digskill");
 // RULEFIX=devices: 魔法の道具 (杖・魔法棒・ロッド)。未知のものは使って識別する (魔法棒/ロッドは隣にいない見えている敵へ、
 // 杖は敵が見えず HP 75% 以上の時: 4.2 では回復・治療・感知は満タンでも識別される)。分かったものは、攻撃の魔法棒/ロッドを
@@ -2874,7 +2875,8 @@ async function playGame() {
     }
 
     // === 最最優先: 極端な停滞 → 強制脱出 ===
-    if (noProgressCount >= 500 && !lowHpHold) {
+    // RULEFIX=digskill: 隣に敵がいる間は強制脱出しない (戦闘・動かない敵から離れる処理に任せる。青ゼリーに触られながら花崗岩を掘り続けて死んでいた)
+    if (noProgressCount >= 500 && !lowHpHold && !(DIGSKILL && monsters.some((m: any) => m.distance <= 1))) {
       // 500回停滞 → visited クリアで探索リセット (同じパターンを打破)
       addLesson(state.turn, state.depth, "停滞リセット",
         `${noProgressCount}回停滞。visitedクリアして探索再開`);
