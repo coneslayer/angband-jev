@@ -567,6 +567,17 @@ let gearTries = new Map<string, number>(), lastGearAction = -99;
 // 未知の巻物は町で錬金術店に渡す (shouldKeepItem)。持ち物の名前は知っている時だけ本当の名前 (C の aware)
 const TRYUNKNOWN = RULEFIX.has("tryunknown");
 let lastTryAction = -99, potionsTried = 0;
+// RULEFIX=worwait: 町で Word of Recall が発動待ちの間は階段を降りずに待つ (4.2 ではダンジョンにいる時に発動すると町へ引き戻される。
+// session 22 の既定では町で読んだ 329 回のうち 269 回が DL1 へ降りて町へ戻され、巻物 (125G) が無駄になり DL1 から歩いていた)
+const WORWAIT = RULEFIX.has("worwait");
+// RULEFIX=deepkit: DL5 以深から戻った町でも、装備と Cure Critical Wounds (200G) より先に Phase/CLW/油/CSW を買う
+// (buySupplies は CLW を買わず、CCW 30 個が先なので Phase が残りの金で決まっていた。CLW は 20G で 20 HP、CCW は 200G で 60 HP)
+const DEEPKIT = RULEFIX.has("deepkit");
+const DEEP_KIT_STEPS: [string, number][] = [["phase", 5], ["clw", 5], ["oil", 10], ["phase", 10], ["clw", 10], ["csw", 3]];
+// RULEFIX=packroom: 町で持ち物が 18 枠以上なら、未知の薬と巻物を錬金術店へ、魔法の道具を魔法店へ (devices では持つ)、燃料の少ない松明の山を
+// 雑貨屋へ (2 山を残す) 渡して枠を空ける。店に渡すと種類も分かる (session 22: 23 枠が埋まって Phase Door が買えず、補給帰還を繰り返した)
+const PACKROOM = RULEFIX.has("packroom");
+const PACK_ROOM_AT = 18;
 // RULEFIX=devices: 魔法の道具 (杖・魔法棒・ロッド)。未知のものは使って識別する (魔法棒/ロッドは隣にいない見えている敵へ、
 // 杖は敵が見えず HP 75% 以上の時: 4.2 では回復・治療・感知は満タンでも識別される)。分かったものは、攻撃の魔法棒/ロッドを
 // 危険な敵へ近接の前に (油より先に)、回復の杖を HP 半分未満で、Teleportation の杖を緊急時に使う。使い道のないものは落とす
@@ -2134,14 +2145,24 @@ async function sellJunk(state: any) {
     const inv = freshState.player.inventory;
     const equip2 = freshState.player.equipment ?? [];
 
+    // RULEFIX=packroom: 持ち物が多い時だけ、燃料の多い 2 山以外の松明と未知の薬/巻物/魔法の道具も渡す
+    const crowded = PACKROOM && inv.length >= PACK_ROOM_AT;
+    const torchKeep = new Set(inv.filter((i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? ""))
+      .sort((a: any, b: any) => (b.fuel ?? 0) - (a.fuel ?? 0)).slice(0, 2).map((i: any) => i.slot));
+    const roomJunk = (item: any) => crowded && (
+      ([TVAL.POTION, TVAL.SCROLL].includes(item.tval) && item.aware === false)
+      || (!DEVICES && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval))
+      || (item.tval === TVAL.LIGHT && /Torch/i.test(item.name ?? "") && !torchKeep.has(item.slot)));
+
     // 売却候補を探す (逆順: 後ろから売ることでインデックスがずれない)
     let soldThisRound = false;
     for (let i = inv.length - 1; i >= 0; i--) {
       const item = inv[i];
       if (!item || item.qty <= 0) continue;
-      if (shouldKeepItem(item, equip2)) continue;
+      if (shouldKeepItem(item, equip2) && !roomJunk(item)) continue;
 
-      const stores = SELL_STORE_FOR_TVAL[item.tval] ?? [0]; // default: General
+      const stores = roomJunk(item) && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval) ? [5]
+        : SELL_STORE_FOR_TVAL[item.tval] ?? [0]; // default: General
       for (const storeType of stores) {
         try {
           const res = await fetch(`${API}/sell`, {
@@ -2250,6 +2271,9 @@ async function buySupplies(state: any) {
             currentGold = result.state?.player?.gold ?? (currentGold - stockItem.price);
             console.log(`  [購入] ${stockItem.name} (${stockItem.price}G) store${storeType} 残金${currentGold}G [${bought}/${needed}]`);
             purchasedThisAttempt = true;
+          } else {
+            const pack = (await getState()).player.inventory ?? [];
+            console.log(`  [購入失敗] ${stockItem.name} (${stockItem.price}G) store${storeType} 残金${currentGold}G、持ち物${pack.length}枠: ${pack.map((i: any) => `${i.name}x${i.qty}`).join(", ")}`);
           }
         } catch (e) {
           console.log(`  [buySupplies] ERROR: ${e}`);
@@ -2550,6 +2574,7 @@ async function playGame() {
         await buyEarlyKit([["food", RULEFIX.has("food8") ? FOOD_KEEP : 5], ["torch", 3]]); // 装備で資金を使い切る前に食料と光源
         // RULEFIX=restock8: CL15 未満は装備より先に序盤の一式 (油/Phase/CLW)。buySupplies は CLW を買わない
         if (RULEFIX.has("restock8") && state.player.level < 15) { await buyEarlyKit(); state = await getState(); }
+        if (DEEPKIT) { await buyEarlyKit(DEEP_KIT_STEPS); state = await getState(); }
         state = await getState();
         await buyEquipment(state); // 装備品を先に購入（ゴールド消費前）
         state = await getState();
@@ -4317,6 +4342,12 @@ async function playGame() {
         state = await sendCommand({ type: CMD.WALK, direction: huntDir });
         continue;
       }
+    }
+
+    // === RULEFIX=worwait: 町で帰還の発動を待つ (戦闘・逃走の判断はこの前) ===
+    if (WORWAIT && !ROLLOUT && state.depth === 0 && (p.wordRecall ?? 0) > 0) {
+      state = await sendCommand(monsters.length > 0 ? { type: CMD.SEARCH } : { type: CMD.REST, turns: 5 });
+      continue;
     }
 
     // === RULEFIX=tryunknown: 未知の薬を安全な時に飲む ===

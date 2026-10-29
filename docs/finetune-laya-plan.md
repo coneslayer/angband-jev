@@ -3213,6 +3213,44 @@ Stinking Cloud (DL5), Staff of Cure Light Wounds (DL5, common, 7–11 charges), 
 
 Smoke on six session 21 starts: base identical to session 21 on all six; no errors. A session 23 candidate.
 
+### Three town bugs found in session 22's logs (2026-10-29)
+Looking into why gearid's games ran longer turned up three faults in the base rules' town visits. All three predate
+the C engine; they're the TS engine's shopping code meeting 4.2.6's stores and timing.
+
+- **Word of Recall is wasted.** After shopping on a visit from DL5 or deeper, busho reads Word of Recall and then, the
+  next turn, its descent rule takes the town's down staircase. In 4.2 recall that activates in the dungeon pulls you
+  *up*, so the character lands on DL1 and is yanked back to town 15–35 turns later. In session 22's base arm, 269 of
+  329 recall readings in town did this; only about 11 reached depth. The base bought 327 scrolls at 125 gold (40,875
+  gold, a third of all deep-town spending) and then walked down from DL1 anyway.
+- **Deep-town visits buy no Cure Light Wounds.** `buySupplies` (used once max depth is 5 or more) asks for Cure
+  Critical Wounds (target 30), Phase Door 20, Teleportation 12, Word of Recall 5. In 4.2.6 the Alchemist always stocks
+  Cure Light Wounds, Phase Door, Word of Recall and Remove Curse; Cure Serious and Critical Wounds are only sometimes
+  in stock, and Teleportation scrolls are in no ordinary store. Cure Light Wounds heals 20 for 20 gold, Cure Serious
+  40 for 70, Cure Critical 60 for 200. The base spent 43,600 gold on 218 Cure Critical Wounds and none on Cure Light
+  Wounds; Phase Door comes after Cure Critical Wounds, and 83 of 623 deep-town visits needed Phase Door and bought none.
+- **A full pack blocks shopping.** The pack has 23 slots. Base keeps every potion and scroll, unknown or not, and offers
+  devices to the General Store, which doesn't buy them; torches with different fuel don't stack. A replay of a gearid
+  game that looped had 23 slots: five unknown potion kinds, two unknown scroll kinds, three unknown wands, three
+  unknown staves, three torch stacks. Phase Door then can't be bought (a new kind needs a slot), the shallow restock
+  rule sends the character back to town with 0 Phase Door, and the loop repeats until the 20,000-action cap. 9 of
+  about 330 gearid games looped like this; in 4 of them the base game on the same start died, so the loop flatters
+  gearid's survival somewhat. Failed purchases are now logged (`[購入失敗]`, with the pack contents).
+
+Three variants, each off by default:
+- **worwait:** in town with recall active, hold (or rest 5 turns when nothing is in view) instead of descending, until
+  recall fires. Fighting and fleeing come first.
+- **deepkit:** on deep-town visits, buy Phase Door 5, Cure Light Wounds 5, oil 10, Phase Door 10, Cure Light Wounds
+  10, Cure Serious Wounds 3 (the early-kit buyer, cheapest store first) before equipment and `buySupplies`.
+- **packroom:** in town with 18 or more pack slots in use, give unknown potions and scrolls to the Alchemist, devices
+  to the Magic shop (unless devices is on), and all but the two fullest torch stacks to the General Store. Giving an
+  item to a store also identifies its kind.
+
+Smokes (`runs/smoke25`, `runs/smoke26`): base identical to session 22 on four starts. With worwait, recall from town
+lands on the character's max depth (DL0 → DL5 where base went DL0 → DL1 → DL0). With deepkit, a 494-gold visit bought
+Phase Door 10, Cure Light Wounds 9 and Cure Serious Wounds 2, where base bought Phase Door 20 and a recall scroll and
+left with one cure. On the looping gearid start, gearid+packroom gave away 3 unknown wands and staves, 2 unknown
+potions and scrolls, made no failed purchase in 13,500 actions and reached DL8 (gearid alone looped from A12,800).
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
