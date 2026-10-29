@@ -3190,6 +3190,29 @@ unknown scrolls to the Alchemist on town visits, since reading them early risks 
 
 Session 22 screens both, after session 21.
 
+
+### RULEFIX=devices (wands, staves, rods; 2026-10-28)
+Busho never used a device. Sessions 20 and 21's base arms (614 games) picked up 481 wands, 103 staves and 31 rods (336
+games found at least one); all stayed unknown, and `sellJunk` offered them to the General Store, which doesn't buy
+devices, so each held a pack slot for the rest of the game. Early finds that matter: Wand of Magic Missile (DL3),
+Stinking Cloud (DL5), Staff of Cure Light Wounds (DL5, common, 7–11 charges), Rod of Treasure Location (DL8).
+
+- **Identify by use.** Unknown wands and rods are aimed at a visible monster at least 2 squares away (the C view's AIM
+  and ZAP now take a target square, angband-c `main-http`). Unknown staves are used when nothing is in view and HP is at
+  least 75%: in 4.2 healing, curing and detection identify even when they do nothing (`effect_handler_HEAL_HP`: "Always
+  ID"), so full HP costs only a charge and is the safer time for Summoning or Darkness. Staves that act on monsters
+  stay `{tried}` with nothing in view; they're retried once with a monster 2–6 squares away. One try per staff kind
+  per level; `{empty}` devices are skipped.
+- **Use known ones.** Attack wands and rods (Magic Missile, Stinking Cloud, the bolts and balls) on dangerous monsters
+  at range, before oil; a Cure Light Wounds, Curing or Healing staff below half HP; a Staff of Teleportation below 35%
+  HP with an enemy within 3.
+- **Junk.** Known-useless devices (Haste or Heal Monster, Clone Monster, Summoning, Darkness, Wonder, Polymorph) are
+  dropped when nothing is in view, and that square isn't picked up from again on the level. With `birth_no_selling`
+  giving them to a store gains nothing. (4.2's 'k' is "Ignore", not destroy: it drops the item and hides that kind from
+  then on; using it would need an IGNORE command in the C view and `hasObj` to skip ignored items.)
+
+Smoke on six session 21 starts: base identical to session 21 on all six; no errors. A session 23 candidate.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
