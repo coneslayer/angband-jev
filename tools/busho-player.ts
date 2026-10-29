@@ -629,7 +629,13 @@ const DIGSKILL = RULEFIX.has("digskill");
 // RULEFIX=devices: 魔法の道具 (杖・魔法棒・ロッド)。未知のものは使って識別する (魔法棒/ロッドは隣にいない見えている敵へ、
 // 杖は敵が見えず HP 75% 以上の時: 4.2 では回復・治療・感知は満タンでも識別される)。分かったものは、攻撃の魔法棒/ロッドを
 // 危険な敵へ近接の前に (油より先に)、回復の杖を HP 半分未満で、Teleportation の杖を緊急時に使う。使い道のないものは落とす
-const DEVICES = RULEFIX.has("devices");
+// RULEFIX=devices2: devices に加えて、Wand of Light (4.2.6: 6d8 の光のビーム、光に弱い敵にだけ効く) を起きているオークへ
+// (snaga, cave orc, orc tracker/shaman/archer は光に弱い。Lagduf や Grishnákh などのユニークは弱くない)。列に並んだオークを
+// まとめて狙う。session 23 の devices は識別した Wand of Light を一度も使わなかった。未知の魔法棒/ロッドはユニークに試さない
+// (Haste Monster を Sméagol に撃って殺されていた)
+const DEVICES2 = RULEFIX.has("devices2");
+const DEVICES = RULEFIX.has("devices") || DEVICES2;
+const LIGHT_ORC_RE = /^(snaga|cave orc|orc (tracker|shaman|archer))$/;
 const ATTACK_DEVICES = /^(Magic Missile|Stinking Cloud|Lightning Bolts|Frost Bolts|Fire Bolts|Acid Bolts|Lightning Balls|Cold Balls|Fire Balls|Acid Balls|Dragon's (Flame|Frost|Breath)|Drain Life|Annihilation)$/;
 const HEAL_STAVES = /^(Cure Light Wounds|Curing|Healing)$/;
 const USELESS_DEVICES = /^(Haste Monsters?|Heal Monster|Clone Monster|Summoning|Darkness|Wonder|Polymorph)$/;
@@ -643,6 +649,7 @@ function deviceReady(it: any): boolean {
 // 次は見えている敵 (2-6 マス) がいる時に試す
 const staffTriedLevel = new Set<string>();
 let devicesUsed = 0, devicesTried = 0, lastDeviceAction = -99;
+let lightWandUses = 0, lightWandOrcs = 0; // RULEFIX=devices2
 // 使い道のないと分かった道具は、安全な時にその場に落とす (no_selling では店に渡しても何も得ない。持ち物の枠が空く)。
 // 落としたマスは拾わない・向かわない (この階だけ。DEVICES でなければ空のまま)
 const droppedTiles = new Set<string>();
@@ -1672,6 +1679,25 @@ function hasLOS(tiles: any[], px: number, py: number, tx: number, ty: number): b
 }
 
 const THROW_RANGE = 8;
+
+// RULEFIX=devices2: 自分から (tx,ty) を通って壁に当たるまでの直線 (ビームが通るマス。hasLOS と同じ線で近似)
+function beamCells(tiles: any[], px: number, py: number, tx: number, ty: number, range: number): Set<string> {
+  const feats = new Map<number, number>();
+  for (const t of tiles) feats.set(t.y * 4096 + t.x, t.feat);
+  const out = new Set<string>();
+  const dx = Math.abs(tx - px), dy = Math.abs(ty - py);
+  const sx = px < tx ? 1 : -1, sy = py < ty ? 1 : -1;
+  let err = dx - dy, x = px, y = py;
+  for (let i = 0; i < range; i++) {
+    const e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x += sx; }
+    if (e2 < dx) { err += dx; y += sy; }
+    out.add(`${x},${y}`); // 止まるマスも含める (扉や未知のマスに立つ敵)
+    const f = feats.get(y * 4096 + x);
+    if (f === undefined || !PASSABLE_FEATS.has(f) || f === FEAT.PASS_RUBBLE) break;
+  }
+  return out;
+}
 
 // 既知の階段 (上り/下り) のうち最寄りへの BFS: 最初の一歩と歩数
 function nearestStair(tiles: any[], px: number, py: number): { dir: number; len: number } | null {
@@ -3754,6 +3780,28 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=devices2: 起きているオーク (7 マス以内) がいれば Wand of Light。一番多くのオークを貫く向きへ ===
+    if (DEVICES2 && state.depth >= 1 && !ROLLOUT) {
+      const wand = inv.find((i: any) => i.tval === TVAL.WAND && i.aware !== false && i.name === "Light" && deviceReady(i));
+      const orcs = wand ? monsters.filter((m: any) => LIGHT_ORC_RE.test(m.name ?? "") && m.distance <= 10
+        && hasLOS(tiles, px, py, m.x, m.y)) : [];
+      if (wand && orcs.some((m: any) => m.asleep !== true && m.distance <= 7)) {
+        let best: any = null, bestN = 0;
+        for (const m of orcs) {
+          const cells = beamCells(tiles, px, py, m.x, m.y, 20);
+          const n = orcs.filter((o: any) => cells.has(`${o.x},${o.y}`)).length;
+          if (best === null || n > bestN || (n === bestN && m.distance < best.distance)) { best = m; bestN = n; }
+        }
+        lightWandUses++; lightWandOrcs += bestN; devicesUsed++; lastDeviceAction = actionCount;
+        if (lightWandUses <= 3 || lightWandUses % 10 === 0) addLesson(state.turn, state.depth, "魔法の道具",
+          `${wand.desc ?? wand.name}を${best.name}(dist${best.distance})へ、列のオーク${bestN}体 (#${lightWandUses})`);
+        const turnBefore = state.turn;
+        state = await sendCommand({ type: CMD.AIM, itemIndex: wand.slot, target: { x: best.x, y: best.y } });
+        if (state.turn === turnBefore) deviceEmpty.add(`${wand.tval}:${wand.name}`);
+        continue;
+      }
+    }
+
     // === 優先度3.8: 遠距離攻撃スペル (距離2-6の敵にボルト/ビーム) ===
     if (canCastSpells) {
       const adjacentCount = monsters.filter((m: any) => m.distance <= 1).length;
@@ -3869,7 +3917,8 @@ async function playGame() {
           }
         }
         // RULEFIX=devices: 隣にいない見えている敵へ、未知の魔法棒/ロッドを試す (識別)
-        if (DEVICES && state.depth >= 1 && m.distance >= 2 && choice !== "flee" && hasLOS(tiles, px, py, m.x, m.y)) {
+        if (DEVICES && state.depth >= 1 && m.distance >= 2 && choice !== "flee" && !(DEVICES2 && m.isUnique)
+          && hasLOS(tiles, px, py, m.x, m.y)) {
           const unk = inv.find((i: any) => (i.tval === TVAL.WAND || i.tval === TVAL.ROD) && i.aware === false && deviceReady(i));
           if (unk) {
             const turnBefore = state.turn;
@@ -5197,6 +5246,7 @@ async function playGame() {
   }
   console.log(`  序盤キット: 射撃${shotsFired}回 投擲${throwsMade}回(命中${throwHits}/撃破${throwKills}) 逃走行動${earlyFleeActions}回(階段${earlyFleeStairs}, Phase${phasesRead})`);
   if (CORRIDOR) console.log(`  回廊: 通路へ${corridorMoves}歩, 通路で待機${corridorWaits}回`);
+  if (DEVICES2) console.log(`  光の魔法棒: ${lightWandUses}回, 列のオーク計${lightWandOrcs}体`);
 
   // 最終フレーム + 録画保存
   recordFrame(finalState, finalState.dead ? `死亡: ${deathCause}` : "生存");

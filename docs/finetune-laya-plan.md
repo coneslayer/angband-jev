@@ -3356,6 +3356,37 @@ The screen ran about twice as fast as that estimate (about 64 pairs an hour), so
 
 All six are between the bounds at both looks (futility at look 2: z 0.07).
 
+Look 3 (700 pairs, 16:52; bound z 1.67):
+
+| Variant | PH(10) | z | Deep death ratio | Decision |
+|---|---|---|---|---|
+| deepkit | 0.865 | 3.53 | 0.90 | adopt |
+| digskill | 0.882 | 2.74 | 0.76 | adopt |
+| worwait | 0.926 | 2.20 | 1.06 | adopt |
+| neutdrink | 0.952 | 1.91 | 0.98 | adopt |
+| packroom | 0.942 | 1.49 | 0.94 | reject |
+| devices | 0.918 | 1.43 | 0.97 | reject |
+
+The confirmation (seed 4600000, base against base plus all four) began at 16:57.
+
+**What devices did** (702 pairs; `<scratchpad>/dev/dev.py`, `dev2.py`). PH(10) 0.915 (80% 0.84–0.99), p 0.066 one-sided:
+death rate 0.98 (0.92–1.05), pace 1.03 (1.01–1.06). Looks 1 and 2 were 0.97 and 0.99, so the gain came late. 489 games
+used a device and 468 diverged from base; deaths 446 against 445. Device actions were 0.03% of all actions (1,633 aims,
+184 zaps, 484 staff uses, 474 drops); 1,189 were identification tries. At DL1–9 identification mostly finds junk:
+Wand of Darkness (dropped in 137 games), Wonder (119), Haste Monster (65), Heal Monster (58), Staff of Darkness. Used
+after identification: Magic Missile (74 games), Staff of Cure Light Wounds (38 games, about 270 heals), Stinking
+Cloud (16), Staff of Curing (4), Staff of Teleportation (2 uses). Identification by aiming hasted a monster about 55
+times and healed one about 51 times; 5 deaths followed a try at the eventual killer (Haste Monster on Sméagol and on a
+breeding giant white rat). Causes shifted: scouts and soldiers 21 → 42 deaths, blue jelly, cave spider, large kobold
+and louse down; no mechanism found, and with about 25 causes compared one swing that size is not surprising.
+
+The rule identifies everything but uses only five kinds. The Wand of Light (4.2.6: `LINE:LIGHT_WEAK` 6d8, a beam that
+hurts only HURT_LIGHT monsters) has the same rarity and depths as Darkness and Magic Missile (alloc 20, DL3–60), so it
+was probably identified in a similar number of games and then carried unused. In 4.2.6 snagas (36 HP, groups of 2d9),
+cave orcs (55 HP, 2d6), orc trackers and shamans are HURT_LIGHT (Lagduf and Grishnákh are not), and a beam down a
+corridor hits the whole line. Hold, Stun, Confuse, Scare and Slow Monster wands (DL5+) are kept unused too, and the
+detection staves are used only to identify them.
+
 ### Walking back beside stationary monsters: RULEFIX=stationmem (2026-10-29)
 Below CL12 busho doesn't melee jellies, molds and floating eyes: it steps away from them, and the explorer's BFS avoids
 their squares and the squares next to them (`setStationaryAvoid`). But the avoid sets are rebuilt every turn from the
@@ -3425,6 +3456,28 @@ the 20,000-action cap, one dies much later (15,476 against 8,568), 3 are unchang
 die earlier (one of them after the rule fired three times on DL2 and never on DL4, where Mughash killed it: a different
 game, not the rule at fault). It fires rarely: 0 to 55 steps and 0 to 20 holds a game. A session 24 candidate with
 stationmem and blindsafe.
+
+Crash check on the base the session 23 screen adopted (`runs/smoke41`: D22 plus worwait, deepkit, neutdrink,
+digskill; 5 fresh starts, 5,000-action cap; stationmem, blindsafe, corridor and all three): no errors or timeouts, 4
+deaths in 25 games. corridor fired in 7 of 10 games. In one it held 66 times while giant white lice bred (the Warrior
+then died to a louse), a cost of waiting for monsters that don't come straight in; the rule turns itself off for 40
+actions after 6 holds, but lice keep re-arming it.
+
+### Wands of Light against orcs: RULEFIX=devices2 (2026-10-29)
+devices (above, session 23) identified the Wand of Light and then carried it unused. **devices2** is devices plus: with
+an awake snaga, cave orc, orc tracker, orc shaman or orc archer within 7 squares, aim a known Wand of Light along the
+line that passes through the most of them (orcs within 10 squares in view; the line is the same Bresenham line as
+`hasLOS`, continued to the first wall). It comes after the emergency heal and escape rules and before melee and
+shooting. Unknown wands and rods are no longer tried on uniques. Charges are 6+d10, so it lasts a few fights.
+
+Smoke (`runs/smoke42`, D22 base, 12 starts where devices died to orcs or had a Wand of Light): base and devices
+replay session 23 exactly on all 12. devices2 fired in 3 (5, 14 and 7 shots, 48 orcs in the lines, the first shot of
+one game through 4 snagas); two characters that died under devices reached the 20,000-action cap and one died
+earlier and deeper (Orfax on DL10). The other 9 never had the wand and played as devices did. One game crashed: an
+orc standing where the line stopped scored no orcs and the tie-break read a null; fixed (the stopping square counts,
+and the first candidate is taken). Rerun (`runs/smoke43`): no errors; the three games above replay as before, and the
+crashed start fires 19 times (21 orcs in the lines) and dies on DL10 at 19,590 actions to a light hound, against
+devices' cave orc on DL8 at 13,071. A session 24 candidate.
 
 ## C Angband engine: spike (2026-10-15)
 
