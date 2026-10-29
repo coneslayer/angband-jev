@@ -3377,10 +3377,21 @@ bloodshot-eye starts (most from session 22's screen, whose base differs, so base
 each arm, 3 earlier with stationmem and 3 later: smokes on selected deaths only check that the code runs, since any
 change to a dying game's path tends to look better. The A/B decides.
 
-Not addressed: 14 of the confirmation's 183 new-default deaths ended resting blind (4 in base); 8 of those began right
-after drinking, with no cure left, consistent with tryunknown drinking an unknown Potion of Blindness (75+4d25 turns)
-at the HP below 75% where it hopes for a healing potion. A fix would avoid that drink when no Cure Light Wounds is
-carried, or take the stairs when hit while blind.
+### Resting blind while being hit: RULEFIX=blindsafe (2026-10-29)
+14 of the confirmation's 183 new-default deaths ended with at least 5 rests while blind in the last 11 actions (4 in
+base); 13 of the 14 had no Cure potion when the blindness began. 8 began right after a quaff (1 in base), consistent
+with tryunknown drinking an unknown Potion of Blindness (75+4d25 turns in 4.2.6) at HP below 75%, where it hopes for a
+healing potion; two were blinded in town. The rest were blinded by casters (apprentices, blacklock mages) or gazes.
+busho rests whenever it is blind, and its unseen-attacker rule (heal, stairs, Phase Door, walk to stairs) skips blind
+characters. Blind characters can't read, but in 4.2.6 they can quaff, walk and take stairs, and Cure Light, Serious
+and Critical Wounds all cure blindness.
+
+**blindsafe:** blind and hit by something unseen (HP down with an "It ... you" message, the existing detection), drink
+a Cure potion, or take the stairs when standing on them; and tryunknown drinks unknown potions only while carrying a
+known Cure potion. Smoke (`runs/smoke38`): base replays 10 of those deaths exactly; with blindsafe 3 reach the cap, 4
+die much later (two of them starve), 2 die the same way at the same action and 1 dies earlier (a giant white louse at
+3,991 against an apprentice at 9,505). The blind cure fired in 2 games; most of the change is tryunknown waiting for a
+cure before drinking. Same caveat as above: selected deaths, so only a check that the code runs.
 
 ## C Angband engine: spike (2026-10-15)
 

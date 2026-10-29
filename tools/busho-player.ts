@@ -590,6 +590,10 @@ let gearTries = new Map<string, number>(), lastGearAction = -99;
 // RULEFIX=tryunknown: 未知の薬を、5 マス以内に敵がいない時に飲んで識別する (HP 75% 未満なら回復薬かもしれない。町なら HP を問わない)。
 // 未知の巻物は町で錬金術店に渡す (shouldKeepItem)。持ち物の名前は知っている時だけ本当の名前 (C の aware)
 const TRYUNKNOWN = RULEFIX.has("tryunknown");
+// RULEFIX=blindsafe: 盲目で見えない敵に攻撃されている → 盲目を治す薬 (4.2 では CLW/CSW/CCW すべて) を飲む、なければ階段の上なら階を変える
+// (休むと殴られ続ける。session 22 の確認の新既定: 死亡 183 件中 14 件が盲目で休み続けて死に、うち 8 件は飲んだ直後で治す薬なし。
+// tryunknown の Blindness は 75+4d25 ターン)。tryunknown は治す薬を持っている時だけ未知の薬を飲む
+const BLINDSAFE = RULEFIX.has("blindsafe");
 let lastTryAction = -99, potionsTried = 0;
 // RULEFIX=worwait: 町で Word of Recall が発動待ちの間は階段を降りずに待つ (4.2 ではダンジョンにいる時に発動すると町へ引き戻される。
 // session 22 の既定では町で読んだ 329 回のうち 269 回が DL1 へ降りて町へ戻され、巻物 (125G) が無駄になり DL1 から歩いていた)
@@ -3228,6 +3232,17 @@ async function playGame() {
         state = await sendCommand({ type: CMD.WALK, direction: rdir });
         continue;
       }
+      if (BLINDSAFE && isBlind && !isParalyzed && !isConfused && unseenThreat) {
+        const cure = findHealingPotion(inv);
+        const here = tiles.find((t: any) => t.x === px && t.y === py);
+        const onStair = here?.feat === FEAT.UP_STAIR || here?.feat === FEAT.DOWN_STAIR;
+        if (cure !== null || onStair) {
+          addLesson(state.turn, state.depth, "状態異常", `盲目で見えない敵に${unseenHits.length}回攻撃された。${cure !== null ? "薬で盲目を治す" : "階段で離脱"}`);
+          if (cure !== null) { healingsUsed++; state = await sendCommand({ type: CMD.QUAFF, itemIndex: cure }); }
+          else { fleeAttempts++; state = await sendCommand({ type: here?.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP }); unseenHits = []; }
+          continue;
+        }
+      }
       // RULEFIX=stationmem: 盲目で、覚えている動かない接触の敵が隣 → 休まず 1 歩離れる (bloodshot eye の凝視は盲目 + 2d6 で、
       // 見えないまま隣で休み続けて死んでいた。CLW は盲目を治すが次の凝視でまた盲目)
       if (STATIONMEM && isBlind && !isParalyzed && !isConfused
@@ -4430,7 +4445,7 @@ async function playGame() {
 
     // === RULEFIX=tryunknown: 未知の薬を安全な時に飲む ===
     if (TRYUNKNOWN && !ROLLOUT && actionCount - lastTryAction >= 5 && (hpPct < 0.75 || state.depth === 0)
-        && monsters.every((m: any) => m.distance > 5)) {
+        && monsters.every((m: any) => m.distance > 5) && (!BLINDSAFE || findHealingPotion(inv) !== null)) {
       const pot = inv.find((i: any) => i.tval === TVAL.POTION && i.aware === false && i.qty > 0);
       if (pot) {
         lastTryAction = actionCount; potionsTried++;
