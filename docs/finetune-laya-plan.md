@@ -3133,6 +3133,30 @@ as an escape in the restock test.
   equipment.
 
 
+
+### Session 21: kitmore and restock8 rejected (2026-10-28, 19:55–21:57)
+Canary passed (session 20's screenQ base, 20 of 20). Both closed at look 2 (futility):
+
+| Variant | Look 1 (150 pairs) | Look 2 (300 pairs) | Deep death ratio at look 2 |
+|---|---|---|---|
+| kitmore | PH(10) 1.001 | 1.014, z −0.14 | 1.04 |
+| restock8 | PH(10) 0.924 | 1.013, z −0.17 | 0.87 |
+
+Supplies at death on 306 paired starts:
+
+| | Deaths | No Phase Door | No cures | Restock trips per game | Mean max depth |
+|---|---|---|---|---|---|
+| base | 188 | 142 | 142 | 2.77 | 5.80 |
+| kitmore | 200 | 153 | 157 | 2.36 | 5.82 |
+| restock8 | 174 | 127 | 126 | 3.71 | 5.63 |
+
+kitmore's larger targets go unfilled: there is no gold left after the basic kit, so gold, not the shopping list, limits
+supplies. restock8 works as intended (a trip more per game, 14 fewer deaths) but the trips cost depth, and PH(10)
+counts both, so they cancel. gearid's store purchases compete for the same gold (equipment is bought before supplies on
+deep town visits), which session 22 will show the net of.
+
+Session 22 (launched 21:57): gearid and tryunknown on the same default, angband-c 20820ac06 frozen into the run;
+canary on session 21's screenQ base arm (screenQ:4200000), seed 4300000, 35 hours.
 ### Unknown items and equipment (2026-10-28)
 How busho handled them before:
 - **No identification at all.** Consumables are used by exact name, and the C view sends the real name only once the
