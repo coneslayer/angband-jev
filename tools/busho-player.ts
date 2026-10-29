@@ -183,6 +183,9 @@ function weaponDpsVsMonster(
 function findBestWeaponForMonster(
   inventory: any[], equipment: any[], playerToD: number, monster: Record<string, any>,
 ): { slot: number; name: string; dps: number; currentDps: number } | null {
+  // RULEFIX=gearid: 武器は itemPower (攻撃回数込みの 1 ターンの与ダメージ) だけで選ぶ。ここの見積もりは攻撃回数も
+  // 分かっている修正も見ないので、敵が近づく度に gearid の選んだ武器と入れ替え合っていた
+  if (GEARID) return null;
   const currentWeapon = equipment.find((e: any) => WEAPON_TVALS.has(e.tval));
   if (!currentWeapon) return null;
 
@@ -219,11 +222,19 @@ function itemPower(item: {
   brands?: number[]; slays?: number[];
 }): number {
   let score = 0;
+  if (GEARID) {
+    if (gearCursed(item)) return -100; // 呪いの分かっている品は着けない
+    item = gearView(item);
+  }
 
   if (WEAPON_TVALS.has(item.tval)) {
     // 武器: ダメージダイス + 命中/ダメージボーナス
     const avgDmg = (item.dd ?? 1) * ((item.ds ?? 4) + 1) / 2;
-    score = avgDmg + item.toH * 2 + item.toD * 3;
+    // RULEFIX=gearid: 1 ターンの与ダメージ (この武器での攻撃回数 × (ダイス + ダメージ修正)) で比べる。重すぎる武器は回数が減る
+    const kblows = (item as any).kblows;
+    score = GEARID && typeof kblows === "number" && kblows > 0
+      ? (kblows / 100) * (avgDmg + (item.toD ?? 0)) * 2 + (item.toH ?? 0) * 2
+      : avgDmg + item.toH * 2 + item.toD * 3;
     // ブランド/スレイは大きなボーナス
     if (item.brands && item.brands.length > 0) score += item.brands.length * 10;
     if (item.slays && item.slays.length > 0) score += item.slays.length * 8;
@@ -533,6 +544,28 @@ function isDangerousMonster(mon: {
 }
 
 // 同じスロットカテゴリか判定
+// RULEFIX=gearid: 装備の識別と選択。C の画面が送る「プレイヤーが知っている性質」(kflags/kmods/kres/kbrands/kslays/kcurses、
+// 武器はこの武器での攻撃回数 kblows、店の品は kdd..ktoA) で評価し、{cursed} は着けない。安全な時に {??} (未知のルーンあり) の品を
+// 試着し (同点なら未知の方、指輪/アミュレットは空き枠に)、着けてみて分かった性質で一番良いものに着け替える
+const GEARID = RULEFIX.has("gearid");
+function gearView(it: any): any {
+  if (!it || it.kflags === undefined) return it;
+  const mods: number[] = [];
+  for (const [i, v] of it.kmods ?? []) mods[i] = v;
+  return { ...it, dd: it.dd ?? it.kdd, ds: it.ds ?? it.kds, ac: it.ac ?? it.kac,
+    toH: it.toH ?? it.ktoH ?? 0, toD: it.toD ?? it.ktoD ?? 0, toA: it.toA ?? it.ktoA ?? 0,
+    flags: it.kflags, modifiers: mods, resists: (it.kres ?? []).map(([elem, level]: number[]) => ({ elem, level })),
+    brands: new Array(it.kbrands ?? 0).fill(1), slays: new Array(it.kslays ?? 0).fill(1) };
+}
+function gearCursed(it: any): boolean { return (it?.kcurses ?? 0) > 0 || /\{[^}]*cursed/.test(it?.desc ?? ""); }
+function gearUnknown(it: any): boolean { return /\?\?/.test(it?.desc ?? ""); }
+// 射撃武器の弾の種類 (違う種類には替えない: 買った矢弾が無駄になる)
+function launcherFamily(name: string): string { return /Sling/i.test(name) ? "shot" : /Crossbow/i.test(name) ? "bolt" : "arrow"; }
+let gearTries = new Map<string, number>(), lastGearAction = -99;
+// RULEFIX=tryunknown: 未知の薬を、5 マス以内に敵がいない時に飲んで識別する (HP 75% 未満なら回復薬かもしれない。町なら HP を問わない)。
+// 未知の巻物は町で錬金術店に渡す (shouldKeepItem)。持ち物の名前は知っている時だけ本当の名前 (C の aware)
+const TRYUNKNOWN = RULEFIX.has("tryunknown");
+let lastTryAction = -99, potionsTried = 0;
 function sameEquipCategory(tval1: number, tval2: number): boolean {
   if (WEAPON_TVALS.has(tval1) && WEAPON_TVALS.has(tval2)) return true;
   if (ARMOR_TVALS.has(tval1) && ARMOR_TVALS.has(tval2)) return true;
@@ -2044,11 +2077,14 @@ const SELL_STORE_FOR_TVAL: Record<number, number[]> = {
   [TVAL.HELM]: [1], [TVAL.CROWN]: [1], [TVAL.CLOAK]: [1],
   [TVAL.LIGHT]: [0], [TVAL.RING]: [5], [TVAL.AMULET]: [5],
   [TVAL.ARROW]: [2], [TVAL.BOLT]: [2],
+  [TVAL.SCROLL]: [4], [TVAL.POTION]: [4], // 錬金術店 (RULEFIX=tryunknown で未知の巻物を渡す時だけ)
 };
 
 // 保持すべきアイテムかチェック (消耗品 or 現装備より良い装備)
 function shouldKeepItem(item: any, equipment: any[]): boolean {
   // 消耗品は常に保持
+  // RULEFIX=tryunknown: 未知の巻物は町で店に渡して識別する (読むと Deep Descent・召喚・呪いの危険。持っていても使わない)
+  if (TRYUNKNOWN && item.tval === TVAL.SCROLL && item.aware === false) return false;
   if ([TVAL.SCROLL, TVAL.POTION, TVAL.FOOD, TVAL.FLASK].includes(item.tval)) return true; // 油は投擲武器
   // 魔法書は保持
   if ([30, 31, 32, 33, 34].includes(item.tval)) return true;
@@ -2240,7 +2276,7 @@ async function buyEquipment(state: any) {
       const currentPower = currentSlotEquip ? itemPower(currentSlotEquip) : 0;
 
       // 耐性装備チェック: 足りない耐性を持つアイテムは強く優先
-      const hasNeededResist = (stockItem.resists ?? []).some((r: any) =>
+      const hasNeededResist = ((GEARID ? gearView(stockItem) : stockItem).resists ?? []).some((r: any) =>
         r.level > 0 && !currentPlayerResists.has(r.elem)
       );
 
@@ -4196,6 +4232,56 @@ async function playGame() {
         const hk = `${state.depth}:${prey.midx}:${prey.name}`;
         if (!breedHunted.has(hk)) { breedHunted.add(hk); addLesson(state.turn, state.depth, "繁殖狩り", `${prey.name}(dist${prey.distance})を先に倒す`); }
         state = await sendCommand({ type: CMD.WALK, direction: huntDir });
+        continue;
+      }
+    }
+
+    // === RULEFIX=tryunknown: 未知の薬を安全な時に飲む ===
+    if (TRYUNKNOWN && !ROLLOUT && actionCount - lastTryAction >= 5 && (hpPct < 0.75 || state.depth === 0)
+        && monsters.every((m: any) => m.distance > 5)) {
+      const pot = inv.find((i: any) => i.tval === TVAL.POTION && i.aware === false && i.qty > 0);
+      if (pot) {
+        lastTryAction = actionCount; potionsTried++;
+        addLesson(state.turn, state.depth, "未知の薬", `${pot.name}を試飲 (HP${Math.round(hpPct * 100)}%、#${potionsTried})`);
+        state = await sendCommand({ type: CMD.QUAFF, itemIndex: pot.slot });
+        continue;
+      }
+    }
+
+    // === RULEFIX=gearid: 安全な時 (5 マス以内に敵なし、HP 半分以上、10 行動に 1 回) に装備を見直す ===
+    if (GEARID && !ROLLOUT && actionCount - lastGearAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
+      const equip = p.equipment ?? [];
+      let pick: { item: any; why: string } | null = null;
+      for (const it of inv) {
+        if (!EQUIPPABLE_TVALS.has(it.tval) || it.tval === TVAL.DIGGING || it.tval === TVAL.LIGHT || gearCursed(it)) continue;
+        const cur = it.tval === TVAL.RING
+          ? (equip.filter((e: any) => e.tval === TVAL.RING).length >= 2 ? equip.find((e: any) => e.tval === TVAL.RING) : undefined)
+          : equip.find((e: any) => sameEquipCategory(e.tval, it.tval));
+        if (cur && it.tval === TVAL.BOW && launcherFamily(it.name ?? "") !== launcherFamily(cur.name ?? "")) continue;
+        const pw = itemPower(it), cpw = cur ? itemPower(cur) : -1;
+        if (cur ? pw > cpw : pw > 0) { pick = { item: it, why: `${pw} > ${cur ? cpw : "空き"}` }; break; } // 分かっている性質で良い方
+        const key = `${it.tval}:${it.sval}`;
+        if (gearUnknown(it) && (gearTries.get(key) ?? 0) < 3 && (cur ? pw >= cpw : pw >= 0)) { // 試着: 着ければ明らかな性質が分かる
+          gearTries.set(key, (gearTries.get(key) ?? 0) + 1);
+          pick = { item: it, why: `試着 {??} ${pw} >= ${cur ? cpw : "空き"}` };
+          break;
+        }
+      }
+      // 指輪/アミュレットで評価が負 (呪い、マイナス修正) → 外す (外せない呪いもあるので 2 回まで)
+      const bad = equip.find((e: any) => (e.tval === TVAL.RING || e.tval === TVAL.AMULET) && itemPower(e) < 0
+        && (gearTries.get(`off:${e.slot}:${e.name}`) ?? 0) < 2);
+      if (!pick && bad) {
+        const key = `off:${bad.slot}:${bad.name}`;
+        gearTries.set(key, (gearTries.get(key) ?? 0) + 1);
+        lastGearAction = actionCount;
+        addLesson(state.turn, state.depth, "装備識別", `${bad.desc ?? bad.name}: 評価 ${itemPower(bad)} なので外す`);
+        state = await sendCommand({ type: CMD.UNEQUIP, itemIndex: bad.slot });
+        continue;
+      }
+      if (pick) {
+        lastGearAction = actionCount;
+        addLesson(state.turn, state.depth, "装備識別", `${pick.item.desc ?? pick.item.name}: ${pick.why}`);
+        state = await sendCommand({ type: CMD.EQUIP, itemIndex: pick.item.slot });
         continue;
       }
     }

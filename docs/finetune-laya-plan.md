@@ -3132,6 +3132,40 @@ as an escape in the restock test.
 - `restock8`: the restock trip covers DL ≤ 8 (CL < 15), and a CL < 15 town visit after DL5 buys the early kit before
   equipment.
 
+
+### Unknown items and equipment (2026-10-28)
+How busho handled them before:
+- **No identification at all.** Consumables are used by exact name, and the C view sends the real name only once the
+  flavour is known, which in practice means bought. Session 20's base games picked up about 4.2 unknown potions and
+  3.4 unknown scrolls per game and never used or sold one (`shouldKeepItem` keeps all potions and scrolls). Only 6 of
+  308 games ever picked up a second copy of an unknown flavour, so selling one of two to learn it rarely applies;
+  `birth_no_selling` (on by default) also makes every sale pay 0 gold, though a sale still identifies everything.
+- **Equipment is scored on known numbers only.** The C view sent dice, AC and the known to-hit, to-dam and to-AC, but
+  no flags, modifiers, resists, brands, slays or curses, so half of `itemPower` never fired on the C engine. Weight and
+  blows were ignored (a Dagger was swapped for a Maul), and a Sling replaced a Short Bow bought with arrows.
+- **Store stock had no numbers at all**, so `buyEquipment` never saw an upgrade: 0 purchases in 873 town visits in
+  session 20.
+- 4.2 has no pseudo-ID. Items carry `{??}` while they have unknown runes and `{cursed}` once a curse is known; runes
+  are learned on wielding (obvious flags and all modifiers), in combat (to-hit, to-dam, to-AC), over time while worn
+  (six flags), when a property takes effect, or when the item is given to a store.
+
+**C view** (`main-http.c`, angband-c): each item also sends what the player knows, under k-prefixed keys so older
+players ignore it: `kflags`, `kmods`, `kres`, the numbers of known brands, slays and curses, and for melee weapons
+`kblows`, the blows per round the item screen shows (computed as `obj_known_blows` does). Store stock also sends its
+known dice, AC, bonuses and weight. A base-arm smoke on six session 20 starts played identically to session 20.
+
+**RULEFIX=gearid:** `itemPower` reads the known properties; weapons score on damage per round, blows × (dice +
+to-dam); a known curse scores −100; launchers aren't swapped across ammo types; at safe moments (no enemy within 5, HP
+at least half, every 10 actions) busho equips whatever scores best, tries on `{??}` items when they score at least as
+well (rings and amulets into empty slots when they score at least 0), and takes off rings and amulets that score below
+0. The pre-fight weapon swap is off under gearid: its own estimate ignores blows and known bonuses, and the two kept
+swapping a weapon back and forth. `buyEquipment` now sees store stock.
+
+**RULEFIX=tryunknown:** drink an unknown potion when no enemy is within 5 and HP is under 75% (or in town); give
+unknown scrolls to the Alchemist on town visits, since reading them early risks Deep Descent, summons and curses.
+
+Session 22 screens both, after session 21.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
