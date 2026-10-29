@@ -3343,6 +3343,19 @@ digskill; seed 4500000, bank 4550000, 22 hours with 15 for the screen. Canary (s
 20 of 20 identical. With seven arms the screen finishes about 30 starts an hour, so look 1 (150) comes near 10:30 and
 look 2 (300) near 15:30; the screen ends at 21:28 before look 3, and the confirmation runs until about 03:30 Friday.
 
+The screen ran about twice as fast as that estimate (about 64 pairs an hour), so look 3 comes near 17:00.
+
+| Variant | Look 1 (150, 08:31): PH(10), z | Look 2 (300, 10:52): PH(10), z (bound 2.55) | Deep death ratio |
+|---|---|---|---|
+| neutdrink | 0.927, 1.61 | 0.930, 2.09 | 0.91 |
+| deepkit | 0.873, 1.22 | 0.869, 1.96 | 0.88 |
+| worwait | 0.923, 0.83 | 0.916, 1.58 | 1.01 |
+| digskill | 0.863, 1.34 | 0.894, 1.55 | 0.72 |
+| packroom | 0.980, 0.21 | 0.962, 0.56 | 0.97 |
+| devices | 0.972, 0.17 | 0.987, 0.14 | 1.13 |
+
+All six are between the bounds at both looks (futility at look 2: z 0.07).
+
 ### Walking back beside stationary monsters: RULEFIX=stationmem (2026-10-29)
 Below CL12 busho doesn't melee jellies, molds and floating eyes: it steps away from them, and the explorer's BFS avoids
 their squares and the squares next to them (`setStationaryAvoid`). But the avoid sets are rebuilt every turn from the
@@ -3392,6 +3405,26 @@ known Cure potion. Smoke (`runs/smoke38`): base replays 10 of those deaths exact
 die much later (two of them starve), 2 die the same way at the same action and 1 dies earlier (a giant white louse at
 3,991 against an apprentice at 9,505). The blind cure fired in 2 games; most of the change is tryunknown waiting for a
 cure before drinking. Same caveat as above: selected deaths, so only a check that the code runs.
+
+### Fighting groups from a corridor: RULEFIX=corridor (2026-10-29)
+In session 23's base arm (304 games by look 2), 190 died: poison 29 (12 of them carrying Neutralize Poison, neutdrink's
+case), then orcs and kobolds: snagas 14, Lagduf 7, Mughash 6, Brodda 4, Bullroarer 4, large kobolds 4 and others, 48
+in all. 46 of those 48 had no Phase Door left and 40 no Cure potion, and 26 had two or more monsters adjacent in their
+last 15 actions (83 of all 190 deaths). busho walks up to approaching monsters (priority 5) and fights them where it
+meets them, usually in a room. It has a corridor step, but only at DL15 and deeper with three or more adjacent. In
+4.2.6 a group that sees the player tries to surround it (`get_move`); only GROUP_AI monsters (animal packs such as cave
+spiders, 16 races) try to lure a player out of a corridor, and orcs and kobolds don't have it.
+
+**corridor:** with two or more awake, moving monsters within 7 squares (the C view sends `asleep`) and none adjacent:
+in the open (3 or more passable neighbours), walk to the nearest corridor square (2 or fewer) within 6 steps by known
+floor that passes next to none of them, at most 8 steps a group; in a corridor, hold (4.2's hold, one turn) up to 6
+times. If nothing comes, the rule is off for 40 actions. Shooting, throwing and the flee rules come first.
+
+Smoke (`runs/smoke40`, new default base): base replays 10 orc and kobold group deaths exactly. With corridor 3 reach
+the 20,000-action cap, one dies much later (15,476 against 8,568), 3 are unchanged (the rule fired 0–1 times) and 3
+die earlier (one of them after the rule fired three times on DL2 and never on DL4, where Mughash killed it: a different
+game, not the rule at fault). It fires rarely: 0 to 55 steps and 0 to 20 holds a game. A session 24 candidate with
+stationmem and blindsafe.
 
 ## C Angband engine: spike (2026-10-15)
 

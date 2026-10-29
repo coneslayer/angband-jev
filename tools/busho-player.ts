@@ -595,6 +595,13 @@ const TRYUNKNOWN = RULEFIX.has("tryunknown");
 // tryunknown の Blindness は 75+4d25 ターン)。tryunknown は治す薬を持っている時だけ未知の薬を飲む
 const BLINDSAFE = RULEFIX.has("blindsafe");
 let lastTryAction = -99, potionsTried = 0;
+// RULEFIX=corridor: 起きている動く敵が 2 体以上 7 マス以内に見え、まだ隣にいない時、開けた場所 (通れる隣接 3 以上) なら
+// 6 歩以内の通路 (通れる隣接 2 以下、敵の隣でない) へ下がり、通路では最大 CORRIDOR_HOLD 回その場で待つ (近づいて部屋で囲まれない)。
+// 待っても来なければ CORRIDOR_OFF 行動は使わない (4.2 の GROUP_AI の群れは通路の外へ誘い出そうとして来ない)。
+// session 23 の base の死 190 件中 83 件で、最後の 15 行動に 2 体以上が隣接していた (オーク・コボルドの死では 48 件中 26 件)
+const CORRIDOR = RULEFIX.has("corridor");
+const CORRIDOR_HOLD = 6, CORRIDOR_STEPS = 8, CORRIDOR_OFF = 40;
+let corridorHold = 0, corridorSteps = 0, corridorOffUntil = -1, corridorMoves = 0, corridorWaits = 0;
 // RULEFIX=worwait: 町で Word of Recall が発動待ちの間は階段を降りずに待つ (4.2 ではダンジョンにいる時に発動すると町へ引き戻される。
 // session 22 の既定では町で読んだ 329 回のうち 269 回が DL1 へ降りて町へ戻され、巻物 (125G) が無駄になり DL1 から歩いていた)
 const WORWAIT = RULEFIX.has("worwait");
@@ -4558,6 +4565,61 @@ async function playGame() {
       } // end pack full else
     }
 
+    // === RULEFIX=corridor: 動く敵の群れが近い → 開けた場所なら通路へ下がり、通路で待つ ===
+    if (CORRIDOR && state.depth >= 1 && !retreatMode && stuckCount < 5 && noProgressCount < 50) {
+      const group = monsters.filter((m: any) => m.distance <= 7 && m.asleep !== true && !STATIONARY_RE.test(m.name ?? ""));
+      if (group.length < 2) { corridorHold = 0; corridorSteps = 0; }
+      else if (actionCount >= corridorOffUntil) {
+        const known = new Set<string>();
+        for (const t of tiles) if (!t.unknown && PASSABLE_FEATS.has(t.feat)) known.add(`${t.x},${t.y}`);
+        const openAt = (x: number, y: number) => {
+          let n = 0;
+          for (const d of ALL_DIRS) { const [dx, dy] = dirOffsets[d]!; if (known.has(`${x + dx},${y + dy}`)) n++; }
+          return n;
+        };
+        const nearGroup = (x: number, y: number) => group.some((m: any) => Math.max(Math.abs(m.x - x), Math.abs(m.y - y)) <= 1);
+        if (openAt(px, py) <= 2) {
+          if (corridorHold < CORRIDOR_HOLD) {
+            corridorHold++; corridorWaits++;
+            state = await sendCommand({ type: CMD.SEARCH }); // C: CMD_HOLD
+            continue;
+          }
+          corridorOffUntil = actionCount + CORRIDOR_OFF; corridorHold = 0; corridorSteps = 0;
+        } else if (corridorSteps < CORRIDOR_STEPS) {
+          // BFS (既知の床のみ、敵の隣と動かない敵の近くを通らない) で最寄りの通路マスへ
+          let dir: number | null = null;
+          const seen = new Set<string>([`${px},${py}`]);
+          let frontier: { x: number; y: number; first: number }[] = [{ x: px, y: py, first: -1 }];
+          for (let step = 1; step <= 6 && dir === null && frontier.length; step++) {
+            const next: typeof frontier = [];
+            for (const c of frontier) {
+              for (const d of ALL_DIRS) {
+                const [dx, dy] = dirOffsets[d]!;
+                const nx = c.x + dx, ny = c.y + dy, key = `${nx},${ny}`;
+                if (seen.has(key) || !known.has(key) || avoidHard.has(key) || avoidSoft.has(key) || nearGroup(nx, ny)) continue;
+                if (!canMoveDiag(known, c.x, c.y, dx, dy)) continue;
+                seen.add(key);
+                const first = c.first === -1 ? d : c.first;
+                if (openAt(nx, ny) <= 2) { dir = first; break; }
+                next.push({ x: nx, y: ny, first });
+              }
+              if (dir !== null) break;
+            }
+            frontier = next;
+          }
+          if (dir !== null) {
+            corridorSteps++; corridorMoves++;
+            if (corridorMoves <= 3 || corridorMoves % 20 === 0) addLesson(state.turn, state.depth, "回廊待機",
+              `${group.length}体 (${group.slice(0, 3).map((m: any) => m.name).join(", ")}) が接近。開けた場所 (${openAt(px, py)}隣接) から通路へ (#${corridorMoves})`);
+            const beforeX = px, beforeY = py;
+            state = await sendCommand({ type: CMD.WALK, direction: dir });
+            if (state.player.x === beforeX && state.player.y === beforeY) corridorSteps = CORRIDOR_STEPS;
+            continue;
+          }
+        }
+      }
+    }
+
     // === 優先度5: 接近中の敵への対応 (BFS到達可能 + 安全な敵のみ) ===
     // noProgressCount高い時はスキップ (脱出を優先)
     // 退避モード中はスキップ (HP回復を優先、敵に近づかない)
@@ -5134,6 +5196,7 @@ async function playGame() {
     return result;
   }
   console.log(`  序盤キット: 射撃${shotsFired}回 投擲${throwsMade}回(命中${throwHits}/撃破${throwKills}) 逃走行動${earlyFleeActions}回(階段${earlyFleeStairs}, Phase${phasesRead})`);
+  if (CORRIDOR) console.log(`  回廊: 通路へ${corridorMoves}歩, 通路で待機${corridorWaits}回`);
 
   // 最終フレーム + 録画保存
   recordFrame(finalState, finalState.dead ? `死亡: ${deathCause}` : "生存");
