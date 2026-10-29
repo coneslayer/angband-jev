@@ -3278,6 +3278,11 @@ pairs (below the look-3 bound); tryunknown 0.670, z 3.96. tryunknown's result do
 is borderline without them. Dropping starts by an outcome isn't a clean test either way, so this is a sensitivity
 check, not a verdict. The confirmation (base against base,gearid,tryunknown, seed 4400000) began at 03:15.
 
+Confirmation (03:15 – 05:23, seed 4400000, bank 4450000): adopted at look 2. PH(10) 0.661, z 3.14 against the
+look-2 bound 2.55 (look 1: 0.540, z 3.22 against 3.60), deep death ratio 0.75, on 301 pairs. Deaths 190 against
+177, mean max depth 5.89 against 6.22, poison deaths 31 against 18; starvation 8 against 13, which digskill targets.
+gearid and tryunknown are now in the default RULEFIX.
+
 ### Poison deaths with the cure in the pack: RULEFIX=neutdrink (2026-10-29)
 Poison killed 70 of base's 450 dead characters in session 22's screen (15.6%) and 62 of tryunknown's 465;
 starvation killed 30 and 21. In 4.2.6 poison costs 1 HP a turn and stops HP regeneration (`player-util.c`,
