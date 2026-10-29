@@ -61,7 +61,24 @@ function canDigFeat(feat: number): boolean {
 }
 /** この地形を掘る価値があるか (掘削具なしだと扉/瓦礫のみ) */
 function digWorthwhile(feat: number): boolean {
-  return SOFT_DIG_FEATS.has(feat) || (DIGGABLE_FEATS.has(feat) && canDigFeat(feat));
+  return !digFutile(feat) && (SOFT_DIG_FEATS.has(feat) || (DIGGABLE_FEATS.has(feat) && canDigFeat(feat)));
+}
+const futileDig = new Set<number>(); // RULEFIX=digskill (説明は DIGSKILL の宣言に)
+let futileDigSkill = -1;
+function digFutile(feat: number): boolean { return DIGSKILL && futileDig.has(feat); }
+const DIR_DXY: Record<number, [number, number]> = { 1: [-1, 1], 2: [0, 1], 3: [1, 1], 4: [-1, 0], 6: [1, 0], 7: [-1, -1], 8: [0, -1], 9: [1, -1] };
+function tunnelTarget(s: any, dir: number): { x: number; y: number; feat: number } | null {
+  const [dx, dy] = DIR_DXY[dir] ?? [0, 0];
+  const x = (s?.player?.x ?? 0) + dx, y = (s?.player?.y ?? 0) + dy;
+  const t = (s?.map?.tiles ?? []).find((t: any) => t.x === x && t.y === y);
+  return t && DIGGABLE_FEATS.has(t.feat) ? { x, y, feat: t.feat } : null;
+}
+function noteTunnel(at: { x: number; y: number; feat: number }, turnBefore: number | undefined, s: any): void {
+  if (typeof turnBefore !== "number" || (s?.turn ?? 0) - turnBefore < 400 || futileDig.has(at.feat)) return;
+  const t = (s?.map?.tiles ?? []).find((t: any) => t.x === at.x && t.y === at.y);
+  if (t?.feat !== at.feat) return;
+  futileDig.add(at.feat); futileDigSkill = diggingSkill;
+  console.log(`  [DIGSKILL] 地形${at.feat}を${(s?.turn ?? 0) - turnBefore}ゲームターン掘って崩れず。掘削能力${diggingSkill}が上がるまで掘らない`);
 }
 const DIGGABLE_FEATS = new Set([FEAT.CLOSED_DOOR, FEAT.SECRET, FEAT.RUBBLE, FEAT.MAGMA, FEAT.QUARTZ, FEAT.MAGMA_K, FEAT.QUARTZ_K, FEAT.GRANITE]);
 
@@ -586,6 +603,10 @@ function poisonCureSlot(inv: any[], hpPct: number): number | null {
   const neut = find("Neutralize Poison"), ccw = find("Cure Critical Wounds");
   return hpPct < 0.35 ? ccw ?? neut : neut ?? ccw;
 }
+// RULEFIX=digskill: 99 回の自動繰り返しで掘れなかった岩 (同じ地形のまま 400 ゲームターン以上) は、掘削能力が上がるまで同じ種類を掘らない。
+// 停滞脱出と孤立脱出は掘れる向きだけを掘る (session 22 の tryunknown: 99 ターン掘って終わる掘削が 705 局中 212 局で 5,197 回、全ゲームターンの 6%。
+// 餓死 21 件のうち 19 件で 12-223 回)。C の digging は手に持った武器での値で、4.2 が自動で使う予備の掘削具を含まないので、表ではなく失敗から学ぶ
+const DIGSKILL = RULEFIX.has("digskill");
 // RULEFIX=devices: 魔法の道具 (杖・魔法棒・ロッド)。未知のものは使って識別する (魔法棒/ロッドは隣にいない見えている敵へ、
 // 杖は敵が見えず HP 75% 以上の時: 4.2 では回復・治療・感知は満タンでも識別される)。分かったものは、攻撃の魔法棒/ロッドを
 // 危険な敵へ近接の前に (油より先に)、回復の杖を HP 半分未満で、Teleportation の杖を緊急時に使う。使い道のないものは落とす
@@ -728,6 +749,7 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     cmd = { type: CMD.REST };
   }
   const escapeCmd = LEAVE && isEscapeCommand(cmd); // RULEFIX=leave: この階の逃走回数に数える (時間が進んだら)
+  const digAt = DIGSKILL && cmd.type === CMD.TUNNEL ? tunnelTarget(lastKnownState, cmd.direction as number) : null;
   if (cmdDebug || ++commandsSent >= CMD_DEBUG_AFTER) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
   dangerLogger?.noteCommand(cmd.type as number);
   for (let retry = 0; retry < 5; retry++) {
@@ -749,6 +771,7 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
       return s;
     }
     lastKnownState = adaptPlayerView(data);
+    if (digAt) noteTunnel(digAt, turnBefore, lastKnownState);
     if (typeof turnBefore === "number" && lastKnownState?.turn === turnBefore) {
       noTimeStreak++;
       if (cmd.type === CMD.READ || cmd.type === CMD.CAST) noTimeUntil[cmd.type as number] = sendSeq + 20;
@@ -1922,9 +1945,9 @@ function dijkstraNextStepWithDigging(
   // コスト: 通行可能=1, ドア=2, 瓦礫=3, マグマ/石英=5, 花崗岩=10, 秘密ドア=2, 永久壁=不可
   function moveCost(feat: number): number {
     if (PASSABLE_FEATS.has(feat)) return 1;
-    if (feat === FEAT.CLOSED_DOOR || feat === FEAT.SECRET) return 2;
-    if (feat === FEAT.RUBBLE) return 3;
-    if (!canDigFeat(feat)) return 9999; // 掘削具なし or 技能不足: 岩盤は掘れない
+    if (feat === FEAT.CLOSED_DOOR || feat === FEAT.SECRET) return digFutile(feat) ? 9999 : 2;
+    if (feat === FEAT.RUBBLE) return digFutile(feat) ? 9999 : 3;
+    if (!canDigFeat(feat) || digFutile(feat)) return 9999; // 掘削具なし or 技能不足: 岩盤は掘れない (digskill: 掘れなかった種類も)
     if (feat === FEAT.MAGMA || feat === FEAT.MAGMA_K) return 5;
     if (feat === FEAT.QUARTZ || feat === FEAT.QUARTZ_K) return 5;
     if (feat === FEAT.GRANITE) return 10;
@@ -2460,6 +2483,7 @@ async function playGame() {
     const inv = p.inventory;
     canDigHard = playerHasDigger(p);
     diggingSkill = p.digging ?? 0;
+    if (DIGSKILL && futileDig.size > 0 && diggingSkill > futileDigSkill) futileDig.clear();
     const hpPct = p.hp / p.maxHp;
     {
       // 見えない攻撃者の検知 (メッセージ窓は直近20件で重複はまとめられるので、HP 減少と組み合わせる)
@@ -2485,6 +2509,15 @@ async function playGame() {
     const dirOffsets: Record<number, [number, number]> = {
       1: [-1, 1], 2: [0, 1], 3: [1, 1], 4: [-1, 0], 6: [1, 0],
       7: [-1, -1], 8: [0, -1], 9: [1, -1],
+    };
+    // RULEFIX=digskill: 孤立脱出の掘削は掘れる向きだけ。なければ歩ける向きへ 1 歩 (別の壁を試す)、それもなければ 1 ターン休む
+    const digSkillStep = async (): Promise<any> => {
+      const at = (d: number) => { const [ddx, ddy] = dirOffsets[d] ?? [0, 0]; return tiles.find((t: any) => t.x === px + ddx && t.y === py + ddy); };
+      const dig = ALL_DIRS.filter((d) => { const t = at(d); return !!t && digWorthwhile(t.feat); });
+      if (dig.length) return sendCommand({ type: CMD.TUNNEL, direction: dig[Math.floor(rand() * dig.length)] });
+      const walk = ALL_DIRS.filter((d) => { const t = at(d); return !!t && PASSABLE_FEATS.has(t.feat); });
+      if (walk.length) return sendCommand({ type: CMD.WALK, direction: walk[Math.floor(rand() * walk.length)] });
+      return sendCommand({ type: CMD.REST, turns: 1 } as any);
     };
     setStationaryAvoid(monsters, p.level);
     // 動かない敵から離れる1歩 (敵のいない、回避マスでない方向)
@@ -2886,7 +2919,13 @@ async function playGame() {
       // noProgressCountをインデックスとして使い、8方向を順番に試す
       const tryDirIndex = (noProgressCount - 100) % ALL_DIRS.length;
       const visStair = findTile(tiles, FEAT.DOWN_STAIR) ?? findTile(tiles, FEAT.UP_STAIR);
-      if (!canDigHard) {
+      // RULEFIX=digskill: 隣に掘れる岩がなければ、掘削具なしと同じ脱出 (スクロール、WoR、歩ける向き、扉/瓦礫)
+      const hardDigOk = (d: number): boolean => {
+        const [ddx, ddy] = dirOffsets[d] ?? [0, 0];
+        const tt = tiles.find((t: any) => t.x === px + ddx && t.y === py + ddy);
+        return !!tt && DIGGABLE_FEATS.has(tt.feat) && !SOFT_DIG_FEATS.has(tt.feat) && digWorthwhile(tt.feat);
+      };
+      if (!canDigHard || (DIGSKILL && !ALL_DIRS.some(hardDigOk))) {
         // 掘削具なし: 花崗岩を掘っても無駄。スクロール > 歩ける方向 > 扉/瓦礫 の順で脱出を試みる
         const teleSlot0 = findTeleportScroll(inv);
         const phaseSlot0 = findPhaseScroll(inv);
@@ -2915,7 +2954,7 @@ async function playGame() {
           if (!tt) continue;
           if (PASSABLE_FEATS.has(tt.feat) && !visited.has(`${tt.x},${tt.y}`)) {
             state = await sendCommand({ type: CMD.WALK, direction: d }); moved = true;
-          } else if (SOFT_DIG_FEATS.has(tt.feat)) {
+          } else if (SOFT_DIG_FEATS.has(tt.feat) && !digFutile(tt.feat)) {
             state = await sendCommand({ type: CMD.TUNNEL, direction: d }); moved = true;
           }
         }
@@ -2935,6 +2974,14 @@ async function playGame() {
       } else {
         // その後は8方向をローテーション
         tunnelDir = ALL_DIRS[tryDirIndex]!;
+      }
+      if (DIGSKILL) { // 掘れない向きなら、回転順で最初の掘れる岩へ
+        const [odx, ody] = dirOffsets[tunnelDir] ?? [0, 0];
+        const ot = tiles.find((t: any) => t.x === px + odx && t.y === py + ody);
+        if (!(ot && (PASSABLE_FEATS.has(ot.feat) || digWorthwhile(ot.feat)))) {
+          const alt = ALL_DIRS.map((_, i) => ALL_DIRS[(((tryDirIndex + i) % ALL_DIRS.length) + ALL_DIRS.length) % ALL_DIRS.length]!).find(hardDigOk);
+          if (alt !== undefined) tunnelDir = alt;
+        }
       }
       const [tdx, tdy] = dirOffsets[tunnelDir] ?? [0, 0];
       const targetTile = tiles.find((t: any) => t.x === px + tdx && t.y === py + tdy);
@@ -4928,6 +4975,7 @@ async function playGame() {
             }
           }
           // 階段到達不能 → 壁を掘る
+          if (DIGSKILL) { state = await digSkillStep(); continue; }
           const randomDir = ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)];
           state = await sendCommand({ type: CMD.TUNNEL, direction: randomDir });
           continue;
@@ -4954,6 +5002,7 @@ async function playGame() {
           continue;
         }
         // スクロール切れ → 壁を掘って脱出
+        if (DIGSKILL) { state = await digSkillStep(); continue; }
         const randomDir = ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)];
         state = await sendCommand({ type: CMD.TUNNEL, direction: randomDir });
       } else {

@@ -3299,9 +3299,26 @@ reaches the 17,000-action cap alive, a Ranger lives 9,591 actions instead of 3,9
 to a yellow jelly and a spotted mushroom patch. Smoke 27 (`runs/smoke27`): devices, worwait, deepkit and packroom on
 the base,gearid,tryunknown default, four starts, 6,000 actions: no errors and no failed purchases.
 
-Starvation deaths are a different fault: the character runs out of food on a level and spends hundreds to thousands of
-actions walking and tunnelling there (no Word of Recall, no stairs found), so it needs a navigation fix, not a variant
-of the shopping list. Left for later.
+### Starvation from futile tunnelling: RULEFIX=digskill (2026-10-29)
+Most starvation deaths are tunnelling, not shopping. When the explorer stalls, busho's escapes (the 停滞脱出 branch
+and the two isolation escapes) tunnel in rotating or random directions, without the digging-skill check that the
+other tunnel sites use (`digWorthwhile`). In 4.2.6 a dig's chance per turn is (skill − 10) × 4 / 1600 for magma,
+(skill − 20) × 2 for quartz, (skill − 40) for granite and (4 × skill − 119) / 3 for a closed door, zero when negative,
+and the tunnel command repeats itself up to 99 times, so each futile attempt costs about 100 turns of food and light.
+In tryunknown's 705 games, 212 had at least one tunnel of 99 turns or more, 5,197 in all, 6.1% of all game turns;
+19 of the 21 starvation deaths had 12 to 223 of them (1,200 to 22,000 turns).
+
+**digskill:** the escapes dig only rock the reported skill can dig (`canDigFeat`), or rubble and doors; with no such
+rock next to the character, the stalled explorer takes the no-digger path (Phase Door or Teleportation every 20
+stalls, Word of Recall at 140, walk to unvisited squares) and the isolation escapes step to a random open square. The
+C view's `digging` is the skill with the wielded weapon, and 4.2 digs with the best digger in the pack ("your swap
+digger"), so the check can refuse digs that would succeed. As a backstop, a tunnel that takes 400 or more game turns
+and leaves the square unchanged marks that terrain as futile, for every tunnel site, until the reported skill rises.
+
+Smoke (`runs/smoke29`, base `...,tryunknown`): base replays four starvation deaths exactly, with 410 to 2,903 tunnels
+each, 193 to 263 of them 40 or more turns long. With digskill those games tunnel 0 to 10 times (one long tunnel,
+which broke through), none starves: three reach the 20,000-action cap (DL7, DL8, DL4) and one dies on DL7 to
+Mughash, where base starved on DL6. The futility backstop never fired in these games.
 
 ## C Angband engine: spike (2026-10-15)
 
