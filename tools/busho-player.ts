@@ -11,7 +11,7 @@ import {
 } from "./decision/index.js";
 import type { DecisionType, DecisionRequest } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
-import { adaptPlayerView } from "./honest-view.js";
+import { adaptPlayerView, estimatedMaxHp } from "./honest-view.js";
 import { DangerLogger, DANGER_RECORD_VERSION } from "./danger/record.js";
 import { DangerModel } from "./danger/model.js";
 
@@ -308,6 +308,7 @@ const STATIONARY_RE = /jelly|mold|mushroom|patch|floating eye|lichen|shrieker|sp
 // 接触で痛い動かない敵 (ゼリー/カビ/浮遊眼)。キノコ (HP1-2) は殴って倒す方が安全
 function hurtsOnContact(m: any): boolean {
   const name = m.name ?? "";
+  if (STATIONMEM && STATIONMEM_EYE_RE.test(name)) return true;
   if (!STATIONARY_RE.test(name)) return false;
   return /floating eye/i.test(name) || (m.maxhp ?? m.hp ?? 99) > 5;
 }
@@ -436,6 +437,12 @@ function meleeTooCostly(m: any, p: any): boolean {
 let restockTrip = false; // 浅層で消耗品切れ → 上り階段で町へ (着いたら補充して解除)
 let upRerolls = 0, upRerollDepth = -1; // RULEFIX=upnav: 補給帰還中、この深さで階を振り直した回数
 
+// RULEFIX=stationmem: 回避マスに、今は見えないがこの階で見た動かない接触の敵 (C の rememberedMonsters) も入れる。見えている敵だけだと、
+// 離れて視界から消えた途端に BFS がまた隣を通る (session 22 の tryunknown: 隣 → 見えない → 6 手以内に同じ敵の隣、705 局中 402 局で
+// 26,618 回。浮遊眼 9,420、blue jelly 6,924。rot jelly は触れるたびに食料を食べる)。4.2 で動かない目 (bloodshot eye の凝視で盲目など) も接触の敵に
+const STATIONMEM = RULEFIX.has("stationmem");
+const STATIONMEM_EYE_RE = /(radiation|disenchanter|bloodshot|evil) eye/i;
+let blindSteps = 0;
 // CL<12 の BFS 回避マス (毎ターン更新): 上記の敵のマス (hard: 歩くと攻撃になる) とその隣 (soft: 接触攻撃を受ける)
 let avoidHard = new Set<string>();
 let avoidSoft = new Set<string>();
@@ -2520,7 +2527,8 @@ async function playGame() {
       if (walk.length) return sendCommand({ type: CMD.WALK, direction: walk[Math.floor(rand() * walk.length)] });
       return sendCommand({ type: CMD.REST, turns: 1 } as any);
     };
-    setStationaryAvoid(monsters, p.level);
+    setStationaryAvoid(STATIONMEM ? monsters.concat((state.rememberedMonsters ?? []).map((m: any) =>
+      ({ ...m, maxhp: estimatedMaxHp(m.level ?? state.depth, !!m.isUnique) }))) : monsters, p.level);
     // 動かない敵から離れる1歩 (敵のいない、回避マスでない方向)
     const stepAwayFromStationary = (): number | null => {
       for (const d of ALL_DIRS) {
@@ -3181,6 +3189,7 @@ async function playGame() {
       if (uniqueNear.length > 0) threatInfo += ` UNIQ:${uniqueNear.map((m: any) => m.name).join(",")}`;
       if (breathNear.length > 0) threatInfo += ` BR:${breathNear.length}`;
       if (summonNear.length > 0) threatInfo += ` SUM:${summonNear.length}`;
+      if (STATIONMEM) { const rm = (state.rememberedMonsters ?? []).filter((m: any) => hurtsOnContact(m)); if (rm.length) threatInfo += ` MEM:${rm.map((m: any) => `${m.name}@${m.x},${m.y}`).join(",")}`; }
       console.log(`  [状態] A${actionCount} T${state.turn} | DL${state.depth} CL${p.level} | HP:${p.hp}/${p.maxHp}${spInfo} | pos:(${px},${py}) | K:${totalKills}(L${killsThisLevel}) | P${passableTiles}/U${unvisited}(${explorationPct}%) | mon:${monsters.length} food:${p.timed.food}${digInfo}${worInfo}${resInfo}${threatInfo}`);
     }
 
@@ -3218,6 +3227,18 @@ async function playGame() {
         const rdir = ALL_DIRS[Math.floor(rand() * ALL_DIRS.length)];
         state = await sendCommand({ type: CMD.WALK, direction: rdir });
         continue;
+      }
+      // RULEFIX=stationmem: 盲目で、覚えている動かない接触の敵が隣 → 休まず 1 歩離れる (bloodshot eye の凝視は盲目 + 2d6 で、
+      // 見えないまま隣で休み続けて死んでいた。CLW は盲目を治すが次の凝視でまた盲目)
+      if (STATIONMEM && isBlind && !isParalyzed && !isConfused
+          && monsters.concat(state.rememberedMonsters ?? []).some((m: any) => m.distance <= 1 && hurtsOnContact(m))) {
+        const away = stepAwayFromStationary();
+        if (away !== null) {
+          blindSteps++;
+          if (blindSteps <= 3 || blindSteps % 20 === 0) addLesson(state.turn, state.depth, "状態異常", `盲目で動かない敵の隣。休まず離れる (#${blindSteps})`);
+          state = await sendCommand({ type: CMD.WALK, direction: away });
+          continue;
+        }
       }
       // 敵がいない or 盲目/麻痺 → RESTで回復待ち
       if (actionCount % 50 === 0) {

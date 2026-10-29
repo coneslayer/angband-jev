@@ -3337,6 +3337,51 @@ Replays of 8 of those deaths (`runs/smoke32`): base repeats all 8 exactly; with 
 cap, 2 die much later (giant black and white lice, at 14,136 and 12,318 actions against 12,150 and 5,564) and one dies
 the same way at the same action (its tunnels come from another rule).
 
+### Session 23 launched (2026-10-29 05:28)
+Base: the new default (`...,clgate1,gearid,tryunknown`). Variants: devices, worwait, deepkit, packroom, neutdrink,
+digskill; seed 4500000, bank 4550000, 22 hours with 15 for the screen. Canary (session 22's confirmQ combo, 20 starts):
+20 of 20 identical. With seven arms the screen finishes about 30 starts an hour, so look 1 (150) comes near 10:30 and
+look 2 (300) near 15:30; the screen ends at 21:28 before look 3, and the confirmation runs until about 03:30 Friday.
+
+### Walking back beside stationary monsters: RULEFIX=stationmem (2026-10-29)
+Below CL12 busho doesn't melee jellies, molds and floating eyes: it steps away from them, and the explorer's BFS avoids
+their squares and the squares next to them (`setStationaryAvoid`). But the avoid sets are rebuilt every turn from the
+monsters in view, and a jelly one step out of the light drops out of view. The next BFS then walks straight back
+beside it, the touch lands, the step-away rule moves off, and the cycle repeats. Counting a re-approach as adjacent,
+then out of view, then adjacent to the same monster within 6 actions on the same level: 402 of tryunknown's 705
+session-22 games had at least one, 26,618 in all (floating eye 9,420, blue jelly 6,924, yellow mold 3,176), and 40 of
+its 469 deaths had one in the last 60 actions; in the confirmation's new-default arm 167 of 310 games, 10 of 183
+deaths. Two confirmation deaths show the cost: a Warrior lost all 21 rations on DL5 in 75 actions to a rot jelly
+(4.2.6: touch to eat food), walking back beside it 23 times, and starved; poison deaths beside yellow jellies (touch
+to poison) are another.
+
+The C view already reports monsters seen on this level and not in view now (`visible:false`, `turnsAgo`; forgotten
+when the monster dies), and `honest-view.ts` passes them on as `state.rememberedMonsters`; busho never read them.
+**stationmem** adds the remembered contact monsters to the avoid sets (their HP estimated from level as for visible
+ones, so mushroom patches stay out). It also counts the 4.2.6 eyes that never move (bloodshot, disenchanter,
+radiation, evil) as contact monsters, and when blind it steps away from a remembered contact monster next to it
+instead of resting: a bloodshot eye's gaze blinds and does 2d6, and characters rested blind beside one until they died
+(Cure Light Wounds cures blindness in 4.2, but the next gaze blinds again).
+
+Smoke (`runs/smoke34`, new default base): base replays 8 deaths that had a re-approach in their last 60 actions
+exactly (4 poison, blue jelly, yellow mold, floating eye, the rot-jelly starvation). With stationmem, 5 reach the
+20,000-action cap and 3 die much later (Grishnákh at 17,904, Mughash at 19,373, a snaga at 16,191); re-approaches fall
+from 526 to 207, 200 of them in one game where the only corridor passes the monsters. Two of the capped games spent
+10,000 actions stalled on DL4 tunnelling granite; the remembered-monster log showed none near, so that is the stall
+digskill fixes, and with digskill+stationmem (`runs/smoke36`) both go on to DL7: 5 of 8 reach the cap and 3 die
+later (snaga, giant fruit fly, bloodshot eye). digskill alone changes none of these 8 deaths but one.
+
+The bloodshot-eye death there came before the blind step was added; replaying it with the step (`runs/smoke37`), the
+blinded Ranger steps once out of reach and rests to full instead of dying, and reaches the cap. On 8 other
+bloodshot-eye starts (most from session 22's screen, whose base differs, so base doesn't replay them) 5 of 8 die in
+each arm, 3 earlier with stationmem and 3 later: smokes on selected deaths only check that the code runs, since any
+change to a dying game's path tends to look better. The A/B decides.
+
+Not addressed: 14 of the confirmation's 183 new-default deaths ended resting blind (4 in base); 8 of those began right
+after drinking, with no cure left, consistent with tryunknown drinking an unknown Potion of Blindness (75+4d25 turns)
+at the HP below 75% where it hopes for a healing potion. A fix would avoid that drink when no Cure Light Wounds is
+carried, or take the stairs when hit while blind.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
