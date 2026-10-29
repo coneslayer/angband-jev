@@ -3233,8 +3233,8 @@ the C engine; they're the TS engine's shopping code meeting 4.2.6's stores and t
   game that looped had 23 slots: five unknown potion kinds, two unknown scroll kinds, three unknown wands, three
   unknown staves, three torch stacks. Phase Door then can't be bought (a new kind needs a slot), the shallow restock
   rule sends the character back to town with 0 Phase Door, and the loop repeats until the 20,000-action cap. 9 of
-  about 330 gearid games looped like this; in 4 of them the base game on the same start died, so the loop flatters
-  gearid's survival somewhat. Failed purchases are now logged (`[購入失敗]`, with the pack contents).
+  about 330 gearid games looped like this; in 4 of them the base game on the same start died. The base arm loops
+  too (see session 22's results below). Failed purchases are now logged (`[購入失敗]`, with the pack contents).
 
 Three variants, each off by default:
 - **worwait:** in town with recall active, hold (or rest 5 turns when nothing is in view) instead of descending, until
@@ -3250,6 +3250,58 @@ lands on the character's max depth (DL0 → DL5 where base went DL0 → DL1 → 
 Phase Door 10, Cure Light Wounds 9 and Cure Serious Wounds 2, where base bought Phase Door 20 and a recall scroll and
 left with one cure. On the looping gearid start, gearid+packroom gave away 3 unknown wands and staves, 2 unknown
 potions and scrolls, made no failed purchase in 13,500 actions and reached DL8 (gearid alone looped from A12,800).
+
+### Session 22: gearid and tryunknown adopted (2026-10-28 21:57 – 2026-10-29 03:13)
+Canary passed (session 21's screenQ base, 20 of 20). Both variants crossed the efficacy bound at look 3:
+
+| Variant | Look 1 (150) | Look 2 (300) | Look 3 (700): PH(10), z (bound 1.67) | Deep death ratio |
+|---|---|---|---|---|
+| gearid | 0.897, z 0.93 | 0.899, z 1.19 | 0.888, z 1.97 | 0.87 |
+| tryunknown | 0.775, z 1.33 | 0.743, z 2.14 | 0.665, z 3.85 | 0.83 |
+
+On the 705 common starts (564 fresh, 141 from the bank):
+
+| Arm | Fresh: died | Fresh: mean max depth | Bank: died | Bank: mean max depth |
+|---|---|---|---|---|
+| base | 64% | 5.51 | 65% | 7.82 |
+| gearid | 57% | 5.49 | 66% | 7.87 |
+| tryunknown | 66% | 6.01 | 70% | 8.15 |
+
+gearid survives more at the same depth; tryunknown goes deeper and faster (it drinks the potions it finds, so it
+carries more of the ones it knows: Cure Light Wounds 7.7 against 7.0, Phase Door 4.1 against 3.5, and Neutralize
+Poison, which base never identifies).
+
+Town loops. Counting a game as looping when it reached the 20,000-action cap with 80% or more of its last 5,000
+actions on DL0–1, 35 base, 41 gearid and 17 tryunknown starts loop (tryunknown empties its pack of unknown potions,
+which fits the full-pack cause). Dropping the 69 starts where any arm loops: gearid PH(10) 0.910, z 1.49 on 636
+pairs (below the look-3 bound); tryunknown 0.670, z 3.96. tryunknown's result doesn't depend on the loops; gearid's
+is borderline without them. Dropping starts by an outcome isn't a clean test either way, so this is a sensitivity
+check, not a verdict. The confirmation (base against base,gearid,tryunknown, seed 4400000) began at 03:15.
+
+### Poison deaths with the cure in the pack: RULEFIX=neutdrink (2026-10-29)
+Poison killed 70 of base's 450 dead characters in session 22's screen (15.6%) and 62 of tryunknown's 465;
+starvation killed 30 and 21. In 4.2.6 poison costs 1 HP a turn and stops HP regeneration (`player-util.c`,
+`game-world.c`), and only Cure Critical Wounds, Neutralize Poison and a few foods cure it; Cure Light and Cure
+Serious Wounds don't. Of tryunknown's 63 poison deaths, 57 had no monster in view at death: the character rested
+or walked while poison took its HP, after drinking every Cure Light Wounds. 19 had Neutralize Poison or Cure Critical
+Wounds when the poisoning began, and the rules never drink them unless neutpois or neutshop is on (one Warrior died
+on DL8 with 6 Neutralize Poison). With tryunknown, found potions are identified by drinking, so characters now carry
+Neutralize Poison (1.38 on average in the dungeon) without buying any.
+
+neutpois and neutshop were rejected in sessions 15 and 16 because their shopping cost trips and depth, not because
+of the drinking. **neutdrink** is the drinking alone: poisoned below 50% HP with no monster adjacent (lowheal's
+existing branch), drink Neutralize Poison, or Cure Critical Wounds if there is none; below 35% HP, Cure Critical
+Wounds first. It buys nothing.
+
+Smoke (`runs/smoke28`, base `...,tryunknown` as in session 22): base replays four of those poison deaths exactly
+(same action counts). With neutdrink all four drink a cure at 41–48% HP and none dies of poison: the DL8 Warrior
+reaches the 17,000-action cap alive, a Ranger lives 9,591 actions instead of 3,958 (DL9), and the other two die later
+to a yellow jelly and a spotted mushroom patch. Smoke 27 (`runs/smoke27`): devices, worwait, deepkit and packroom on
+the base,gearid,tryunknown default, four starts, 6,000 actions: no errors and no failed purchases.
+
+Starvation deaths are a different fault: the character runs out of food on a level and spends hundreds to thousands of
+actions walking and tunnelling there (no Word of Recall, no stairs found), so it needs a navigation fix, not a variant
+of the shopping list. Left for later.
 
 ## C Angband engine: spike (2026-10-15)
 

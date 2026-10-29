@@ -578,6 +578,14 @@ const DEEP_KIT_STEPS: [string, number][] = [["phase", 5], ["clw", 5], ["oil", 10
 // 雑貨屋へ (2 山を残す) 渡して枠を空ける。店に渡すと種類も分かる (session 22: 23 枠が埋まって Phase Door が買えず、補給帰還を繰り返した)
 const PACKROOM = RULEFIX.has("packroom");
 const PACK_ROOM_AT = 18;
+// RULEFIX=neutdrink: 毒で HP 半分未満なら、持っている Neutralize Poison か CCW を飲む (neutpois の飲み方だけ、買い物はしない。HP 35% 未満なら CCW を先に)。
+// tryunknown で拾った薬が分かるようになり、session 22 の tryunknown の毒死 63 件のうち 19 件は Neutralize Poison か CCW を持っていた
+const NEUTDRINK = RULEFIX.has("neutdrink");
+function poisonCureSlot(inv: any[], hpPct: number): number | null {
+  const find = (name: string) => inv.find((i: any) => i.tval === TVAL.POTION && i.qty > 0 && i.name === name)?.slot ?? null;
+  const neut = find("Neutralize Poison"), ccw = find("Cure Critical Wounds");
+  return hpPct < 0.35 ? ccw ?? neut : neut ?? ccw;
+}
 // RULEFIX=devices: 魔法の道具 (杖・魔法棒・ロッド)。未知のものは使って識別する (魔法棒/ロッドは隣にいない見えている敵へ、
 // 杖は敵が見えず HP 75% 以上の時: 4.2 では回復・治療・感知は満タンでも識別される)。分かったものは、攻撃の魔法棒/ロッドを
 // 危険な敵へ近接の前に (油より先に)、回復の杖を HP 半分未満で、Teleportation の杖を緊急時に使う。使い道のないものは落とす
@@ -2753,7 +2761,7 @@ async function playGame() {
       // RULEFIX=neutpois: 毒なら毒を治す薬 (Neutralize Poison、CCW) を先に。毒の間は HP が自然回復しない
       const poisonCure = (RULEFIX.has("neutpois") || RULEFIX.has("neutshop")) && p.timed.poisoned > 0
         ? inv.find((i: any) => i.tval === TVAL.POTION && i.qty > 0 && (i.name === "Neutralize Poison" || i.name === "Cure Critical Wounds"))?.slot ?? null
-        : null;
+        : NEUTDRINK && p.timed.poisoned > 0 ? poisonCureSlot(inv, hpPct) : null;
       if (poisonCure !== null) {
         addLesson(state.turn, state.depth, "解毒", `HP${Math.round(hpPct * 100)}%、毒。解毒薬を使用`);
         state = await sendCommand({ type: CMD.QUAFF, itemIndex: poisonCure });
