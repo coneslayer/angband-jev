@@ -3524,6 +3524,24 @@ stationmem's z went 1.49, 0.94, 3.00 across the looks, and the deep-death excess
 stationmem against D23, seed 4800000) plays two games a start, so about 170 pairs an hour: look 3 near 07:30 unless a
 bound is crossed at look 1 or 2. Session 25 then launches on D24 if the confirmation adopts.
 
+**Why corridor failed** (704 pairs; `<scratchpad>/corr/`). PH(10) 1.06 (80%: 0.98–1.15), death rate 1.01, pace 0.98:
+no effect, rather than harm. It fired in 570 games (81%), median 15 times, 13,660 steps and holds in all (0.16% of
+actions), and the 134 games where it never fired played identically.
+- **It fired at the wrong groups.** In the logged firings (the first 3 and every 20th of a game), the named monsters
+  were wild dogs 1,244 (GROUP_AI: in 4.2.6 they wait outside a corridor while the player is above half HP), mice, lice
+  and worm masses (breeders), cutpurses, apprentices and icky things; snagas 80, kobolds 36, kobold shamans 25.
+- **It rarely reached the fights it was built for.** Of the deaths with an orc or kobold within 2 squares (base 123,
+  corridor 118), the first orc or kobold was seen 1–2 squares away in 36–40% (light radius 2, dark rooms); fewer than
+  half had any state with 2+ awake monsters within 7 and none adjacent; and the corridor arm held in 14 of its 118.
+  Earlier rules (the early kit's oil, flee and fight plans within 8 squares, shooting) act first when the group is in
+  view. Target deaths barely moved: an orc or kobold near at death 127 → 123, 2+ adjacent in the last 15 actions
+  192 → 186.
+- **Waiting fed breeders.** States with a breeder group in view: 4,600 → 11,257; deaths with a breeder near 22 → 29.
+- **The premise.** Session 23's orc and kobold deaths had no Phase Door (46 of 48) and no Cure potion (40 of 48); they
+  were attrition with no way out. deepkit, which addressed the supplies, was adopted.
+A narrower retry (orc, kobold and human groups only, closing in, never breeders or GROUP_AI packs) would touch about 5
+states a game; not worth a session on its own. Monster detection (spellfx) is the better route to seeing groups early.
+
 ### Spellcasting by effect: plan for session 25 (2026-10-29)
 
 **Why.** busho sorts spells into heal, buff, escape, detection and attack by matching names against lists written for
