@@ -3541,6 +3541,11 @@ actions), and the 134 games where it never fired played identically.
   were attrition with no way out. deepkit, which addressed the supplies, was adopted.
 A narrower retry (orc, kobold and human groups only, closing in, never breeders or GROUP_AI packs) would touch about 5
 states a game; not worth a session on its own. Monster detection (spellfx) is the better route to seeing groups early.
+If it is retried, **add known summoners** (the user, 2026-10-30): a monster seen casting an `S_*` spell (auditfix's
+`hasSummon`, from lore only). In 4.2.6 summons land within 4 squares of the summoner, not next to the player as in
+2.x/3.0 (`effect-handler-general.c:2272`, `mon-summon.c:411`), so a corridor helps by making the summoned group come
+single file and by limiting the summoner's line of sight. Summoners are native from DL10 (Orfax, drúadan mage, master
+yeek, priest S_KIN; Boldor at 13; druid and ranger S_ANIMAL), so this belongs with the deep-start test below.
 
 ### Spellcasting by effect: plan for session 25 (2026-10-29)
 
@@ -3749,6 +3754,7 @@ boosts device damage by (skill − kind level)/2 percent (`cmd-obj.c:507`).
 3. **A deep score.** PH(k) from bank starts at DL10+ with k = 15 or 18, and the screen's looks resized by a
    `hazard.simulate` power run on the deep bank's own hazard table.
 4. **Arms:** base (the default after session 25), devicefx; the recharging part as a second arm if the first helps.
+5. A corridor retry against known summoners (see "Why corridor failed") fits the same deep starts and score.
 
 ## C Angband engine: spike (2026-10-15)
 
