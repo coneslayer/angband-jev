@@ -23,7 +23,8 @@ default (danger,restock,escape,upnavfood,fire,lowheal; RULES_CAUTION=1).
                         held-out labelO (a quarter of its games) and trainH's held-out. Chooses session 16's model.
 
 Disk: games drop their replay and snapshots once played (labelO uses session 14's snapshots). A guard stops new games
-below 30 GB free and stops the run below 15 GB; the run refuses to start below 40 GB.
+below 30 GB free and stops the run below 15 GB; the run refuses to start below 40 GB. Free space is the
+smaller of the run's Linux disk and the Windows host drive that holds the vhdx (OVN_HOST_DRIVE, /mnt/c).
 Resumable via RUN/state.json; `touch RUN/STOP` stops between stages. Never restart it mid-stage.
 
 Usage: driver15.py --run runs/session15/<date> --prior5 runs/session5/2026-10-16 --prior10 runs/session10/2026-10-21
@@ -63,7 +64,17 @@ ok, compare, passes = D14.ok, D14.compare, D14.passes
 
 
 # ── disk ──
-def free_gb(path): return shutil.disk_usage(path).free / 2**30
+# The WSL2 disk is a dynamically growing vhdx on the Windows host drive, which can fill before Linux sees its own disk
+# as full: the guards use the smaller of the two (OVN_HOST_DRIVE, default /mnt/c; skipped if it isn't mounted).
+HOST_DRIVE = os.environ.get("OVN_HOST_DRIVE", "/mnt/c")
+
+
+def free_gb(path):
+    gb = shutil.disk_usage(path).free / 2**30
+    if HOST_DRIVE and os.path.isdir(HOST_DRIVE):
+        try: gb = min(gb, shutil.disk_usage(HOST_DRIVE).free / 2**30)
+        except OSError: pass
+    return gb
 
 
 def disk_guard(run):
