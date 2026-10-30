@@ -3497,6 +3497,20 @@ local in the running process, so this needed a restart: the driver was killed wi
 then runs the stage's final check, which would have closed the open variants), its 13 game servers and players by PID,
 and `state.json`'s deadline moved (backups `state.json.bak-restart`, `driver.log.bak-restart`). The screen resumes from
 the outcomes in `driver.log`; the 13 interrupted games replay from their seeds.
+After the restart: no (arm, start) logged twice.
+
+| Variant | Look 1 (150, 22:07): PH(10), z (bound 3.60) | Deep death ratio | Look 2 (300, 23:50): PH(10), z (bound 2.55) | Deep death ratio (p) | Decision |
+|---|---|---|---|---|---|
+| stationmem | 0.825, 1.49 | 1.18 | 0.916, 0.94 | 1.37 (0.009) | continue |
+| blindsafe | 0.905, 0.75 | 1.12 | 1.008, −0.10 | 1.10 (0.23) | reject: futility |
+| corridor | 0.934, 0.46 | 1.12 | 0.989, 0.12 | 1.03 (0.43) | continue |
+| devices2 | 0.966, 0.30 | 0.97 | 1.078, −0.97 | 1.03 (0.42) | reject: futility |
+
+About 88 pairs an hour with four variants (150 pairs from 22:07 to 23:50). Look 2's futility line is z 0.075.
+stationmem's lead halved between looks, and its deaths at stages 7+ are up 37% (p 0.009): `hazard.screen` never adopts
+while that ratio is above 1 with p < 0.05, so at look 3 it needs both z ≥ 1.67 and the deep excess gone. corridor needs
+z to go from 0.12 to 1.67. Neither is likely; session 25's base is then D23. With two variants left a start costs three
+games instead of five, so look 3 (700) near 03:00.
 
 ### Spellcasting by effect: plan for session 25 (2026-10-29)
 
@@ -3633,6 +3647,7 @@ Recharging (Mage CL5, Rogue CL20), and tryunknown gives unknown scrolls away unr
 device 1 time in i, i = strength + (100 − kind level)/10 − 2 × charges per item (scroll strength 6: about 1 in 15 for an
 empty shallow wand, 1 in 9 with 3 charges left), else adds 2 + 1d t charges. Worth adding only with devices: if devices2 is
 adopted, carry 1–2 scrolls with an attack wand or a healing staff and recharge it when empty, nothing in view.
+(devices2 was rejected for futility at session 24's look 2, so this waits.)
 
 Checked and fine: tval and terrain codes, object flag, modifier and element indices, hunger/cut/stun grade names, store
 indices in the shop lists (apart from Teleportation), monster names in the rules' patterns, item names with `&`/`~`
