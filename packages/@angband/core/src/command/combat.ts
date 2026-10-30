@@ -12,10 +12,13 @@
 
 import type { Chunk, Monster, MonsterId, Player } from "../types/index.js";
 import type { ObjectType, Brand, Slay } from "../types/index.js";
-import { Skill, BTH_PLUS_ADJ, TimedEffect, EquipSlot } from "../types/index.js";
+import { Skill, BTH_PLUS_ADJ, TimedEffect, EquipSlot, Stat, ObjectFlag, MonsterTimedEffect } from "../types/index.js";
 import type { Loc, RNG } from "../z/index.js";
 import { locDiff } from "../z/index.js";
 import { chunkContains, chunkGetSquare } from "../cave/index.js";
+import { los } from "../cave/view.js";
+import { adjStrBlow } from "../player/calcs.js";
+import { calculateProjectionPath, angbandDistance, ProjectFlag } from "../project/project.js";
 import { getEquippedItem, getInventoryItem, removeFromInventory } from "../object/gear.js";
 import { findBestMultiplier, applySlayBrand } from "../object/slays.js";
 import { TVal } from "../types/object.js";
@@ -537,11 +540,128 @@ export function cmdFire(
   return successResult(STANDARD_ENERGY, messages);
 }
 
+/** Does the thrown object have this flag (object, kind or base)? */
+function throwHasFlag(obj: ObjectType, flag: ObjectFlag): boolean {
+  return !!(
+    obj.flags?.has(flag) ||
+    obj.kind?.flags?.has(flag) ||
+    obj.kind?.base?.flags?.has(flag)
+  );
+}
+
+/**
+ * Maximum throwing range (do_cmd_throw): depends on STR and the object's
+ * weight (1/10 lb): MIN(((str + 20) * 10) / MAX(weight, 10), 10).
+ */
+export function throwRange(player: Player, obj: ObjectType): number {
+  const strInd = player.state.statInd?.[Stat.STR] ?? 0;
+  const str = adjStrBlow[Math.min(Math.max(strInd, 0), adjStrBlow.length - 1)] ?? 3;
+  const weight = Math.max(obj.weight ?? obj.kind?.weight ?? 0, 10);
+  return Math.min(Math.floor(((str + 20) * 10) / weight), 10);
+}
+
+/**
+ * Percent chance of a thrown object breaking (breakage_chance).
+ */
+export function throwBreakageChance(obj: ObjectType, hitTarget: boolean): number {
+  if (obj.artifact) return 0;
+  let perc = obj.kind?.base?.breakPerc ?? 0;
+  const ammo = obj.tval === TVal.SHOT || obj.tval === TVal.ARROW || obj.tval === TVal.BOLT;
+  if (throwHasFlag(obj, ObjectFlag.THROWING) && !throwHasFlag(obj, ObjectFlag.EXPLODE) && !ammo) {
+    perc = 1;
+  }
+  return hitTarget ? perc : Math.floor((perc * perc) / 100);
+}
+
+/**
+ * Throw-to-hit value against a monster (chance_of_missile_hit with no
+ * launcher): throwing weapons use full skill plus the player's to-hit;
+ * other objects use 3/2 skill. Distance is subtracted.
+ */
+export function chanceOfThrowHit(player: Player, obj: ObjectType, dist: number): number {
+  const skill = player.state.skills[Skill.TO_HIT_THROW] ?? 0;
+  let bonus = obj.toH ?? 0;
+  let chance: number;
+  if (throwHasFlag(obj, ObjectFlag.THROWING)) {
+    bonus += player.state.toH;
+    chance = skill + bonus * BTH_PLUS_ADJ;
+  } else {
+    chance = Math.floor((3 * skill) / 2) + bonus * BTH_PLUS_ADJ;
+  }
+  return chance - dist;
+}
+
+/**
+ * Damage of a thrown object that hit (make_ranged_throw, non-O model):
+ * (dice + to-dam) * (2 + weight/12 for THROWING) * (1 + slay/brand mult),
+ * then ranged criticals, then x3 for EXPLODE (flasks of oil).
+ */
+export function throwDamage(
+  player: Player,
+  mon: Monster,
+  obj: ObjectType,
+  rng: RNG,
+  brands: readonly Brand[] = [],
+  slays: readonly Slay[] = [],
+): { damage: number; critMsg: string | null; verb: string | null } {
+  const weight = obj.weight ?? obj.kind?.weight ?? 0;
+  let mult = 1;
+  let verb: string | null = null;
+  if (brands.length > 0 || slays.length > 0) {
+    const best = findBestMultiplier(obj, mon, brands, slays, false);
+    if (best.multiplier > 0) {
+      mult += best.multiplier;
+      verb = best.verb;
+    }
+  }
+
+  let dmg = rng.damroll(obj.dd, obj.ds) + (obj.toD ?? 0);
+  if (throwHasFlag(obj, ObjectFlag.THROWING)) {
+    dmg *= 2 + Math.floor(weight / 12);
+  }
+  dmg *= mult;
+
+  // critical_shot() (thrown): constants from constants.txt "ranged-critical"
+  let toH = player.state.toH + (obj.toH ?? 0);
+  const m = mon.mTimed;
+  if (
+    m &&
+    ((m[MonsterTimedEffect.CONF] ?? 0) > 0 ||
+      (m[MonsterTimedEffect.FEAR] ?? 0) > 0 ||
+      (m[MonsterTimedEffect.HOLD] ?? 0) > 0 ||
+      (m[MonsterTimedEffect.STUN] ?? 0) > 0)
+  ) {
+    toH += 10; // is_debuffed()
+  }
+  const chance = weight + 4 * toH + 2 * player.lev;
+  let critMsg: string | null = null;
+  if (rng.randint1(5000) <= chance) {
+    const power = weight + rng.randint1(500);
+    if (power < 500) {
+      dmg = 5 + 2 * dmg;
+      critMsg = "It was a good hit!";
+    } else if (power < 1000) {
+      dmg = 10 + 2 * dmg;
+      critMsg = "It was a great hit!";
+    } else {
+      dmg = 15 + 3 * dmg;
+      critMsg = "It was a superb hit!";
+    }
+  }
+
+  // Direct adjustment for exploding things (flasks of oil)
+  if (throwHasFlag(obj, ObjectFlag.EXPLODE)) dmg *= 3;
+
+  return { damage: dmg, critMsg, verb };
+}
+
 /**
  * Throw an item at a target.
  *
- * Port of do_cmd_throw from cmd-obj.c / player-attack.c.
- * Simplified version.
+ * Port of do_cmd_throw / ranged_helper / make_ranged_throw from
+ * player-attack.c (standard, non-O combat model).  Rejects (no energy
+ * used) targets beyond the throwing range or without line of sight; the
+ * missile hits the first monster on the projection path.
  *
  * @param player The attacking player
  * @param chunk  The current dungeon level
@@ -555,6 +675,8 @@ export function cmdThrow(
   target: Loc,
   rng: RNG,
   itemIndex: number = 0,
+  brands: readonly Brand[] = [],
+  slays: readonly Slay[] = [],
 ): CommandResult {
   // Bounds check
   if (!chunkContains(chunk, target)) {
@@ -567,46 +689,54 @@ export function cmdThrow(
     return failResult(["You have nothing to throw."]);
   }
 
-  const sq = chunkGetSquare(chunk, target);
-  const hasTarget = sq.mon > (0 as MonsterId);
-  const messages: string[] = [];
-
-  if (hasTarget) {
-    const mon = chunk.monsters[sq.mon];
-    if (!mon) {
-      return failResult(["You see nothing there to throw at."]);
-    }
-
-    // Calculate distance penalty
-    const dist = distance(player.grid, target);
-    const throwSkill = player.state.skills[Skill.TO_HIT_THROW] ?? 0;
-    const toHit = Math.max(0, Math.floor(throwSkill * 3 / 2) - dist);
-    const ac = mon.race.ac;
-
-    if (playerMeleeHit(rng, toHit, ac)) {
-      // Thrown item damage: use item's dice if available, else 1d4
-      const dd = item.dd > 0 ? item.dd : 1;
-      const ds = item.ds > 0 ? item.ds : 4;
-      const baseDmg = rng.damroll(dd, ds) + item.toD + player.state.toD;
-      const finalDmg = Math.max(0, baseDmg);
-
-      // Apply damage
-      mon.hp -= finalDmg;
-      const killed = mon.hp <= 0;
-
-      if (killed) {
-        messages.push(`Your thrown item kills the ${mon.race.name}! (${finalDmg} damage)`);
-      } else {
-        messages.push(`Your thrown item hits the ${mon.race.name} for ${finalDmg} damage.`);
-      }
-    } else {
-      messages.push(`Your thrown item misses the ${mon.race.name}.`);
-    }
-  } else {
-    messages.push("Your thrown item lands on the ground.");
+  const range = throwRange(player, item);
+  const taim = angbandDistance(player.grid, target);
+  if (taim > range) {
+    return failResult([`Target out of range by ${taim - range} squares.`]);
+  }
+  if (!los(chunk, player.grid, target)) {
+    return failResult(["You have no line of sight to the target."]);
   }
 
-  // Consume the thrown item
+  const messages: string[] = [];
+  const name = item.kind?.name?.replace(/^& /, "").replace(/~/g, "") ?? "object";
+  let hitTarget = false;
+
+  const path = calculateProjectionPath(chunk, player.grid, target, range, ProjectFlag.INFO).path;
+  for (const grid of path) {
+    if (!chunkContains(chunk, grid)) break;
+    const sq = chunkGetSquare(chunk, grid);
+    if (sq.mon <= (0 as MonsterId)) continue;
+    const mon = chunk.monsters[sq.mon];
+    if (!mon || mon.hp <= 0) continue;
+
+    // Distance in chance_of_missile_hit is to the monster actually struck
+    const dist = angbandDistance(player.grid, grid);
+    const chance = chanceOfThrowHit(player, item, dist);
+    if (playerMeleeHit(rng, chance, mon.race.ac)) {
+      hitTarget = true;
+      const { damage, critMsg, verb } = throwDamage(player, mon, item, rng, brands, slays);
+      const finalDmg = Math.max(0, damage);
+      mon.hp -= finalDmg;
+      if (finalDmg === 0) {
+        messages.push(`Your ${name} fails to harm the ${mon.race.name}.`);
+      } else if (mon.hp <= 0) {
+        messages.push(`Your ${name} ${verb ?? "hits"} the ${mon.race.name} and kills it! (${finalDmg} damage)`);
+      } else {
+        messages.push(`Your ${name} ${verb ?? "hits"} the ${mon.race.name} for ${finalDmg} damage.`);
+      }
+      if (critMsg) messages.push(critMsg);
+    } else {
+      messages.push(`Your ${name} misses the ${mon.race.name}.`);
+    }
+    break;
+  }
+
+  if (path.length === 0 || (!hitTarget && messages.length === 0)) {
+    messages.push(`Your ${name} lands on the ground.`);
+  }
+
+  // Use up the thrown object (surviving objects are not dropped on the floor in this port)
   if (item.number > 1) {
     (item as { number: number }).number -= 1;
   } else {
