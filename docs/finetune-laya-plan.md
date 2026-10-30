@@ -3569,6 +3569,48 @@ effect by about a fifth. Deaths by start type, base/spellfx/spellfight: bank 49/
 Rogue 29/26/26, Paladin 26/29/29, Ranger 35/34/34 (of 48–49). spellfight's attack spells: 501 casts in 305 games.
 Look 3 needs z ≥ 1.67, about PH(10) 0.92.
 
+**Look 3 and the session's result** (13:09, 700 pairs; driver finished 13:11, 43 GB free):
+
+| Arm | PH(10) | z (bound 1.67) | Death rate | Pace | Deep death rate (p) | Decision |
+|---|---|---|---|---|---|---|
+| spellfx | 1.009 | −0.18 | 0.94 | 0.97 | 0.96 (0.69) | reject |
+| spellfight | 0.984 | 0.32 | 0.89 | 0.96 | 0.90 (0.91) | reject |
+
+No variant adopted, so no confirmation; **D24 stays the default.** By start type (not pre-registered; paired
+bootstrap, 80% intervals; `<scratchpad>/s25/sub.py`):
+
+| Starts | spellfx PH(10) | spellfight PH(10) |
+|---|---|---|
+| Blackguard (112) | **1.60** (1.25–2.05); death 1.20, pace 0.85 | 1.29 (1.04–1.60); death 0.82, pace 0.80 |
+| Paladin (113) | 0.90 (0.76–1.06) | same |
+| Ranger (113) | 0.94 (0.78–1.12) | same |
+| Rogue (113) | 0.92 (0.80–1.05); death 0.82 | same |
+| Bank (140) | 0.80 (0.64–1.02) | 0.79 (0.62–0.99) |
+| All but Blackguards (592) | **0.92** (0.87–0.98) | 0.92 (0.87–0.98) |
+| Warriors (113) | identical to base | identical |
+
+spellfight differs from spellfx only for Blackguards (Whirlwind Attack, Leap into Battle) among these classes; the
+others play the same games in both arms. 621 of 704 starts gave the same outcome in both.
+
+**Why Blackguards lose.**
+- **Arrival detection feeds `leave`.** Their first spell, Seek Battle, detects monsters susceptible to fear;
+  spellfx casts it on each new level. The `leave` rule counts a detected early killer as in view at any distance
+  (Fang at 27 squares, Grip at 25, soldiers, acolytes) and heads for the stairs. Levels left within 5 actions of
+  arrival: Blackguards 24% → 38% (1,005 → 1,882), arrivals per 1,000 actions 2.95 → 3.65. In base the Rogues
+  (Detect Monsters), Rangers (Detect Life) and Paladins (Detect Evil) already detect on arrival and already bounce
+  (37%, 43%, 27%), and spellfx leaves them unchanged. One Blackguard bounced between DL1 and DL3 for its whole game
+  (base reached DL7).
+- **Fear cures.** Berserk Strength was cast 3,448 times (31 a game) as the cure for fear with a monster adjacent;
+  each cast is a turn, and the SP it spends would otherwise heal a Blackguard (in 4.2.6 their SP drains and turns
+  into HP at twice the rate a cast does, `player-util.c:520`).
+- **Light-out stalls** (not spellfx's doing, but more of them this time): games with 500+ actions in the dark in the
+  dungeon, Blackguard 2 → 5, Paladin 2 → 5. The last torch burns out ("Your light has gone out!"), the map around the
+  player is unknown, and busho rests in place for thousands of actions (4,438 in a row in one game, 16,932 dark
+  actions in another). A pre-existing gap: nothing sends a character with no light back to town.
+
+**Next for spells** (after the wrap-up): spellfx with `leave` ignoring monsters that are only detected (or only
+within view range), and Blackguards' fear handled by stepping back rather than casting; screened on all classes.
+
 **Why corridor failed** (704 pairs; `<scratchpad>/corr/`). PH(10) 1.06 (80%: 0.98–1.15), death rate 1.01, pace 0.98:
 no effect, rather than harm. It fired in 570 games (81%), median 15 times, 13,660 steps and holds in all (0.16% of
 actions), and the 134 games where it never fired played identically.
