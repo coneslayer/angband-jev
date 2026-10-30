@@ -3512,6 +3512,18 @@ while that ratio is above 1 with p < 0.05, so at look 3 it needs both z ≥ 1.67
 z to go from 0.12 to 1.67. Neither is likely; session 25's base is then D23. With two variants left a start costs three
 games instead of five, so look 3 (700) near 03:00.
 
+**Look 3 (700 pairs, 03:24).** The prediction above was wrong for stationmem:
+
+| Variant | PH(10) | z (bound 1.67) | Deep death ratio (p) | Decision |
+|---|---|---|---|---|
+| stationmem | 0.833 | 3.00 | 1.11 (0.12) | adopt |
+| corridor | 1.062 | −1.00 | 1.05 (0.32) | reject: below the bound |
+
+stationmem's z went 1.49, 0.94, 3.00 across the looks, and the deep-death excess faded from 1.37 (p 0.009) to 1.11
+(p 0.12). About 112 pairs an hour with two variants (300 to 700 pairs from 23:50 to 03:24). The confirmation (D23 +
+stationmem against D23, seed 4800000) plays two games a start, so about 170 pairs an hour: look 3 near 07:30 unless a
+bound is crossed at look 1 or 2. Session 25 then launches on D24 if the confirmation adopts.
+
 ### Spellcasting by effect: plan for session 25 (2026-10-29)
 
 **Why.** busho sorts spells into heal, buff, escape, detection and attack by matching names against lists written for
