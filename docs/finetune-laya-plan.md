@@ -3680,6 +3680,46 @@ description lists it); `tools/spell-roles.ts` gives items roles the same way as 
 Session 25 arms: base, spellfx, spellfight (implies spellfx), auditfix; all classes (Warriors back in, for auditfix);
 seed 4900000. Launch script `<scratchpad>/launch25.sh BASE CANARY_STAGE CANARY_ARM CANARY_STARTS HOURS SCREEN_HOURS`.
 
+### Devices by effect, tested on deep starts: plan for after the wrap-up (2026-10-30)
+
+Queued by the user for after Friday's report and commit; not part of session 25.
+
+**Why.** devices (session 23) and devices2 (session 24) were rejected on PH(10), but the farm can't see the later
+game, where devices should matter more. By depth band (death-rate ratio against base, stage-stratified):
+
+| Arm | DL0–3 | DL4–6 | DL7–9 | DL10+ | Bank starts, PH(10) |
+|---|---|---|---|---|---|
+| session 23 devices (702 pairs) | 0.99 | 1.00 | 1.02 | 0.76 | 0.85 (80%: 0.66–1.17) |
+| session 24 devices2 (305 pairs) | 1.03 | 1.14 | 0.80 | 2.50 | 1.29 (0.88–1.83) |
+
+DL10+ is 3–5% of the actions, with 14–39 deaths an arm, and the signs flip between sessions. The C bank (session 5,
+1,138 savepoints) has 18 at DL10–12 and none deeper. And the devices rules use only attack wands and rods, healing
+staves and an emergency Staff of Teleportation: Teleport Other, Stone to Mud, the slow, hold, sleep, scare and confuse
+devices, Mapping, Detect Evil, Rods of Curing, Treasure Location, Illumination and Recall, and the Staff of Speed are
+carried and never used. Most of those are native to DL10–20 (`object.txt`); what the farm finds at DL1–9 is Magic
+Missile (3d4), Stinking Cloud (12), Light and Cure Light Wounds. Device skill grows with level, lowering fail rates, and
+boosts device damage by (skill − kind level)/2 percent (`cmd-obj.c:507`).
+
+**Plan.**
+1. **`RULEFIX=devicefx`**: devices chosen by role, like spellfx's spells. `itemRoles` already reads the bridge's
+   `keffects`; route wands, staves and rods through `resources()` so each decision point asks for a role and takes the
+   cheapest means, spell, device or consumable:
+   - escape: Staff of Teleportation; Teleport Other (BOLT_STATUS:AWAY_ALL) aimed at the monster the danger rule would
+     flee from, before fleeing;
+   - control: slow, hold, sleep, scare, confuse at a dangerous monster, as spellfight's control bolt;
+   - attack-target and attack-area: expected damage (dice from `keffects`, times 1 − fail) against melee and launcher;
+   - dig: Stone to Mud in place of TUNNEL (as spellfx's dig spells); detection: Mapping, Detect Evil, Treasure Location
+     on arrival; cure: Curing; recall: Rod of Recall before buying scrolls; speed: Staff of Speed as the speed potions;
+   - recharging: a Scroll of Recharging (Alchemist, 200 gold) for an empty attack or Teleport Other wand, nothing in
+     view (destroys the device 1 time in i, i = 6 + (100 − kind level)/10 − 2 × charges).
+   Known kinds only; unknown devices keep devices' trial rule. Smoke on session 24's bank starts, replay canary as usual.
+2. **A deep bank.** Restore the DL7–12 savepoints, play on under the current default with a larger action cap, and
+   save at level entry from DL10 (as session 5 did from DL5). Target: 300+ savepoints at DL10–20 across the classes.
+   Restores start with empty map memory and lore, as the bank always has.
+3. **A deep score.** PH(k) from bank starts at DL10+ with k = 15 or 18, and the screen's looks resized by a
+   `hazard.simulate` power run on the deep bank's own hazard table.
+4. **Arms:** base (the default after session 25), devicefx; the recharging part as a second arm if the first helps.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
