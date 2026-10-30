@@ -17,8 +17,9 @@
 
 import * as fs from "node:fs";
 import * as zlib from "node:zlib";
+import { resourceVector } from "../spell-roles.js";
 
-export const DANGER_RECORD_VERSION = 1;
+export const DANGER_RECORD_VERSION = 2; // v2: rs (resources by role) and ar (the action's role); header roles
 
 /** Status-bar grades, as player_timed.txt (4.2.6) names them: 0 = none. */
 export function cutGrade(cut: number): number {
@@ -81,6 +82,11 @@ export interface DangerRecord {
   nv: number; nr: number; rd: number;
   /** command type of the first command sent after this state */
   act?: number;
+  /** resources by role (tools/spell-roles.ts), roles available now only: [role index in the header's `roles`, uses
+   * left, best amount, best fail %]; spells and carried items alike */
+  rs?: number[][];
+  /** the role of that command when it was a cast or an item use with a role ("cure:POISONED", "escape-short") */
+  ar?: string;
   /** danger model predictions at this state, when DANGER_MODEL is loaded */
   pd?: Record<string, number>;
 }
@@ -91,6 +97,8 @@ export interface DangerHeader {
   class: string; race: string;
   seed: string; rulefix: string;
   model?: string;
+  /** names for the indices in each record's `rs` */
+  roles?: string[];
 }
 
 export const MAX_MONSTERS = 12;
@@ -177,6 +185,8 @@ export function dangerRecord(state: any, action: number, lt: number): DangerReco
     nv: visible.length, nr: remembered.length,
     rd: remembered.reduce((best: number, m: any) => best < 0 || (m.distance ?? 99) < best ? (m.distance ?? 99) : best, -1),
   };
+  const rs = resourceVector(p).map((v, i) => [i, v[1], Math.round(v[2]), v[3], v[0]]).filter(v => v[4]).map(v => v.slice(0, 4));
+  if (rs.length) rec.rs = rs;
   if (state.dead) rec.dead = 1;
   if (typeof state.levelFeeling === "number") rec.fe = state.levelFeeling;
   return rec;
@@ -210,8 +220,11 @@ export class DangerLogger {
   }
 
   /** The command sent after the latest record (only the first one counts). */
-  noteCommand(type: number): void {
-    if (this.pending && this.pending.act === undefined) this.pending.act = type;
+  noteCommand(type: number, role?: string): void {
+    if (this.pending && this.pending.act === undefined) {
+      this.pending.act = type;
+      if (role) this.pending.ar = role;
+    }
   }
 
   /** The final state, after the loop. */

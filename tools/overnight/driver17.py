@@ -23,7 +23,7 @@ Usage: driver17.py --run runs/session17/<date> --prior5 runs/session5/2026-10-16
 Session 18 reuses it: --prior16 is then session 17's run, with --canary-stage confirmQ --canary-arm combo
 --canary-starts confirmQ:3700000.
 """
-import argparse, json, os, shutil, signal, sys, threading, time, types  # noqa: E401
+import argparse, json, os, re, shutil, signal, sys, threading, time, types  # noqa: E401
 import concurrent.futures as cf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -195,6 +195,16 @@ def stage_confirm(run, name, deadline):
 D6.KINDS.update({"canaryQ": stage_canary, "screenQ": stage_screen, "confirmQ": stage_confirm})
 
 
+def restrict_classes(run, classes):
+    """New starts cycle through `classes` only, and bank starts draw only savepoints of those classes (the bank
+    file names carry race-class)."""
+    D.CLASSES[:] = classes
+    pool_all = D2.bank_files
+    rx = re.compile(r"-(" + "|".join(c.lower() for c in classes) + r")-\d+-DL\d+-")
+    D2.bank_files = lambda r: [f for f in pool_all(r) if rx.search(os.path.basename(f))]
+    run.log(f"classes restricted to {classes}: {len(D2.bank_files(run))} of {len(pool_all(run))} bank savepoints")
+
+
 def main():
     ap = argparse.ArgumentParser()
     for p in ("--run", "--prior5", "--prior16", "--base", "--canary-arm", "--variants"): ap.add_argument(p, required=True)
@@ -205,6 +215,8 @@ def main():
     ap.add_argument("--canary-starts", default="finalM:3200000", help="that stage's starts, RNG:FRESH (bank +50000)")
     ap.add_argument("--hours", type=float, default=52); ap.add_argument("--screen-hours", type=float, default=24)
     ap.add_argument("--slots", type=int, default=13); ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--classes", default="", help="screen and confirm only these classes, fresh and bank (e.g. "
+                    "Paladin,Rogue,Ranger,Blackguard); the canary keeps the prior session's starts")
     a = ap.parse_args()
     if free_gb(".") < D15.DISK_START_GB:
         sys.exit(f"only {free_gb('.'):.1f} GB free; need {D15.DISK_START_GB}")
@@ -234,6 +246,7 @@ def main():
         D6.run_stage(run, "canaryQ", canary_end, a.smoke)
         if (run.state["stages"]["canaryQ"].get("status")) != "done":
             run.log("canary failed: not screening"); return
+        if a.classes: restrict_classes(run, a.classes.split(","))
         D6.run_stage(run, "screenQ", screen_end, a.smoke)
         D6.run_stage(run, "confirmQ", end - 10 * 60, a.smoke)
     finally:

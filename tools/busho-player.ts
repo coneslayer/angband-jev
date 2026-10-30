@@ -7,13 +7,14 @@
  */
 
 import {
-  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision,
+  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, DECISION_FORMAT_VERSION_ROLES, DECISION_ROLES, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision,
 } from "./decision/index.js";
 import type { DecisionType, DecisionRequest } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
 import { adaptPlayerView, estimatedMaxHp } from "./honest-view.js";
 import { DangerLogger, DANGER_RECORD_VERSION } from "./danger/record.js";
 import { DangerModel } from "./danger/model.js";
+import { rolesOf, itemRoles, itemHarmful, spellsFor, resourceLines, ROLE_ORDER, CURE_STATUS, type Role, type RoleEntry } from "./spell-roles.js";
 
 const API = process.env.API ?? "http://localhost:3000";
 // PLAYER_VIEW=1: play from what the UI shows (/state?view=player), as a human player would
@@ -61,6 +62,9 @@ function canDigFeat(feat: number): boolean {
 }
 /** この地形を掘る価値があるか (掘削具なしだと扉/瓦礫のみ) */
 function digWorthwhile(feat: number): boolean {
+  // RULEFIX=spellfx: 壁を消す呪文。経路に何マスもあり得るので、3 回分の MP がある時だけ壁を通る道を考える
+  const ds = SPELLFX && DIG_SPELL_FEATS.has(feat) ? fxDigSpell() : null;
+  if (ds && (lastKnownState?.player?.sp ?? 0) >= 3 * ds.mana) return true;
   return !digFutile(feat) && (SOFT_DIG_FEATS.has(feat) || (DIGGABLE_FEATS.has(feat) && canDigFeat(feat)));
 }
 const futileDig = new Set<number>(); // RULEFIX=digskill (説明は DIGSKILL の宣言に)
@@ -636,6 +640,78 @@ const DIGSKILL = RULEFIX.has("digskill");
 const DEVICES2 = RULEFIX.has("devices2");
 const DEVICES = RULEFIX.has("devices") || DEVICES2;
 const LIGHT_ORC_RE = /^(snaga|cave orc|orc (tracker|shaman|archer))$/;
+// RULEFIX=spellfx: 呪文を名前ではなく効果で選ぶ (tools/spell-roles.ts: ブリッジが送る効果の列から役割を決める)。名前の表は angband-ts 用で
+// 4.2.6 の多くの呪文に当たらなかった (session 23 の確認: Ranger は Remove Hunger と Herbal Curing を覚えて一度も唱えず、Blackguard は
+// 何も唱えなかった)。加えて: 空腹なら食料より先に食事の呪文 (知っていれば食料切れで町へ戻らない)、毒・朦朧・切り傷は薬より先に治す呪文、
+// 恐怖で隣に敵がいれば恐怖を治す呪文、強化は状態表示に無い時だけ戦いの前に、敵の感知は到着時と敵が見えない 300 行動ごと、降りたいのに
+// 下り階段を知らなければ階段の感知、掘る代わりに壁を消す呪文。逃走の呪文 1 回分の MP は他の詠唱に使わない
+// RULEFIX=auditfix: 監査 (docs/finetune-laya-plan.md "Capabilities lost to mismatches") で見つかった取りこぼしをまとめて直す:
+// 怯えていて隣に敵 → 殴れない (4.2.6 は "too afraid" で時間を使わず、CMD-GUARD が 30 回ごとに 1 手棒立ちしていた。session 23 の確認で
+// 221/707 局、怯えたままの死亡 10) ので、恐怖を治す薬 (効果で探す: Boldness、Heroism、Berserk Strength)・呪文、射撃、投擲、離れる、
+// Phase Door の順。見た呪文 (S_KIN など) から召喚持ちを知る (honest-view は形式違いで立てていなかった)。加速の薬を深さを問わず
+// 危険な時に (DL10 未満では一度も飲まず、拾った 100 局のうち 45 局が飲まずに死んだ)。名前に Cure の無い強い回復薬 (Healing、
+// *Healing*、Life) も効果で探す。使えない領域の本と、害のある既知の薬・巻物・食料 (Poison、Blindness、Sleep、Salt Water、
+// Aggravate Monster、Deep Descent など) を持たない (拾ったら落とし、町で店に渡す。本は本屋へ)
+const AUDITFIX = RULEFIX.has("auditfix");
+let fearActions = 0;
+const BOOK_TVAL_OF_REALM: Record<string, number> = { arcane: 30, divine: 31, nature: 32, shadow: 33 };
+/** auditfix: この職業が使える本か (呪文の領域から。戦士はどの本も使えない) */
+function bookUsable(tval: number): boolean {
+  const realms = new Set(((lastKnownState?.player?.spells ?? []) as any[]).map(s => BOOK_TVAL_OF_REALM[s.realm]).filter(t => t !== undefined));
+  return realms.has(tval);
+}
+/** auditfix: 持っていても仕方がない物 (使えない領域の本、害のある既知の薬・巻物・食料) */
+function auditJunk(item: any): boolean {
+  if (!AUDITFIX || !item) return false;
+  if (item.tval >= 30 && item.tval <= 33) return !bookUsable(item.tval);
+  return [TVAL.POTION, TVAL.SCROLL, TVAL.FOOD].includes(item.tval) && itemHarmful(item);
+}
+/** auditfix: 名前に Cure の無い強い回復薬 (効果の回復量 100 以上: Healing、*Healing*、Life) */
+function strongHealByEffect(item: any): boolean {
+  return AUDITFIX && item.tval === TVAL.POTION && !(item.name ?? "").includes("Cure")
+    && itemRoles(item).some(e => e.role === "heal" && e.amount >= 100);
+}
+const SPELLFIGHT = RULEFIX.has("spellfight");
+const SPELLFX = RULEFIX.has("spellfx") || SPELLFIGHT;
+const fxCasts: Record<string, number> = {}; // 役割ごとの詠唱数 (終了時に表示)
+function fxNote(role: string): void { fxCasts[role] = (fxCasts[role] ?? 0) + 1; }
+/** spellfx: 役割の呪文で今唱えられる一番良いもの。reserve の MP は残す */
+function fxSpell(p: any, role: Role, pick?: (e: RoleEntry) => boolean, reserve = 0): SpellInfo | null {
+  if (!p || castBlocked()) return null;
+  return (spellsFor(p.spells ?? [], p.level ?? 1, (p.sp ?? 0) - reserve, role, pick)[0]?.spell as SpellInfo | undefined) ?? null;
+}
+/** spellfx: 覚えていて最大 MP で唱えられる役割の呪文 (今の MP は問わない) */
+function fxKnows(p: any, role: Role): SpellInfo | null {
+  return (spellsFor(p?.spells ?? [], p?.level ?? 1, p?.maxSp ?? 0, role)[0]?.spell as SpellInfo | undefined) ?? null;
+}
+/** spellfx: 短距離の逃走呪文 1 回分の MP (他の詠唱はこれを残す)。無ければ 0 */
+function fxReserve(p: any): number {
+  return fxKnows(p, "escape-short")?.mana ?? 0;
+}
+/** spellfx: 逃走の呪文。長距離 (Teleport Self など) を望むなら先に、無ければ短距離 */
+function fxEscape(p: any, preferLong: boolean): SpellInfo | null {
+  return preferLong ? fxSpell(p, "escape-long") ?? fxSpell(p, "escape-short") : fxSpell(p, "escape-short") ?? fxSpell(p, "escape-long");
+}
+/** 逃走呪文が長距離か (旧ルール: 名前に Teleport) */
+function escapeIsLong(s: SpellInfo): boolean {
+  return SPELLFX ? rolesOf(s as any).some(e => e.role === "escape-long") : s.name.includes("Teleport");
+}
+/** 呪文の最初の役割 (危険度ログの ar) */
+function spellRoleLabel(s: any): string | undefined {
+  const e = s ? rolesOf(s)[0] : undefined;
+  return e ? e.role + (e.sub && (e.role === "cure" || e.role === "buff") ? `:${e.sub}` : "") : undefined;
+}
+const DIG_SPELL_FEATS = new Set([FEAT.RUBBLE, FEAT.MAGMA, FEAT.QUARTZ, FEAT.MAGMA_K, FEAT.QUARTZ_K, FEAT.GRANITE]);
+let fxDigCache: { state: any; spell: SpellInfo | null } = { state: null, spell: null };
+/** spellfx: 壁を消す呪文が今唱えられるか (経路探索から何度も呼ばれるので状態ごとに覚える) */
+function fxDigSpell(): SpellInfo | null {
+  if (!SPELLFX || !lastKnownState?.player) return null;
+  if (fxDigCache.state !== lastKnownState) {
+    const pl = lastKnownState.player;
+    fxDigCache = { state: lastKnownState, spell: fxSpell(pl, "dig", undefined, fxReserve(pl)) };
+  }
+  return fxDigCache.spell;
+}
 const ATTACK_DEVICES = /^(Magic Missile|Stinking Cloud|Lightning Bolts|Frost Bolts|Fire Bolts|Acid Bolts|Lightning Balls|Cold Balls|Fire Balls|Acid Balls|Dragon's (Flame|Frost|Breath)|Drain Life|Annihilation)$/;
 const HEAL_STAVES = /^(Cure Light Wounds|Curing|Healing)$/;
 const USELESS_DEVICES = /^(Haste Monsters?|Heal Monster|Clone Monster|Summoning|Darkness|Wonder|Polymorph)$/;
@@ -756,6 +832,7 @@ function isEscapeCommand(cmd: Record<string, unknown>): boolean {
   }
   if (cmd.type === CMD.CAST) {
     const s = (pl.spells ?? []).find((x: any) => x.index === cmd.spellIndex);
+    if (SPELLFX) return !!s && rolesOf(s).some(e => e.role === "escape-short" || e.role === "escape-long");
     return /Phase Door|Teleport Self|Portal|Dimension Door/.test(s?.name ?? "");
   }
   return false;
@@ -774,10 +851,16 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     console.log(`  [CMD-GUARD] confused中のREAD/CASTをRESTに差し替え`);
     cmd = { type: CMD.REST };
   }
+  // RULEFIX=spellfx: 掘る代わりに壁を消す呪文 (Shatter Stone、Stone to Mud) を同じ向きへ
+  if (SPELLFX && cmd.type === CMD.TUNNEL) {
+    const t = tunnelTarget(lastKnownState, cmd.direction as number);
+    const dig = t && DIG_SPELL_FEATS.has(t.feat) ? fxDigSpell() : null;
+    if (dig) { spellsUsed++; fxNote("dig"); cmd = { type: CMD.CAST, spellIndex: dig.index, direction: cmd.direction }; }
+  }
   const escapeCmd = LEAVE && isEscapeCommand(cmd); // RULEFIX=leave: この階の逃走回数に数える (時間が進んだら)
   const digAt = DIGSKILL && cmd.type === CMD.TUNNEL ? tunnelTarget(lastKnownState, cmd.direction as number) : null;
   if (cmdDebug || ++commandsSent >= CMD_DEBUG_AFTER) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
-  dangerLogger?.noteCommand(cmd.type as number);
+  dangerLogger?.noteCommand(cmd.type as number, actionRole(cmd));
   for (let retry = 0; retry < 5; retry++) {
     const res = await fetch(`${API}/command${VIEW_QS}`, {
       method: "POST",
@@ -800,6 +883,13 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     if (digAt) noteTunnel(digAt, turnBefore, lastKnownState);
     if (typeof turnBefore === "number" && lastKnownState?.turn === turnBefore) {
       noTimeStreak++;
+      // NOTIME_DEBUG=1: 時間の進まない移動の原因を表示 (目標マスと直近のメッセージ)
+      if (process.env.NOTIME_DEBUG === "1" && noTimeStreak === 3 && cmd.type === CMD.WALK) {
+        const pl = lastKnownState.player ?? {}, [dx, dy] = DIR_DXY[cmd.direction as number] ?? [0, 0];
+        const t = (lastKnownState.map?.tiles ?? []).find((q: any) => q.x === pl.x + dx && q.y === pl.y + dy);
+        const mon = (lastKnownState.monsters ?? []).concat(lastKnownState.rememberedMonsters ?? []).find((m: any) => m.x === pl.x + dx && m.y === pl.y + dy);
+        console.log(`  [NOTIME] walk ${cmd.direction} from (${pl.x},${pl.y}): tile ${JSON.stringify(t)} monster ${mon ? `${mon.name} vis=${mon.visible} dist=${mon.distance} inView=${(lastKnownState.monsters ?? []).includes(mon)}` : "-"} afraid=${pl.timed?.afraid} msgs ${JSON.stringify((lastKnownState.messages ?? []).slice(-4))}`);
+      }
       if (cmd.type === CMD.READ || cmd.type === CMD.CAST) noTimeUntil[cmd.type as number] = sendSeq + 20;
     } else {
       noTimeStreak = 0;
@@ -811,6 +901,30 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
   const s = await getState();
   lastKnownState = s;
   return s;
+}
+
+/** spellfight: 近接 1 ターンの期待ダメージ (表示されている攻撃回数、武器のダイス、ダメージ修正。命中は 75% と置く) */
+function meleeExpected(p: any): number {
+  const w = (p.equipment ?? []).find((e: any) => WEAPON_TVALS.has(e.tval));
+  const per = (w ? (w.dd ?? 1) * ((w.ds ?? 4) + 1) / 2 + (w.toD ?? 0) : 1.5) + (p.toD ?? 0);
+  return Math.max(1, p.numBlows ?? 1) * Math.max(1, per) * 0.75;
+}
+/** spellfight: 呪文 1 回の期待値 (量 × 成功率) */
+function fxExpected(s: SpellInfo, role: Role): number {
+  const e = rolesOf(s as any).find(r => r.role === role);
+  return e ? e.amount * (1 - s.failRate / 100) : 0;
+}
+
+/** 危険度ログの ar: 詠唱なら呪文の役割、使う道具なら道具の役割 */
+function actionRole(cmd: Record<string, unknown>): string | undefined {
+  const pl = lastKnownState?.player;
+  if (!pl) return undefined;
+  if (cmd.type === CMD.CAST) return spellRoleLabel((pl.spells ?? []).find((x: any) => x.index === cmd.spellIndex));
+  if (cmd.type === CMD.QUAFF || cmd.type === CMD.READ || cmd.type === CMD.EAT) {
+    const e = itemRoles((pl.inventory ?? []).find((i: any) => i.slot === cmd.itemIndex))[0];
+    return e ? e.role + (e.sub ? `:${e.sub}` : "") : undefined;
+  }
+  return undefined;
 }
 
 async function getState(): Promise<any> {
@@ -1306,7 +1420,7 @@ async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionReques
     }
     const snapshot = await takeSnapshot(decisionGameId, st.turn, type);
     const rec = {
-      format_version: PLAYER_VIEW ? DECISION_FORMAT_VERSION_PLAYER : DECISION_FORMAT_VERSION,
+      format_version: DECISION_ROLES ? DECISION_FORMAT_VERSION_ROLES : PLAYER_VIEW ? DECISION_FORMAT_VERSION_PLAYER : DECISION_FORMAT_VERSION,
       game_id: decisionGameId,
       seed: GAME_SEED === null ? null : Number(GAME_SEED),
       race: st.player.race,
@@ -1546,14 +1660,14 @@ function isPassable(tiles: any[], x: number, y: number): boolean {
 function findHealingPotion(inventory: any[]): number | null {
   // CLW, CSW, CCW の順で探す (sval小さい方が弱い回復)
   const potions = inventory
-    .filter((item: any) => item.tval === TVAL.POTION && item.name.includes("Cure") && item.qty > 0)
+    .filter((item: any) => item.tval === TVAL.POTION && (item.name.includes("Cure") || strongHealByEffect(item)) && item.qty > 0)
     .sort((a: any, b: any) => a.sval - b.sval);
   return potions.length > 0 ? potions[0].slot : null;
 }
 
 function findStrongHealingPotion(inventory: any[]): number | null {
   const potions = inventory
-    .filter((item: any) => item.tval === TVAL.POTION && item.name.includes("Cure") && item.qty > 0)
+    .filter((item: any) => item.tval === TVAL.POTION && (item.name.includes("Cure") || strongHealByEffect(item)) && item.qty > 0)
     .sort((a: any, b: any) => b.sval - a.sval); // 強い順
   return potions.length > 0 ? potions[0].slot : null;
 }
@@ -1846,6 +1960,11 @@ const DIRECTIONAL_SPELLS = ["Magic Missile", "Lightning Bolt", "Frost Bolt", "Fi
   "Acid Bolt", "Orb of Draining", "Stinking Cloud"];
 
 function findCastableSpell(spells: SpellInfo[], names: string[], playerLevel: number, sp: number): SpellInfo | null {
+  // RULEFIX=spellfx: 名前の表の代わりに役割で (表ごとに対応する役割)
+  if (SPELLFX && (names === ESCAPE_SPELLS || names === DETECT_SPELLS || names === ATTACK_SPELLS)) {
+    const pl = { spells, level: playerLevel, sp };
+    return names === ESCAPE_SPELLS ? fxEscape(pl, false) : fxSpell(pl, names === DETECT_SPELLS ? "detect-monsters" : "attack-target");
+  }
   // 学習済み・レベル足りる・マナ足りる・失敗率80%未満のスペルを探す
   return spells.find(s =>
     s.learned && s.level <= playerLevel && s.mana <= sp && s.failRate < 80 &&
@@ -1854,6 +1973,11 @@ function findCastableSpell(spells: SpellInfo[], names: string[], playerLevel: nu
 }
 
 function findBestHealSpell(spells: SpellInfo[], playerLevel: number, sp: number, emergency: boolean): SpellInfo | null {
+  if (SPELLFX) { // 緊急時は回復量最大、通常時は MP 最小
+    const l = spellsFor(spells as any, playerLevel, sp, "heal");
+    if (!emergency) l.sort((a, b) => a.spell.mana - b.spell.mana);
+    return (l[0]?.spell as SpellInfo | undefined) ?? null;
+  }
   const castable = spells.filter(s =>
     s.learned && s.level <= playerLevel && s.mana <= sp && s.failRate < 80 &&
     HEAL_SPELLS.some(n => s.name.includes(n))
@@ -1865,6 +1989,14 @@ function findBestHealSpell(spells: SpellInfo[], playerLevel: number, sp: number,
 }
 
 function findStudyableSpell(spells: SpellInfo[], playerLevel: number): SpellInfo | null {
+  if (SPELLFX) { // 役割の順: 逃走、攻撃、治療、食事、回復、敵の感知、強化、...
+    const can = spells.filter(s => !s.learned && s.level <= playerLevel);
+    for (const role of FX_STUDY_ORDER) {
+      const c = can.find(s => rolesOf(s as any).some(e => e.role === role));
+      if (c) return c;
+    }
+    return can[0] ?? null;
+  }
   // 未学習で、レベルが足りているスペルを優先度順に探す
   // 優先: 回復 > 逃走 > 検知 > バフ > 攻撃
   const priorityLists = [HEAL_SPELLS, ESCAPE_SPELLS, DETECT_SPELLS, BUFF_SPELLS, ATTACK_SPELLS];
@@ -1879,6 +2011,8 @@ function findStudyableSpell(spells: SpellInfo[], playerLevel: number): SpellInfo
   return spells.find(s => !s.learned && s.level <= playerLevel) ?? null;
 }
 
+const FX_STUDY_ORDER: Role[] = ["escape-short", "attack-target", "cure", "nourish", "heal", "detect-monsters", "buff",
+  "escape-long", "attack-melee", "dig", "detect-stairs", "control", "attack-area", "detect-objects", "light"];
 let spellsUsed = 0;
 let spellsLearned = 0;
 
@@ -2127,6 +2261,8 @@ let teleportLoopCount = 0; // 同じエリアへの連続テレポート回数
 let descentTeleportCount = 0; // 降下テレポート回数 (同じ階でのリトライ制限)
 let supplyWoRUsedThisLevel = false; // 補給WoR使用済みフラグ (同一階ループ防止)
 let levelEntryDetected = false; // 各階で検知スペルを使ったか
+let lastDetectAt = 0; // RULEFIX=spellfx: 最後に敵の感知を唱えた行動
+let stairDetectLevel = -1, stairDetectTries = 0; // RULEFIX=spellfx: 階段の感知 (階ごと 3 回まで)
 const unreachableItems = new Set<string>(); // BFS到達不能なアイテムタイル
 const fleeCountByMonster = new Map<string, number>(); // 敵名ごとの逃走回数
 const forceFightMonsters = new Set<string>(); // 逃走不可能 → 戦うしかないモンスター
@@ -2190,6 +2326,7 @@ const SELL_STORE_FOR_TVAL: Record<number, number[]> = {
 
 // 保持すべきアイテムかチェック (消耗品 or 現装備より良い装備)
 function shouldKeepItem(item: any, equipment: any[]): boolean {
+  if (auditJunk(item)) return false; // RULEFIX=auditfix: 使えない本、害のある既知の消耗品
   // 消耗品は常に保持
   // RULEFIX=tryunknown: 未知の巻物は町で店に渡して識別する (読むと Deep Descent・召喚・呪いの危険。持っていても使わない)
   if (TRYUNKNOWN && item.tval === TVAL.SCROLL && item.aware === false) return false;
@@ -2238,6 +2375,7 @@ async function sellJunk(state: any) {
       if (shouldKeepItem(item, equip2) && !roomJunk(item)) continue;
 
       const stores = roomJunk(item) && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval) ? [5]
+        : AUDITFIX && item.tval >= 30 && item.tval <= 33 ? [3] // RULEFIX=auditfix: 本は本屋 (雑貨屋は本を買わない)
         : SELL_STORE_FOR_TVAL[item.tval] ?? [0]; // default: General
       for (const storeType of stores) {
         try {
@@ -2496,7 +2634,7 @@ async function playGame() {
     dangerLogger = new DangerLogger(DANGER_LOG_PATH, {
       h: 1, v: DANGER_RECORD_VERSION, engine: state.engine ?? "ts", view: state.view ?? "omniscient",
       class: state.player?.class ?? "?", race: state.player?.race ?? "?", seed: String(GAME_SEED ?? ""),
-      rulefix: [...RULEFIX].join(","),
+      rulefix: [...RULEFIX].join(","), roles: ROLE_ORDER,
       ...(DANGER_MODELS.length ? { model: process.env.DANGER_MODEL } : {}),
     });
   }
@@ -2525,6 +2663,8 @@ async function playGame() {
     const { x: px, y: py } = p;
     const tiles = state.map.tiles;
     const monsters = state.monsters;
+    // RULEFIX=auditfix: 見た呪文 (S_KIN、S_MONSTER など) から召喚持ちを知る
+    if (AUDITFIX) for (const m of monsters) if (!m.hasSummon && (m.spellsSeen ?? []).some((x: string) => /^S_/.test(x))) m.hasSummon = true;
     const inv = p.inventory;
     canDigHard = playerHasDigger(p);
     diggingSkill = p.digging ?? 0;
@@ -2799,6 +2939,18 @@ async function playGame() {
 
     // === 飢餓: 停滞脱出より先 (停滞中に餓死していた)。食べる、無ければ町へ (WoR、無ければ上り階段の補給帰還) ===
     if (p.timed.food <= 1500) {
+      // RULEFIX=spellfx: 食事の呪文 (Remove Hunger など) を食料より先に。MP が足りなければ敵のいない所で MP を待つ
+      const feed = SPELLFX ? fxSpell(p, "nourish") : null;
+      if (feed) {
+        spellsUsed++; fxNote("nourish");
+        addLesson(state.turn, state.depth, "食事", `空腹。${feed.name}`);
+        state = await sendCommand({ type: CMD.CAST, spellIndex: feed.index, direction: 5 });
+        continue;
+      }
+      if (SPELLFX && findFood(inv) === null && fxKnows(p, "nourish") && monsters.length === 0 && p.timed.food > 300) {
+        state = await sendCommand({ type: CMD.REST, turns: 10 });
+        continue;
+      }
       const f = findFood(inv);
       if (f !== null) {
         addLesson(state.turn, state.depth, "食事", `空腹。食事`);
@@ -2829,6 +2981,26 @@ async function playGame() {
           `HP${p.hp}/${p.maxHp}、見えている敵${monsters.length}体 (最寄り ${[...monsters].sort((a: any, b: any) => a.distance - b.distance)[0].name}) が2手以内に致命的。${here.feat === FEAT.DOWN_STAIR ? "下り" : "上り"}階段で離脱`);
         state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
         continue;
+      }
+    }
+
+    // === RULEFIX=spellfx: 毒・朦朧 (と HP 70% 未満の切り傷) は治す呪文で、薬より先に。隣に敵がいれば HP 半分以上の時だけ、
+    // 逃走の MP は残す。恐怖で隣に敵 (近接できない) → 恐怖を治す呪文 (Berserk Strength、Heroism) ===
+    if (SPELLFX && !castBlocked()) {
+      const adj = monsters.some((m: any) => m.distance <= 1);
+      const want: string[] = [];
+      if ((p.timed.poisoned ?? 0) > 0) want.push("POISONED");
+      if ((p.timed.stun ?? 0) > 0) want.push("STUN");
+      if ((p.timed.cut ?? 0) > 0 && hpPct < 0.7) want.push("CUT");
+      if ((p.timed.afraid ?? 0) > 0 && adj) want.push("AFRAID");
+      if (want.length > 0 && (!adj || hpPct >= 0.5 || want.includes("AFRAID"))) {
+        const cure = fxSpell(p, "cure", e => want.includes(e.sub ?? ""), adj ? fxReserve(p) : 0);
+        if (cure) {
+          spellsUsed++; fxNote("cure");
+          addLesson(state.turn, state.depth, "治療", `${want.join("/")}${adj ? "、隣に敵" : ""}。${cure.name}`);
+          state = await sendCommand({ type: CMD.CAST, spellIndex: cure.index, direction: 5 });
+          continue;
+        }
       }
     }
 
@@ -3335,10 +3507,12 @@ async function playGame() {
     }
 
     // === 優先度1.5: 検知スペル (新フロアで1回使用) ===
-    if (!levelEntryDetected && canCastSpells && actionCount > 1) {
-      const detectSpell = findCastableSpell(spells, DETECT_SPELLS, p.level, sp);
+    // RULEFIX=spellfx: 到着時に加えて、敵が見えないまま 300 行動たったらもう一度。逃走の MP は残す
+    if ((!levelEntryDetected || (SPELLFX && monsters.length === 0 && actionCount - lastDetectAt >= 300)) && canCastSpells && actionCount > 1) {
+      const detectSpell = SPELLFX ? fxSpell(p, "detect-monsters", undefined, fxReserve(p)) : findCastableSpell(spells, DETECT_SPELLS, p.level, sp);
       if (detectSpell) {
         spellsUsed++;
+        if (SPELLFX) { fxNote("detect-monsters"); lastDetectAt = actionCount; }
         levelEntryDetected = true;
         addLesson(state.turn, state.depth, "検知",
           `新フロアで${detectSpell.name}を使用。周囲の状況把握`);
@@ -3384,7 +3558,8 @@ async function playGame() {
       const cureN = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
       const escN = inv.filter((i: any) => (i.name?.includes("Phase Door") || /Flask~? of oil/i.test(i.name ?? "")) && i.qty > 0)
         .reduce((s: number, i: any) => s + i.qty, 0);
-      const foodN = inv.filter((i: any) => i.tval === TVAL.FOOD && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
+      const foodN = inv.filter((i: any) => i.tval === TVAL.FOOD && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0)
+        + (SPELLFX && fxKnows(p, "nourish") ? 99 : 0); // RULEFIX=spellfx: 食事の呪文を知っていれば食料のための帰還はしない
       const lightNow = (p.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
       const lightLow = typeof lightNow?.fuel === "number" && /Torch/i.test(lightNow.name ?? "") && lightNow.fuel < 1500
         && spareTorchSlot(inv) === null;
@@ -3579,14 +3754,14 @@ async function playGame() {
 
         // 逃走スペル (Phase Door/Teleport Self)
         if (canCastSpells) {
-          const escSpell = findCastableSpell(spells, ESCAPE_SPELLS, p.level, sp);
+          const escSpell = SPELLFX ? fxEscape(p, preferTeleport) : findCastableSpell(spells, ESCAPE_SPELLS, p.level, sp);
           if (escSpell) {
             fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
             spellsUsed++;
             addLesson(state.turn, state.depth, "魔法逃走",
               `HP${Math.round(hpPct*100)}%、${escSpell.name}で逃走`);
             state = await sendCommand({ type: CMD.CAST, spellIndex: escSpell.index, direction: 5 });
-            if (escSpell.name.includes("Teleport")) {
+            if (escapeIsLong(escSpell)) {
               stuckCount = 0; noProgressCount = 0;
             }
             continue;
@@ -3743,7 +3918,22 @@ async function playGame() {
     }
 
     // === 優先度3.5: バフスペル (敵が近くにいて戦闘前) ===
-    if (canCastSpells && monsters.filter((m: any) => m.distance <= 3).length > 0) {
+    // RULEFIX=spellfx: 状態表示に出ていない強化だけ (攻撃、防御、加速。属性耐性と補助は除く)。起きた敵が 2-5 マスに来る時、
+    // または隣の敵 2 体以上か HP 50-80% で隣に敵。逃走の MP は残す
+    if (SPELLFX) {
+      const active = new Set<string>(p.timedActive ?? []);
+      const adjN = monsters.filter((m: any) => m.distance <= 1).length;
+      // HP 半分未満では強化しない (回復・逃走が先。smoke45: HP 33% で Berserk Strength を唱えて次の手で死んだ)
+      const fight = hpPct >= 0.5 && (monsters.some((m: any) => m.asleep !== true && m.distance >= 2 && m.distance <= 5) || adjN >= 2 || (adjN >= 1 && hpPct < 0.8));
+      const buff = canCastSpells && fight ? fxSpell(p, "buff", e => e.amount > 0 && !active.has(e.sub ?? "")
+        && (e.kind === "offence" || e.kind === "speed" || (e.kind === "defence" && !(e.sub ?? "").startsWith("OPP_"))), fxReserve(p)) : null;
+      if (buff) {
+        spellsUsed++; fxNote("buff");
+        if ((fxCasts.buff ?? 0) <= 3 || (fxCasts.buff ?? 0) % 20 === 0) addLesson(state.turn, state.depth, "バフ", `${buff.name} (MP${buff.mana}, #${fxCasts.buff})`);
+        state = await sendCommand({ type: CMD.CAST, spellIndex: buff.index, direction: 5 });
+        continue;
+      }
+    } else if (canCastSpells && monsters.filter((m: any) => m.distance <= 3).length > 0) {
       const buffSpell = findCastableSpell(spells, BUFF_SPELLS, p.level, sp);
       if (buffSpell && sp >= buffSpell.mana * 2) { // MPに余裕がある場合のみ
         spellsUsed++;
@@ -3768,7 +3958,9 @@ async function playGame() {
       const hasSummonerNear = monsters.some((m: any) => m.hasSummon && m.distance <= 5);
       // DL30+では敵が近くにいるだけで加速（生存最優先）
       const isUltraDeep = state.depth >= 30;
-      if ((hasDangerNear || hasFastMonsterNear || nearEnemyCount >= 3 || hasSummonerNear) && isDeep
+      // RULEFIX=auditfix: 深さを問わず (起きた敵が 3 マス以内にいる時だけ)
+      const awakeNear = monsters.some((m: any) => m.distance <= 3 && m.asleep !== true);
+      if ((hasDangerNear || hasFastMonsterNear || nearEnemyCount >= 3 || hasSummonerNear) && (isDeep || (AUDITFIX && awakeNear && state.depth >= 1))
           || (isUltraDeep && nearEnemyCount >= 1)) {
         const speedSlot = findSpeedPotion(inv);
         if (speedSlot !== null) {
@@ -3807,6 +3999,7 @@ async function playGame() {
       const adjacentCount = monsters.filter((m: any) => m.distance <= 1).length;
       const rangedTargets = monsters.filter((m: any) =>
         m.distance >= 2 && m.distance <= 6 && !isDangerousMonster(m, p.level, state.depth, playerResists)
+        && (!SPELLFIGHT || hasLOS(tiles, px, py, m.x, m.y))
       );
       if (rangedTargets.length > 0 && adjacentCount === 0) {
         const atkSpell = findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
@@ -3819,13 +4012,33 @@ async function playGame() {
           })[0];
           const dir = directionTo(px, py, target.x, target.y);
           spellsUsed++;
-          state = await sendCommand({ type: CMD.CAST, spellIndex: atkSpell.index, direction: dir });
+          if (SPELLFIGHT) fxNote("attack-target");
+          // RULEFIX=spellfight: 目標のマスへ (方向だと 8 方向の線上にいない敵に当たらない)
+          state = await sendCommand(SPELLFIGHT ? { type: CMD.CAST, spellIndex: atkSpell.index, target: { x: target.x, y: target.y } }
+            : { type: CMD.CAST, spellIndex: atkSpell.index, direction: dir });
           const newMonsters = state.monsters;
           if (newMonsters.length < monsters.length) {
             totalKills++;
             killsThisLevel++;
             console.log(`  [遠距離撃破] Turn ${state.turn} DL${state.depth} CL${state.player.level} - ${atkSpell.name}→${target.name}(dist${target.distance}) (累計${totalKills})`);
           }
+          continue;
+        }
+      }
+    }
+
+    // === RULEFIX=spellfight: 起きた敵 (危険でない) が 2-4 マスに 1 体だけ → 走り寄って打つ呪文 (Leap into Battle: 説明では最大 4 マス)。
+    // 歩いて近づく手番を打撃に変える。6 マス以内の起きた敵が 2 体以上なら群れに飛び込まない ===
+    if (SPELLFIGHT && canCastSpells && !monsters.some((m: any) => m.distance <= 1)) {
+      const awake6 = monsters.filter((m: any) => m.asleep !== true && m.distance <= 6);
+      const m = awake6.length === 1 ? awake6[0] : null;
+      if (m && m.distance >= 2 && m.distance <= 4 && hasLOS(tiles, px, py, m.x, m.y) && !hurtsOnContact(m)
+          && !isDangerousMonster(m, p.level, state.depth, playerResists)) {
+        const leap = fxSpell(p, "attack-melee", e => e.sub === "MOVE_ATTACK", fxReserve(p));
+        if (leap) {
+          spellsUsed++; fxNote("attack-melee");
+          if ((fxCasts["attack-melee"] ?? 0) <= 3) addLesson(state.turn, state.depth, "呪文で戦う", `${m.name}(dist${m.distance})へ${leap.name}`);
+          state = await sendCommand({ type: CMD.CAST, spellIndex: leap.index, target: { x: m.x, y: m.y } });
           continue;
         }
       }
@@ -4121,6 +4334,16 @@ async function playGame() {
         }
       }
 
+      // RULEFIX=spellfight: 逃げる前に、その敵を遠くへ飛ばす・遅くする・眠らせる・混乱させる呪文 (成功率 60% 以上、見えている時)
+      if (SPELLFIGHT && canCastSpells && hasLOS(tiles, px, py, dangerMon.x, dangerMon.y)) {
+        const ctl = fxSpell(p, "control", e => !e.area && /^(AWAY_|MON_SLOW|MON_CONF|MON_SLEEP|MON_HOLD)/.test(e.sub ?? ""));
+        if (ctl && ctl.failRate <= 40) {
+          spellsUsed++; fxNote("control");
+          addLesson(state.turn, state.depth, "呪文で制御", `${dangerMon.name}(dist${dangerMon.distance})に${ctl.name}`);
+          state = await sendCommand({ type: CMD.CAST, spellIndex: ctl.index, target: { x: dangerMon.x, y: dangerMon.y } });
+          continue;
+        }
+      }
       // 通常の危険敵逃走
       if (canCastSpells) {
         const escSpell = findCastableSpell(spells, ESCAPE_SPELLS, p.level, sp);
@@ -4132,7 +4355,7 @@ async function playGame() {
           addLesson(state.turn, state.depth, "危険敵回避",
             `${dangerMon.name}(Lv${dangerMon.level},spd${dangerMon.speed}${breathInfo}${summonInfo})接近。${escSpell.name}で退避`);
           state = await sendCommand({ type: CMD.CAST, spellIndex: escSpell.index, direction: 5 });
-          if (escSpell.name.includes("Teleport")) { stuckCount = 0; noProgressCount = 0; }
+          if (escapeIsLong(escSpell)) { stuckCount = 0; noProgressCount = 0; }
           continue;
         }
       }
@@ -4172,6 +4395,42 @@ async function playGame() {
       // 逃走手段なし → 戦うしかない
     }
 
+    // === RULEFIX=auditfix: 怯えていて隣に起きた敵 → 殴れない。恐怖を治す薬、呪文、射撃、投擲、離れる、Phase Door の順 ===
+    if (AUDITFIX && (p.timed.afraid ?? 0) > 0) {
+      const adjAwake = monsters.filter((m: any) => m.distance <= 1 && m.asleep !== true);
+      if (adjAwake.length > 0) {
+        const tgt = [...adjAwake].sort((a: any, b: any) => (a.hp ?? 99) - (b.hp ?? 99))[0];
+        const potion = inv.find((i: any) => i.qty > 0 && (i.tval === TVAL.POTION || i.tval === TVAL.FOOD)
+          && itemRoles(i).some(e => e.role === "cure" && e.sub === "AFRAID"));
+        const spell = canCastSpells ? fxSpell(p, "cure", e => e.sub === "AFRAID") : null;
+        const ammo = findAmmo(p), flask = findOilFlask(inv), phase = findPhaseScroll(inv);
+        let away: number | null = null, awayDist = 1;
+        for (const d of ALL_DIRS) {
+          const [dx, dy] = dirOffsets[d]!;
+          const nx = px + dx, ny = py + dy;
+          if (!isPassable(tiles, nx, ny) || monsters.some((m: any) => m.x === nx && m.y === ny)) continue;
+          const near = Math.min(...adjAwake.map((m: any) => distanceTo(nx, ny, m.x, m.y)));
+          if (near > awayDist) { awayDist = near; away = d; }
+        }
+        let cmd: Record<string, unknown> | null = null, what = "";
+        // 隣が動かない敵だけ (キノコ、カビ、ゼリー) なら薬を使わず離れる (smoke46: yellow mushroom patch の隣で Boldness を飲んだ)
+        const allStill = adjAwake.every((m: any) => STATIONARY_RE.test(m.name ?? ""));
+        if (allStill && away !== null) { cmd = { type: CMD.WALK, direction: away }; what = "離れる"; }
+        else if (potion) { cmd = { type: CMD.QUAFF, itemIndex: potion.slot }; what = potion.name; }
+        else if (spell) { cmd = { type: CMD.CAST, spellIndex: spell.index, direction: 5 }; what = spell.name; spellsUsed++; }
+        else if (ammo !== null) { cmd = { type: CMD.FIRE, target: { x: tgt.x, y: tgt.y }, itemIndex: ammo }; what = "射撃"; }
+        else if (flask !== null) { cmd = { type: CMD.THROW, target: { x: tgt.x, y: tgt.y }, itemIndex: flask }; what = "油"; }
+        else if (away !== null) { cmd = { type: CMD.WALK, direction: away }; what = "離れる"; }
+        else if (phase !== null) { cmd = { type: CMD.READ, itemIndex: phase }; what = "Phase Door"; }
+        if (cmd) {
+          fearActions++;
+          if (fearActions <= 3 || fearActions % 20 === 0) addLesson(state.turn, state.depth, "恐怖", `怯えて${tgt.name}が隣 (殴れない)。${what} (#${fearActions})`);
+          state = await sendCommand(cmd);
+          continue;
+        }
+      }
+    }
+
     // === 優先度4: 隣接敵との戦闘 ===
     // 低CLでは動かない敵 (キノコ/ゼリー/カビ/浮遊眼) を殴らない: 胞子/接触/麻痺で CL1 が死ぬ (経験値より危険)
     const adjacentMonsters = monsters.filter((m: any) => m.distance <= 1 && !(p.level < 12 && hurtsOnContact(m)));
@@ -4184,6 +4443,22 @@ async function playGame() {
       }
     }
     if (adjacentMonsters.length > 0) {
+      // RULEFIX=spellfight: 隣の起きた敵が攻撃回数より多い → 隣の全員に打つ呪文 (Whirlwind Attack: 1 体 1 回と見る)。
+      // 起きた敵 3 体以上が 3 マス以内で HP 60% 未満 → 見えている全員を怯えさせる呪文 (Howl of the Damned)
+      if (SPELLFIGHT && canCastSpells) {
+        const awakeAdj = adjacentMonsters.filter((m: any) => m.asleep !== true).length;
+        const sweep = awakeAdj >= 2 && awakeAdj > (p.numBlows ?? 1)
+          ? fxSpell(p, "attack-melee", e => e.sub === "SWEEP", fxReserve(p)) : null;
+        const scare = !sweep && hpPct < 0.6 && monsters.filter((m: any) => m.asleep !== true && m.distance <= 3).length >= 3
+          ? fxSpell(p, "control", e => !!e.area && /^TURN_/.test(e.sub ?? "")) : null;
+        const fx = sweep ?? scare;
+        if (fx) {
+          spellsUsed++; fxNote(sweep ? "attack-melee" : "control");
+          if ((fxCasts[sweep ? "attack-melee" : "control"] ?? 0) <= 3) addLesson(state.turn, state.depth, "呪文で戦う", `隣の敵${awakeAdj}体、HP${Math.round(hpPct * 100)}%。${fx.name}`);
+          state = await sendCommand({ type: CMD.CAST, spellIndex: fx.index, direction: 5 });
+          continue;
+        }
+      }
       if (WHIRL && p.level >= 5 && adjacentMonsters.length >= 2 && canCastSpells) {
         const whirl = findCastableSpell(spells, ["Whirlwind Attack"], p.level, sp);
         if (whirl) {
@@ -4451,12 +4726,15 @@ async function playGame() {
         }
       }
 
-      // 攻撃スペルがあれば使う (隣接敵に方向指定)
+      // 攻撃スペルがあれば使う (隣接敵に方向指定)。RULEFIX=spellfight: 期待ダメージが近接より大きい時だけ、目標のマスへ
       if (canCastSpells) {
-        const atkSpell = findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
+        let atkSpell = SPELLFIGHT ? fxSpell(p, "attack-target", undefined, fxReserve(p)) : findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
+        if (SPELLFIGHT && atkSpell && fxExpected(atkSpell, "attack-target") <= meleeExpected(p)) atkSpell = null;
         if (atkSpell && sp >= atkSpell.mana) {
           spellsUsed++;
-          state = await sendCommand({ type: CMD.CAST, spellIndex: atkSpell.index, direction: dir });
+          if (SPELLFIGHT) fxNote("attack-target");
+          state = await sendCommand(SPELLFIGHT ? { type: CMD.CAST, spellIndex: atkSpell.index, target: { x: target.x, y: target.y } }
+            : { type: CMD.CAST, spellIndex: atkSpell.index, direction: dir });
           const newMonsters = state.monsters;
           if (newMonsters.length < monsters.length) {
             totalKills++;
@@ -4567,6 +4845,14 @@ async function playGame() {
         if (newInv.length > prevInvCount) {
           for (const item of newInv.slice(prevInvCount)) {
             console.log(`  [拾得] ${item.name} (tval=${item.tval}, ac=${item.ac ?? 0})`);
+          }
+          // RULEFIX=auditfix: 使えない本や害のある既知の消耗品は拾ったらすぐ落とす (このマスは二度と拾わない)
+          const junk = newInv.slice(prevInvCount).find((i: any) => auditJunk(i));
+          if (junk) {
+            droppedTiles.add(`${px},${py}`);
+            console.log(`  [不要品] ${junk.name}を落とす`);
+            state = await sendCommand({ type: CMD.DROP, itemIndex: junk.slot, quantity: junk.qty });
+            continue;
           }
         }
         // 装備比較: 拾ったものが現装備より良ければ即装備
@@ -4967,6 +5253,15 @@ async function playGame() {
             // 掘れない (掘削具なし): 探索を続ける
           }
         }
+      } else if (SPELLFX && (stairDetectLevel !== levelEntryTurn || stairDetectTries < 3) && fxSpell(p, "detect-stairs", undefined, fxReserve(p))) {
+        // RULEFIX=spellfx: 降りたいのに下り階段を知らない → 階段の感知 (Detect Stairs、Sense Surroundings など)
+        if (stairDetectLevel !== levelEntryTurn) { stairDetectLevel = levelEntryTurn; stairDetectTries = 0; }
+        stairDetectTries++;
+        const sd = fxSpell(p, "detect-stairs", undefined, fxReserve(p))!;
+        spellsUsed++; fxNote("detect-stairs");
+        addLesson(state.turn, state.depth, "階段感知", `降りたいが下り階段を知らない。${sd.name}`);
+        state = await sendCommand({ type: CMD.CAST, spellIndex: sd.index, direction: 5 });
+        continue;
       } else if (tooLongOnLevel || overleveled) {
         // 階段が見えない → テレポートで探す
         const teleSlot = findTeleportScroll(inv);
@@ -5212,6 +5507,8 @@ async function playGame() {
   console.log(`  逃走回数: ${fleeAttempts}`);
   console.log(`  スペル使用: ${spellsUsed}`);
   console.log(`  スペル学習: ${spellsLearned}`);
+  if (SPELLFX) console.log(`  呪文 (役割): ${Object.entries(fxCasts).map(([k, v]) => `${k} ${v}`).join(", ") || "なし"}`);
+  if (AUDITFIX) console.log(`  恐怖の対処: ${fearActions}回`);
   console.log(`  種族/職業: ${fp.race}/${fp.class}`);
   console.log(`  死亡: ${finalState.dead ? `はい (${deathCause})` : "いいえ"}`);
   console.log(`  行動回数: ${actionCount}`);
@@ -5263,6 +5560,7 @@ async function playGame() {
       fleeAttempts,
       spellsUsed,
       spellsLearned,
+      ...(SPELLFX ? { spellRoles: fxCasts } : {}),
       race: fp.race,
       class: fp.class,
       dead: finalState.dead,

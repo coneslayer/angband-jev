@@ -10,6 +10,12 @@
 export const DECISION_FORMAT_VERSION = 2; // v2: fight = {melee, throw, flee}
 // v3: the same questions, with the state drawn only from what the UI shows (/state?view=player)
 export const DECISION_FORMAT_VERSION_PLAYER = 3;
+// v4 (DECISION_ROLES=1): v3 plus the character's resources by role, spells and items alike (tools/spell-roles.ts), and
+// choices worded by role rather than by item
+export const DECISION_ROLES = process.env.DECISION_ROLES === "1";
+export const DECISION_FORMAT_VERSION_ROLES = 4;
+
+import { resourceLines } from "../spell-roles.js";
 
 export type DecisionType = "fight" | "tactic" | "recall" | "descend" | "explore" | "equip";
 export const DECISION_TYPES: DecisionType[] = ["fight", "tactic", "recall", "descend", "explore", "equip"];
@@ -159,6 +165,20 @@ function monsterLine(m: any): string {
   return `${m.name}(${t.join(",")})`;
 }
 
+/** DECISION_ROLES: 役割で言い直した選択肢 (呪文の逃走・回復も含む) */
+const ROLE_CRITERIA: Partial<Record<DecisionType, Record<string, string>>> = {
+  fight: {
+    melee: "fight the target monster in melee",
+    throw: "attack the target monster from a distance (thrown oil, missiles or an attack spell)",
+    flee: "avoid the target monster and escape (stairs, or a short escape by scroll or spell)",
+  },
+  tactic: {
+    heal: "heal now, by potion or healing spell",
+    flee: "escape from the enemies, by scroll or spell",
+    fight: "keep attacking without healing",
+  },
+};
+
 /** /state JSON → 決定的なテキスト (wisdomContext なし) */
 export function buildStateText(state: any): string {
   const p = state.player;
@@ -187,6 +207,7 @@ export function buildStateText(state: any): string {
     `Resists: ${resists.length > 0 ? resists.join(",") : "none"}`,
     `Abilities: ${abil.length > 0 ? abil.join(",") : "none"}`,
     `Status: ${status.length > 0 ? status.join(",") : "normal"} ${p.hunger ? p.hunger : `food:${timed.food ?? "?"}`}`,
+    ...(DECISION_ROLES ? resourceLines(p) : []),
     `Equipment: ${equip.map(e => cleanName(e.name)).join(", ") || "none"}`,
     `Nearby monsters: ${nearby.map(monsterLine).join(", ") || "none"}`,
   ];
@@ -202,7 +223,7 @@ export function buildStateText(state: any): string {
 function build(type: DecisionType, state: any, situation: string[]): DecisionRequest {
   return {
     state: `${buildStateText(state)}\nSituation:\n${situation.join("\n")}`,
-    questions: { decision: QUESTIONS[type] },
+    questions: { decision: DECISION_ROLES && ROLE_CRITERIA[type] ? { ...QUESTIONS[type], criteria: ROLE_CRITERIA[type]! } : QUESTIONS[type] },
   };
 }
 

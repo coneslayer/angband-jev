@@ -3486,6 +3486,185 @@ and the first candidate is taken). Rerun (`runs/smoke43`): no errors; the three 
 crashed start fires 19 times (21 orcs in the lines) and dies on DL10 at 19,590 actions to a light hound, against
 devices' cave orc on DL8 at 13,071. A session 24 candidate.
 
+### Session 24 (launched 2026-10-29 20:11)
+Base: D23 (`...,gearid,tryunknown,worwait,deepkit,neutdrink,digskill`). Variants: stationmem, blindsafe, corridor,
+devices2; seed 4700000. Canary (session 23's confirmQ combo, 20 starts): 20 of 20 identical.
+
+The screen ran at about 63 pairs an hour (smoke tests shared the CPU), so at its 06:41 cutoff it would have stopped near
+650 pairs and closed every open variant as unresolved. At 21:43 (about 120 pairs in) the driver was restarted with the
+screen allowed until 11:11 and the session until 16:11, so that every variant reaches look 3. The stage deadline is a
+local in the running process, so this needed a restart: the driver was killed with SIGKILL (SIGTERM drains the pool and
+then runs the stage's final check, which would have closed the open variants), its 13 game servers and players by PID,
+and `state.json`'s deadline moved (backups `state.json.bak-restart`, `driver.log.bak-restart`). The screen resumes from
+the outcomes in `driver.log`; the 13 interrupted games replay from their seeds.
+
+### Spellcasting by effect: plan for session 25 (2026-10-29)
+
+**Why.** busho sorts spells into heal, buff, escape, detection and attack by matching names against lists written for
+angband-ts (`busho-player.ts:1829`). Against 4.2.6 the lists miss most spells. Session 23's confirm arm (707 games):
+
+| Class | Casts a game | Cast | Learned, never cast |
+|---|---|---|---|
+| Paladin | 103 | Bless (8,685, with no check that it is already active: the view doesn't send it), Detect Evil on arrival, Minor Healing (41) | Call Light, Sense Invisible |
+| Rogue | 30 | Detect Monsters on arrival, Phase Door as an escape (about 228) | Object Detection, Detect Stairs |
+| Ranger | 28 | Detect Life on arrival | Remove Hunger (101 games), Herbal Curing (58) |
+| Blackguard | 0 | | Seek Battle, Berserk Strength ("Berserker" in the list), Whirlwind Attack, Shatter Stone, Leap into Battle |
+
+Remove Hunger feeds (starvation: 12 deaths in that arm) and Herbal Curing cures poison, cuts and stun (poison: 46
+deaths). Attack spells are cast in one of 8 compass directions (`directionTo`), so a bolt misses a target that isn't on
+a line; CAST has no target square yet (AIM and ZAP got one for devices).
+
+**Approach: roles from effects, not names.** The 4.2.6 spell browser shows, for every spell in a book the character
+holds: name, level, mana, fail, an Info column built from the effects (`get_spell_info`: `dam 3d4`, `heal 15`,
+`dur 12+d12`, `range 10`), the description, and once the spell has worked its average damage and element. The status
+bar shows each active timed effect (Bless, Hero, Berserk, ProtEvil, OppPois, Fast...). The bridge sends the same facts
+in structured form, and busho maps a fixed vocabulary of engine effect codes (about 70 in class.txt) to roles. No spell
+or class names appear in the rules, so every class and every book, including dungeon books found later, works the same.
+
+1. **Bridge (`main-http.c`)**, additive, so base replays unchanged:
+   - per spell: `info` (the Info string), `desc`, `worked`, and `effects`: `[{e, sub, dice, radius, other}]` from the
+     spell's effect chain, dice evaluated at the current level as the Info column does;
+   - `timedActive`: every nonzero player timed effect the status bar shows, by its status-bar name;
+   - CAST takes `target {x,y}` (`target_set_location`, as FIRE does); direction-only casts are unchanged.
+2. **Roles (`tools/spell-roles.ts`, new)**: `rolesOf(spell) → [{role, sub, value}]`:
+   - heal (HEAL_HP: amount and percent), cure:<status> (CURE, TIMED_DEC: POISONED, CUT, STUN, AFRAID, CONFUSED,
+     BLIND, AMNESIA), nourish (NOURISH);
+   - escape-short / escape-long (TELEPORT, by range), escape-level (TELEPORT_LEVEL), recall (RECALL, never an escape);
+   - detect-monsters (DETECT_*_MONSTERS, DETECT_EVIL, DETECT_FEARFUL_MONSTERS, READ_MINDS), detect-stairs
+     (DETECT_STAIRS, MAP_AREA), detect-objects (DETECT_OBJECTS, SENSE_OBJECTS, DETECT_GOLD), light (LIGHT_AREA);
+   - buff:<timed> (TIMED_INC), split offence (BLESSED, HERO, SHERO, ATT_*, BLOODLUST), defence (PROTEVIL, OPP_*,
+     STONESKIN), speed (FAST), utility (SINVIS, FREE_ACT);
+   - attack-target (BOLT, BEAM, BOLT_OR_BEAM, BALL, ARC, SPOT, STRIKE, SWARM, SHORT_BEAM and LINE unless KILL_WALL),
+     attack-area (SWEEP, SPHERE, damaging PROJECT_LOS), attack-melee (MELEE_BLOWS, MOVE_ATTACK),
+     control (BOLT_STATUS, PROJECT_LOS:TURN_ALL, sleep, slow, confuse, scare), dig (KILL_WALL).
+   Each castable spell's value is its expected effect times (1 − fail), per mana.
+3. **Decisions (busho)**: the existing decision points ask for a role instead of a list, and these are added:
+   - nourish when Hungry or Weak, before food (and in upnavfood's food walk);
+   - cure:POISONED, CUT, STUN before potions, in lowheal, neutdrink and the poisoned paths; cure:AFRAID when afraid
+     with a monster adjacent (a frightened character can't melee);
+   - buffs only when the status bar doesn't show the effect, and only with an awake monster approaching (distance
+     2–5), not to open a fight with a weak monster already adjacent;
+   - detect-monsters on arrival and again every 300 actions; detect-stairs on arrival when the descend gate is open;
+   - dig spells in the tunnel rule before digskill gives up on a wall;
+   - an SP reserve: with an escape-short spell, other casts keep its mana in hand;
+   - learning order by role (cure, escape, nourish, heal, detection, buff, attack); Priests and Paladins learn at
+     random in 4.2.6, so this only steers Rogues, Rangers and Blackguards. The Blackguard's second town book
+     (Fear and Torment, Bookseller) is bought at CL15.
+4. **Combat casting** (second flag): an attack spell when its expected damage per turn (average from the dice, times
+   1 − fail) beats melee (known blows × weapon dice plus to-dam) and the launcher, with mana above the reserve; SWEEP
+   with 2+ adjacent when the sum beats one target's blows; MOVE_ATTACK (Leap into Battle) instead of walking to an
+   awake monster 2–4 away; TURN_ALL with 3+ awake monsters closing; BOLT_STATUS slow or sleep on a monster the danger
+   rule would flee from. Blackguards gain mana by landing blows and taking damage and lose it out of combat
+   (`player-util.c:216`, `player-attack.c:1002`), so their spells are cast mid-fight, never pre-buffed.
+
+**UI audit.** Every effect code the roles use is checked against the description the browser shows for the farm
+classes' spells (e.g. Herbal Curing "Cures all cuts, poison, stunning and black breath"; Remove Hunger "renders you
+comfortably fed"; Berserk Strength "Removes fear and grants you berserk strength"). A code whose effect the
+description doesn't state is left out. The table goes in this section before launch.
+
+**Flags and arms.** `spellfx` (1–3) and `spellfight` (4, implies `spellfx`); session 25 arms: base (D23, or D24 if
+session 24 adopts anything), spellfx, spellfx+spellfight. Warriors cast nothing and their pairs are identical in
+every arm, so session 25 plays Paladin, Rogue, Ranger and Blackguard starts only (new `--classes` in driver17); the
+verdict then covers those four classes, about three quarters of the farm's starts. Seed 4900000.
+
+**Tests before launch.**
+- Every spell of all nine classes through `rolesOf` (dumped from fresh characters of each class; the bridge lists
+  every class spell): each has a role or a stated reason for none; the table for the farm classes is checked by hand.
+- Replay: base with the new bridge and busho replays 20 of session 24's games identically (the session canary does
+  this again).
+- Smoke (`sm.py`, OVN_PORT_OFFSET 1000): 12 fresh starts of each farm class in each arm; no errors or timeouts; count
+  casts by role; read the games where Remove Hunger, Herbal Curing, Berserk Strength and Leap into Battle fire.
+- A side check outside the verdict: 8 starts each of Mage, Priest, Necromancer and Druid, to see the roles carry to
+  pure casters (the farm's rules are melee rules, and Necromancers need darkness, so not part of the screen).
+
+**Timing.** Build tonight while session 24 runs (bridge about 1 h, roles and decisions about 3 h, combat about 2 h,
+tests about 1 h). Session 24's screen ends by 06:41 and its confirmation, if anything is adopted, about 3 hours
+later. With three arms the farm plays about 150 pairs an hour, so looks 1 and 2 come about 1 and 2 hours after
+launch and look 3 about 4.7 hours after. Launched at 09:40, look 2 lands before noon and look 3 about 14:20; if
+session 24 adopts nothing it ends about 06:40 and look 3 lands about 11:20.
+
+**Risks.** Buff casts cost turns (the active check and the approaching-monster gate are the guard); low-level fail
+rates are high (Rogue Detect Monsters starts at 50%), which the value model counts; Blackguard mana swings within a
+fight; whirl alone was rejected in session 16 (PH(10) 1.10), so SWEEP is gated on the damage comparison, not on two
+adjacent monsters alone.
+
+**Decision model integration.** Spells are named in three places that disagree: busho's lists, the danger logger's
+`cs` regexes (`tools/danger/record.ts:97`, which count Remove Hunger and Herbal Curing as healing spells) and the
+decision prompts, whose state line counts only potions and scrolls (`Heals:N Phase:N Teleport:N`) and whose choices
+name items ("read a Teleportation scroll"). The roles replace all three:
+- `tools/spell-roles.ts` becomes a resource layer: `resources(state)` lists, per role, every way to do it now, spells
+  and items alike (cost, fail, expected amount, uses left = items + mana / cost). Rules, the danger logger and the
+  prompts read it; nothing else maps names to uses.
+- Danger rows gain `rs` (per role: available now, uses left, best expected amount, best fail) and `ar`, the role of
+  the action taken (`act` is the command type, so CAST lumps every spell). The header version goes up; `inv` and `cs`
+  stay, so the current model still evaluates, and a retrain can use the new fields. Role features mean a Paladin's
+  and a Ranger's rows describe the same things, which a model trained across classes needs.
+- Prompts list resources by role (`Escapes: Phase Door scroll x3, Phase Door spell (2 mana, 22% fail, 6 casts)`), and
+  choices stay at the role level (heal, cure, escape, attack at range): the model picks the role and the executor picks
+  the means. The choice set stays fixed across classes, as typed choice questions and rollout labels need.
+- Models get the raw quantities, not the rules' single value score, so they can weight them differently.
+None of this changes play under the rules, so it doesn't touch session 25's verdict; the replay check covers it.
+
+### Capabilities lost to mismatches: audit (2026-10-29)
+
+busho was written against angband-ts's omniscient state; under the C player view some of its rules never fire, or fire
+wrongly. Checked: every field busho reads against what `main-http.c` and `honest-view.ts` send, every hardcoded name
+against 4.2.6's gamedata, store indices against `store.txt`, the CMD-GUARD lines (30 commands in a row that passed no
+game time) and lesson types in session 23's confirm arm (707 games), and a replay with `NOTIME_DEBUG=1`.
+
+| Finding | Evidence | Effect |
+|---|---|---|
+| **Melee while afraid.** busho attacks by walking into the monster; afraid, 4.2.6 answers "You are too afraid to attack" and no time passes. Nothing checks fear. | 1,288 runs of 30+ such commands in 221 of 707 games; replay of 4600036-Rogue (a poltergeist's touch, then a soldier) | the CMD-GUARD holds a turn after every 30, so the monster hits a character standing still; 10 deaths while afraid. Missiles, throws, spells, potions and stepping away all still work |
+| Fear cures carried, never drunk | Boldness, Heroism, Berserk Strength picked up about 190 times | as above |
+| `hasSummon` never set | bridge sends `spellsSeen` as RSF names (`S_KIN`); honest-view doesn't derive it | summoner targeting, threat, speed-potion and avoidance rules dead |
+| Monster spell elements never set | honest-view tests `/fire/` etc. against upper-case RSF names (`BO_FIRE`) | `spellElements` empty (prompt line only) |
+| Casting frequency fixed at 15% | honest-view's assumption; rules test 33% | frequent-caster checks dead |
+| Speed potions only at DL10+ | `isDeep` gate | picked up in 100 games, drunk 46 times; 45 died with one unused |
+| Healing potions by "Cure" in the name | `findHealingPotion` and kin | Potions of Healing, \*Healing\*, Life never drunk to heal (none found at DL1–15 yet) |
+| Teleportation scrolls | 4.2.6 sells them only in the Black Market; the shop list asks the Alchemist and Magic shop first | 44 bought in 707 games; the rules that need one rarely fire (several lesson types never seen). Staff of Teleportation (Magic shop) unused without devices |
+| Full pack | every book kept: 426 pickups of other realms' books (Warriors with prayer and nature books), 4 of the class's own; and every known potion and scroll (Poison, Blindness, Confusion) | 25 CCW and 18 WoR purchases failed; 154 PICKUP loops. Copies of the class's own book stack in one slot and are insurance: books are HATES_FIRE, each copy burns with chance min(5 × fire damage, 300)/10,000 per hit (3% at most), so 2–3 copies make losing the last one negligible; selling is off by default (`birth_no_selling`), so they cost only weight |
+| `danger` uses game data | `MON_BLOW_AVG` reads monster.json blows by name | the default rule sees blows the player hasn't; `seenMeleePerTurn` (lore) exists for stairsfirst |
+| Slays and brands in combat DPS | `weaponDpsVsMonster` reads `slays`/`brands`, the bridge sends `kslays`/`kbrands` counts | minor (gearid already turns weapon swaps off) |
+| Prompt "Abilities" line | reads `e.flags`, the bridge sends `kflags` | always "none" for the decision model |
+| Spell names | angband-ts lists | fixed by RULEFIX=spellfx (above) |
+
+Not used at all: **recharging.** No rule reads a Scroll of Recharging (Alchemist, normal stock, 200 gold; native DL40+) or casts
+Recharging (Mage CL5, Rogue CL20), and tryunknown gives unknown scrolls away unread. In 4.2.6 a recharge destroys the
+device 1 time in i, i = strength + (100 − kind level)/10 − 2 × charges per item (scroll strength 6: about 1 in 15 for an
+empty shallow wand, 1 in 9 with 3 charges left), else adds 2 + 1d t charges. Worth adding only with devices: if devices2 is
+adopted, carry 1–2 scrolls with an attack wand or a healing staff and recharge it when empty, nothing in view.
+
+Checked and fine: tval and terrain codes, object flag, modifier and element indices, hunger/cut/stun grade names, store
+indices in the shop lists (apart from Teleportation), monster names in the rules' patterns, item names with `&`/`~`
+markers (all matched by substring).
+
+Found in this build's own code: the bridge's spell serializer called `get_spell_info` and `dice_roll`, which roll dice
+and advanced the game's RNG on every state request (9 of 12 base replays diverged in `runs/smoke44`). The serializer now
+saves and restores the RNG state.
+
+### RULEFIX=auditfix and session 25's design (2026-10-29)
+
+The audit's fixes, bundled in one flag so one arm measures them together (the confirmation then tests what is adopted):
+- **Fear.** Afraid with an awake monster adjacent: drink a known fear cure (found by effect, CURE:AFRAID: Boldness,
+  Heroism, Berserk Strength; Warriors start with a Berserk Strength they never drank), else cast one, else shoot, else
+  throw oil, else step to the free square farthest from the adjacent monsters, else Phase Door. Never melee.
+- **Summoners** known from the spells seen (`S_*`), so the summoner rules work.
+- **Speed potions** at any depth when an awake monster is within 3 and the existing danger tests hold (was DL10+).
+- **Strong healing potions** found by effect (heal 100+: Healing, \*Healing\*, Life) in the emergency finders.
+- **Pack:** books of realms the class can't use, and known harmful potions, scrolls and food (by effect: inflicts
+  poison, blindness, confusion, paralysis, slowness, hallucination, amnesia; drains stats or experience; summons;
+  aggravates; darkens; Deep Descent; curses; Salt Water's hunger) are dropped when picked up and given to the stores in
+  town (books to the Bookseller, which the General store isn't). Copies of the class's own books are kept.
+
+Not in the bundle: the `danger` rule's game-data blows (an honesty fix that removes information; it would mask the
+other gains) and the Staff of Teleportation (2,000 gold before markup).
+
+Item effects come from the bridge as `keffects` (the kind's effect chain, sent once the kind is known, as its
+description lists it); `tools/spell-roles.ts` gives items roles the same way as spells (`itemRoles`, `itemHarmful`).
+
+Session 25 arms: base, spellfx, spellfight (implies spellfx), auditfix; all classes (Warriors back in, for auditfix);
+seed 4900000. Launch script `<scratchpad>/launch25.sh BASE CANARY_STAGE CANARY_ARM CANARY_STARTS HOURS SCREEN_HOURS`.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
