@@ -3874,6 +3874,37 @@ start's depth.
 - Dropped from the plan: changing Blackguards' fear handling. Berserk Strength cures fear and adds +75 to-hit, the
   right play for an afraid melee class, and session 25's data didn't isolate it as a cause.
 
+### Step 2: pure casters smoke (2026-10-30)
+
+10 fresh starts each of Mage, Priest and Druid (seeds 5100000–5100029), 20,000 actions, base D24 + leavelos +
+lightout, arms spellfx and spellfight (`runs/smoke51`, deleted after this summary). No errors or timeouts in 90
+games.
+
+| Class | Arm | Dead | Max depth (sorted) | Mean actions |
+|---|---|---|---|---|
+| Mage | base | 8 | 2 2 2 2 4 5 5 5 5 7 | 5,745 |
+| Mage | spellfx | 10 | 2 2 3 3 3 4 4 4 5 5 | 1,902 |
+| Mage | spellfight | 10 | 2 4 4 4 5 5 6 7 8 9 | 4,081 |
+| Priest | base | 7 | 3 4 5 7 8 9 9 10 12 13 | 15,429 |
+| Priest | spellfx / spellfight | 7 | 1 5 5 6 6 6 7 8 8 9 | 12,339 |
+| Druid | base | 8 | 2 2 3 3 3 4 4 5 7 7 | 7,832 |
+| Druid | spellfx | 10 | 2 2 3 3 3 4 4 4 10 10 | 6,724 |
+| Druid | spellfight | 9 | 2 3 3 3 3 7 7 7 9 12 | 6,280 |
+
+- **Base Mages already attack with spells**: the old name list holds Magic Missile (1,429 casts, 327 kills in 10
+  games). Under spellfx the Mage learned **Electric Arc** at CL2 and preferred it, but it is a `SHORT_BEAM` whose
+  reach is radius 0 + 1 square per level (`class.txt`, `effect-handler-attack.c:852`): 2 squares at CL2, while the
+  ranged rule fires at 2–6. Fixed: attack roles carry `reach` (SHORT_BEAM: radius + level / `other`; ARC: radius,
+  since its `other` is the arc's width in degrees), and the spellfx ranged rule picks its target first and then the
+  best spell that reaches it. Mage rerun (`runs/smoke52`, same 10 starts): spellfight 8 dead, max depth to 9, mean
+  7,821 actions (kills by Magic Missile or Electric Arc 341, base 327); spellfx alone still 10 dead (2,942 actions:
+  it has no ranged attack rule of its own beyond the old one, and 3 died of poison).
+- **Priests** did best of the three under base (DL8+ in 6 of 10, to DL13); spellfx/spellfight cast Bless 700+ times
+  and went less deep in this small sample.
+- **Druids** die young in every arm (Stinking Cloud 646 casts under spellfight).
+- For the harvest: casters on D24 + leavelos + lightout + spellfx + spellfight; their yield of DL10+ starts will be
+  low, so the pilot measures it per class.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

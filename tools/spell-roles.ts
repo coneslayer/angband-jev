@@ -41,6 +41,13 @@ export interface RoleEntry {
   kind?: "offence" | "defence" | "speed" | "utility";
   /** attacks: a ball/arc/sphere/area that hits more than one monster */
   area?: boolean;
+  /** short-range attacks (SHORT_BEAM, ARC): squares reached = radius + player level / per (per 0: fixed) */
+  reach?: { radius: number; per: number };
+}
+
+/** Squares an attack reaches at this player level (effect-handler-attack.c SHORT_BEAM/ARC); others are full range */
+export function reachOf(e: RoleEntry, playerLevel: number): number {
+  return e.reach ? e.reach.radius + (e.reach.per > 0 ? Math.floor(playerLevel / e.reach.per) : 0) : Infinity;
 }
 
 /** Statuses a cure can lift, as busho's `timed` names them */
@@ -108,7 +115,10 @@ export function rolesOf(spell: { effects?: SpellEffect[] }): RoleEntry[] {
         if (controls(e.sub)) { out.push({ role: "control", sub: e.sub, amount: 1 }); break; }
         if (hurtsMonsters(e.sub) && a > 0)
           out.push({ role: "attack-target", sub: e.sub, amount: e.e === "SWARM" ? a * Math.max(1, e.bonus) : a,
-            area: e.e === "BALL" || e.e === "ARC" || e.e === "STRIKE" || e.e === "SWARM" });
+            area: e.e === "BALL" || e.e === "ARC" || e.e === "STRIKE" || e.e === "SWARM",
+            // SHORT_BEAM grows a square every `other` levels; ARC's `other` is its width in degrees
+            ...(e.e === "SHORT_BEAM" ? { reach: { radius: e.radius, per: e.other } }
+              : e.e === "ARC" ? { reach: { radius: e.radius, per: 0 } } : {}) });
         break;
       case "SPHERE":
         if (hurtsMonsters(e.sub) && a > 0) out.push({ role: "attack-area", sub: e.sub, amount: a, area: true }); break;

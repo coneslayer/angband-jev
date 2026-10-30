@@ -14,7 +14,7 @@ import { SavepointBank } from "./savepoint/bank.js";
 import { adaptPlayerView, estimatedMaxHp } from "./honest-view.js";
 import { DangerLogger, DANGER_RECORD_VERSION } from "./danger/record.js";
 import { DangerModel } from "./danger/model.js";
-import { rolesOf, itemRoles, itemHarmful, spellsFor, resourceLines, ROLE_ORDER, CURE_STATUS, type Role, type RoleEntry } from "./spell-roles.js";
+import { rolesOf, itemRoles, itemHarmful, spellsFor, resourceLines, reachOf, ROLE_ORDER, CURE_STATUS, type Role, type RoleEntry } from "./spell-roles.js";
 
 const API = process.env.API ?? "http://localhost:3000";
 // PLAYER_VIEW=1: play from what the UI shows (/state?view=player), as a human player would
@@ -4073,14 +4073,17 @@ async function playGame() {
         && (!SPELLFIGHT || hasLOS(tiles, px, py, m.x, m.y))
       );
       if (rangedTargets.length > 0 && adjacentCount === 0) {
-        const atkSpell = findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
+        // 召喚持ちは優先排除 (増殖前に倒す)、次に近い敵を狙う
+        const target = rangedTargets.sort((a: any, b: any) => {
+          const aSummon = a.hasSummon ? -10 : 0;
+          const bSummon = b.hasSummon ? -10 : 0;
+          return (a.distance + aSummon) - (b.distance + bSummon);
+        })[0];
+        // RULEFIX=spellfx: 目標に届く呪文だけ (Electric Arc などの短いビームは レベル÷n マスまで。smoke51: CL2 の Mage が
+        // 2 マスしか届かない Electric Arc を 3-6 マス先へ唱えていた)
+        const atkSpell = SPELLFX ? fxSpell(p, "attack-target", e => reachOf(e, p.level) >= target.distance)
+          : findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
         if (atkSpell && sp >= atkSpell.mana) {
-          // 召喚持ちは優先排除 (増殖前に倒す)、次に近い敵を狙う
-          const target = rangedTargets.sort((a: any, b: any) => {
-            const aSummon = a.hasSummon ? -10 : 0;
-            const bSummon = b.hasSummon ? -10 : 0;
-            return (a.distance + aSummon) - (b.distance + bSummon);
-          })[0];
           const dir = directionTo(px, py, target.x, target.y);
           spellsUsed++;
           if (SPELLFIGHT) fxNote("attack-target");
@@ -4799,7 +4802,7 @@ async function playGame() {
 
       // 攻撃スペルがあれば使う (隣接敵に方向指定)。RULEFIX=spellfight: 期待ダメージが近接より大きい時だけ、目標のマスへ
       if (canCastSpells) {
-        let atkSpell = SPELLFIGHT ? fxSpell(p, "attack-target", undefined, fxReserve(p)) : findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
+        let atkSpell = SPELLFIGHT ? fxSpell(p, "attack-target", e => reachOf(e, p.level) >= 1, fxReserve(p)) : findCastableSpell(spells, ATTACK_SPELLS, p.level, sp);
         if (SPELLFIGHT && atkSpell && fxExpected(atkSpell, "attack-target") <= meleeExpected(p)) atkSpell = null;
         if (atkSpell && sp >= atkSpell.mana) {
           spellsUsed++;
