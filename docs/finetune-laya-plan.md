@@ -3557,6 +3557,18 @@ confirmation of anything adopted (about 4 hours).
   (6.4 → 5.6).
 - Pace with three arms: look 2 near 10:15, look 3 near 13:00, a confirmation ending near 17:15.
 
+**Look 2** (10:17, 300 pairs):
+
+| Arm | PH(10) | z (bound 2.55) | Deep death rate (p) | Decision |
+|---|---|---|---|---|
+| spellfx | 0.976 | 0.34 | 0.89 (0.84) | continue |
+| spellfight | 0.960 | 0.55 | 0.86 (0.91) | continue |
+
+Both drifted toward 1. Warriors (a fifth of the starts) play identically to base by construction, which dilutes any
+effect by about a fifth. Deaths by start type, base/spellfx/spellfight: bank 49/41/40 (of 62), Blackguard 35/33/29,
+Rogue 29/26/26, Paladin 26/29/29, Ranger 35/34/34 (of 48–49). spellfight's attack spells: 501 casts in 305 games.
+Look 3 needs z ≥ 1.67, about PH(10) 0.92.
+
 **Why corridor failed** (704 pairs; `<scratchpad>/corr/`). PH(10) 1.06 (80%: 0.98–1.15), death rate 1.01, pace 0.98:
 no effect, rather than harm. It fired in 570 games (81%), median 15 times, 13,660 steps and holds in all (0.16% of
 actions), and the 134 games where it never fired played identically.
