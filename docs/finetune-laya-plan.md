@@ -3843,6 +3843,37 @@ boosts device damage by (skill − kind level)/2 percent (`cmd-obj.c:507`).
 4. **Arms:** base (the default after session 25), devicefx; the recharging part as a second arm if the first helps.
 5. A corridor retry against known summoners (see "Why corridor failed") fits the same deep starts and score.
 
+## Next phase: deeper play across all classes (from 2026-10-30)
+
+Goal: judge the ideas that look like correct play but came up short at DL1–9 (auditfix, devices2 as devicefx,
+spellfx) on starts deep enough for them to matter, across all classes including the pure casters. Order: (1) fix
+the two problems session 25 exposed; (2) a 2-hour pilot harvest of savepoints with D24 (and a caster base for Mage,
+Priest and Druid after a smoke) to measure the yield per depth; (3) a full harvest with branching from deep
+savepoints (resampling by lineage in `hazard.py`); (4) screens on the new bank, scored PH(15) or PH(20) from the
+start's depth.
+
+### Step 1: leavelos and lightout (2026-10-30)
+
+- **Bridge** (angband-c `main-http.c`): each visible monster carries `los`, the game's own split in the monster list
+  between "You can see" and "You are aware of" (`mon-list.c:189`, `projectable`); command 29 refills the wielded
+  lantern from a pack item (`CMD_REFILL`).
+- **`RULEFIX=leavelos`**: `leave` counts a listed monster only when it is in line of sight, not when it is only
+  detected (session 25: Blackguards left levels on Seek Battle's detection of Fang 27 squares away).
+- **`RULEFIX=lightout`**: refill a lantern from oil below 7,500 turns. Count the light left (the light in use, every
+  spare torch's fuel, a lantern's oil at 7,500 a flask); below 2,000 turns with Word of Recall, or 2,000 + 1,000 ×
+  depth (at most 6,000) without, read recall while there is still light to read by, else walk home from any depth.
+  Shopping counts only torches with 2,500+ turns (a new one has 5,000): busho had counted 300-turn stubs as stock and
+  never bought more. In the dark: rest if recall is active, try `<` every other step (no time passes off a
+  staircase), and feel toward untouched squares. 4.2.6 deletes a torch when it burns out (`player-util.c:718`), so
+  there are no dead torches to drop.
+- **Checks.** Base replay: 12 of session 25's base starts identical with the new bridge and busho (final game turn
+  included). Smoke: 12 starts with both flags, no errors or timeouts. Session 25's dark stalls replayed with
+  spellfx + lightout, dark actions base → lightout: Paladin 4900208 16,937 → 208; Blackguards 4900364 12,552 → 5,
+  4900014 4,756 → 308, 4900134 4,377 → 18, 4900259 4,968 → 698. Not fixed: Paladin 4900563 (5,273 → 6,046), which had
+  no Word of Recall and ran out walking up from DL5; carrying recall (the `wor` flag buys one) is the remedy there.
+- Dropped from the plan: changing Blackguards' fear handling. Berserk Strength cures fear and adds +75 to-hit, the
+  right play for an afraid melee class, and session 25's data didn't isolate it as a cause.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

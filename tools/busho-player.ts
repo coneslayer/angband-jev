@@ -31,7 +31,7 @@ const CMD = {
   ATTACK: 7, CAST: 8, FIRE: 9, THROW: 10, USE: 11, EAT: 12, QUAFF: 13,
   READ: 14, AIM: 15, ZAP: 16, PICKUP: 17, DROP: 18, EQUIP: 19, UNEQUIP: 20,
   BROWSE: 21, REST: 22, SEARCH: 23, GO_UP: 24, GO_DOWN: 25,
-  STUDY: 28,
+  STUDY: 28, REFILL: 29,
 };
 
 // ── 地形定数 ──
@@ -353,6 +353,18 @@ function stairsWalkMax(threats: any[], pspeed: number | undefined): number {
 // RULEFIX=leave: 序盤の危険な敵 (4.2 の名前) が見えた、この階で 3 回逃げた (Phase Door/Teleport/逃走)、毒か出血で HP 半分未満
 // → 最寄りの既知の階段 (上下どちらでも) から階を去る。逃げ続けた後の強制戦闘 (forceFight) への切り替えも、階を去るに置き換える
 const LEAVE = RULEFIX.has("leave");
+// RULEFIX=leavelos: 名前で去る敵は視線の通る敵だけ (検知・テレパシーで知っただけの敵は数えない)。ゲームのモンスター一覧の
+// 「見える」と「気づいている」の区別 (mon-list.c は projectable)。session 25: 到着時の Seek Battle で 27 マス先の Fang を見て去っていた
+const LEAVELOS = RULEFIX.has("leavelos");
+// RULEFIX=lightout: ランタンは油で補給。残りの光 (装備中 + 予備の松明すべて + ランタンなら油 1 本 7500) が 2000 ターン
+// (WoR が無ければ 2000 + 1000×深さ、上限 6000) を切ったら、明るいうちに Word of Recall、無ければ上り階段で町へ (深さを問わず)。もう暗い時: 帰還待ちなら休む、
+// 1 歩おきに上り階段を試す (階段の上でなければ時間は経たない)、まだ触れていないマスを優先して手探りで 1 歩
+// (session 25: 燃え残りの松明 (各 300 ターン) を替え続けて最後に暗闇になり、同じマスで数千行動休み続けた試合があった)
+const LIGHTOUT = RULEFIX.has("lightout");
+let lightTripNoted = false, darkSteps = 0;
+const darkFelt = new Set<string>(); // 暗闇で踏んだマス (この階)
+/** lightout: 買い物で数える松明は燃料 2500 以上 (新品は 5000) だけ。燃え残りを在庫に数えて買わずにいた */
+function torchCounts(i: any): boolean { return !LIGHTOUT || i.tval !== TVAL.LIGHT || (i.fuel ?? 5000) >= 2500; }
 const LEAVE_LIST: [RegExp, number][] = [ // [名前, この CL 以下で去る]
   [/^(fang|grip), farmer maggot's dog$/, 5],
   [/^(soldier|apprentice|acolyte)$/, 8],
@@ -1509,7 +1521,7 @@ async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise
   const haveOf = (inv: any[], kind: string) =>
     kind === "digger"
       ? inv.filter(i => i.tval === TVAL.DIGGING && i.qty > 0).reduce((a, i) => a + i.qty, 0)
-      : inv.filter(i => kinds[kind]!(i) && i.qty > 0).reduce((a, i) => a + i.qty, 0);
+      : inv.filter(i => kinds[kind]!(i) && i.qty > 0 && torchCounts(i)).reduce((a, i) => a + i.qty, 0);
   const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0, ammo: 0, neut: 0 };
   let spent = 0, n = 0;
   for (const [kind, target] of steps) {
@@ -2438,7 +2450,7 @@ async function buySupplies(state: any) {
     const inv = freshState.player.inventory;
     let current: number;
     if (item.name) {
-      current = inv.filter((i: any) => i.name?.includes(item.name) && i.qty > 0)
+      current = inv.filter((i: any) => i.name?.includes(item.name) && i.qty > 0 && torchCounts(i))
         .reduce((s: number, i: any) => s + i.qty, 0);
     } else {
       current = inv.filter((i: any) => item.tvals.includes(i.tval) && i.qty > 0)
@@ -3066,7 +3078,7 @@ async function playGame() {
       const afflicted = p.timed.poisoned > 0 || (p.timed.cut ?? 0) > 0;
       if (!afflicted) leaveHurtDone = false;
       if (!leaving) {
-        const named = monsters.find((m: any) => leaveListed(m, p.level));
+        const named = monsters.find((m: any) => leaveListed(m, p.level) && (!LEAVELOS || m.los !== false));
         const hurt = afflicted && hpPct < 0.5 && !leaveHurtDone;
         leaving = named ? `${named.name}(Lv${named.level},dist${named.distance})が見えた`
           : levelEscapes >= LEAVE_ESCAPES ? `この階で${levelEscapes}回逃走`
@@ -3506,6 +3518,65 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=lightout: ランタンの給油、光源切れの前の帰還、暗闇での手探り ===
+    if (LIGHTOUT && state.depth >= 1) {
+      const cur = (p.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+      const fuel = cur ? (typeof cur.fuel === "number" ? cur.fuel : Infinity) : 0; // fuel の無い光源 (燃え尽きない) は無限
+      const lantern = !!cur && /Lantern/i.test(cur.name ?? "");
+      const oil = inv.find((i: any) => /Flask~? of oil/i.test(i.name ?? "") && i.qty > 0);
+      const nearFoe = monsters.some((m: any) => m.distance <= 2 && m.asleep !== true);
+      if (lantern && fuel < 7500 && oil && !nearFoe && actionCount >= lightBlockedUntil) {
+        state = await sendCommand({ type: CMD.REFILL, itemIndex: oil.slot });
+        const after = (state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+        if ((after?.fuel ?? 0) <= fuel) lightBlockedUntil = actionCount + 200; // 給油できなかった: ループ防止
+        continue;
+      }
+      const spareFuel = inv.filter((i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? "") && i.qty > 0)
+        .reduce((t: number, i: any) => t + (i.fuel ?? 0) * i.qty, 0)
+        + (lantern ? inv.filter((i: any) => /Flask~? of oil/i.test(i.name ?? "")).reduce((t: number, i: any) => t + 7500 * i.qty, 0) : 0);
+      // WoR があれば 2000 で足りる (発動まで 15-35 ターン)。無ければ上り階段を階ごとに探すので深さに応じて (上限 6000)
+      const lightNeed = findRecallScroll(inv) !== null || p.wordRecall > 0 ? 2000 : Math.min(2000 + 1000 * state.depth, 6000);
+      if (fuel + spareFuel < lightNeed) {
+        const canRead = fuel > 0 && !(p.timed.blind > 0) && !(p.timed.confused > 0);
+        if (!(p.wordRecall > 0) && canRead && !nearFoe) {
+          const wor = findRecallScroll(inv);
+          if (wor !== null) {
+            addLesson(state.turn, state.depth, "光源", `光源の残り${fuel}ターン、予備なし。明るいうちにWoRで町へ`);
+            state = await sendCommand({ type: CMD.READ, itemIndex: wor });
+            continue;
+          }
+        }
+        if (!(p.wordRecall > 0) && !restockTrip) {
+          restockTrip = true;
+          if (!lightTripNoted) { lightTripNoted = true; addLesson(state.turn, state.depth, "光源", `光源の残り${fuel}ターン、予備なし。上り階段で町へ`); }
+        }
+        if (fuel <= 0 && !nearFoe) { // もう暗い
+          const here = tiles.find((t: any) => t.x === px && t.y === py);
+          if (p.wordRecall > 0) { state = await sendCommand({ type: CMD.REST, turns: 5 }); continue; }
+          if (here?.feat === FEAT.UP_STAIR) { state = await sendCommand({ type: CMD.GO_UP }); continue; }
+          const up = findTile(tiles, FEAT.UP_STAIR);
+          if (!(up && bfsNextStep(tiles, px, py, up.x, up.y) !== null)) { // 道が分からない: 手探り
+            darkFelt.add(`${state.depth}:${px},${py}`);
+            if (darkSteps % 2 === 0) { // 足元が見えないので上り階段を試す (無ければ時間は経たない)
+              darkSteps++;
+              state = await sendCommand({ type: CMD.GO_UP });
+              continue;
+            }
+            const at = (d: number) => tiles.find((t: any) => t.x === px + DIR_DXY[d]![0] && t.y === py + DIR_DXY[d]![1]);
+            const open0 = ALL_DIRS.filter((d) => { const t = at(d); return !t || t.unknown || PASSABLE_FEATS.has(t.feat); });
+            const fresh = open0.filter((d) => !darkFelt.has(`${state.depth}:${px + DIR_DXY[d]![0]},${py + DIR_DXY[d]![1]}`));
+            const open = fresh.length ? fresh : open0;
+            if (open.length) {
+              darkSteps++;
+              if (darkSteps <= 3 || darkSteps % 100 === 0) addLesson(state.turn, state.depth, "光源", `暗闇で道が分からない。手探りで歩く (#${darkSteps})`);
+              state = await sendCommand({ type: CMD.WALK, direction: open[Math.floor(rand() * open.length)]! });
+              continue;
+            }
+          }
+        }
+      }
+    }
+
     // === 優先度1.5: 検知スペル (新フロアで1回使用) ===
     // RULEFIX=spellfx: 到着時に加えて、敵が見えないまま 300 行動たったらもう一度。逃走の MP は残す
     if ((!levelEntryDetected || (SPELLFX && monsters.length === 0 && actionCount - lastDetectAt >= 300)) && canCastSpells && actionCount > 1) {
@@ -3602,7 +3673,7 @@ async function playGame() {
         // 上り階段が未発見 → 通常の探索に任せる (降下は restockTrip 中は止める)
       }
     }
-    if (state.depth === 0) { restockTrip = false; upRerolls = 0; upRerollDepth = -1; }
+    if (state.depth === 0) { restockTrip = false; upRerolls = 0; upRerollDepth = -1; lightTripNoted = false; darkSteps = 0; darkFelt.clear(); }
 
     // === RULEFIX=devices: 回復の杖 (HP 半分未満)、Teleportation の杖 (HP 35% 未満で 3 マス以内に敵)、未知の杖 (安全な時) ===
     if (DEVICES && !ROLLOUT && actionCount - lastDeviceAction >= 2) {
