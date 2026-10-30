@@ -3369,6 +3369,13 @@ Look 3 (700 pairs, 16:52; bound z 1.67):
 
 The confirmation (seed 4600000, base against base plus all four) began at 16:57.
 
+Confirmation (16:57 – 20:07, seed 4600000, bank 4650000): adopted at look 3. PH(10) 0.801, z 3.99 against the
+look-3 bound 1.67 (look 1: 0.792, z 1.64; look 2: 0.827, z 2.17), deep death ratio 0.84, on 700 pairs. Policy
+scores (`hazard.py compare`, 707 starts): death rate 0.86 (80% 0.81–0.92), pace 1.04 (1.02–1.07), PH(5) 0.95,
+PH(8) 0.89, PH(10) 0.79 (0.74–0.85). Deaths 453 against 434, mean max depth 6.38 against 6.65, games reaching DL10
+57 against 71, starvation 28 against 12, poison 46 against 46 (neutdrink's screen gain in poison deaths didn't
+repeat). worwait, deepkit, neutdrink and digskill are now in the default RULEFIX.
+
 **What devices did** (702 pairs; `<scratchpad>/dev/dev.py`, `dev2.py`). PH(10) 0.915 (80% 0.84–0.99), p 0.066 one-sided:
 death rate 0.98 (0.92–1.05), pace 1.03 (1.01–1.06). Looks 1 and 2 were 0.97 and 0.99, so the gain came late. 489 games
 used a device and 468 diverged from base; deaths 446 against 445. Device actions were 0.03% of all actions (1,633 aims,

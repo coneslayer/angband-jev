@@ -312,8 +312,8 @@ function hurtsOnContact(m: any): boolean {
   if (!STATIONARY_RE.test(name)) return false;
   return /floating eye/i.test(name) || (m.maxhp ?? m.hp ?? 99) > 5;
 }
-// ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood,fire,lowheal,leave,clgate1,gearid,tryunknown。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ。fire, lowheal はセッション14、leave, clgate1 はセッション17、gearid, tryunknown はセッション22で採用) ──
-const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood,fire,lowheal,leave,clgate1,gearid,tryunknown").split(",").map((t) => t.trim()));
+// ── 序盤ルール改善 (RULEFIX=danger,restock,escape,upnavfood,fire,lowheal,leave,clgate1,gearid,tryunknown,worwait,deepkit,neutdrink,digskill。"none" で旧ルール、A/B 用。wor, upnav は明示した時だけ。fire, lowheal はセッション14、leave, clgate1 はセッション17、gearid, tryunknown はセッション22、worwait, deepkit, neutdrink, digskill はセッション23で採用) ──
+const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood,fire,lowheal,leave,clgate1,gearid,tryunknown,worwait,deepkit,neutdrink,digskill").split(",").map((t) => t.trim()));
 // 既定 (session 14 で採用): fire (射撃武器で撃つ + 矢弾を買う), lowheal (HP 危険域・毒は停滞脱出より回復)。
 // 明示した時だけ (session 15 の検証): food8 (食料を 8 個まで), neutpois (Neutralize Poison を買い、毒で HP 半分未満なら飲む),
 // poisonhold (毒で HP 半分未満・回復薬なし・敵が見えない → 休む), fireadj (隣接する敵も撃つ), ammo60 (矢弾を 60 本まで)
