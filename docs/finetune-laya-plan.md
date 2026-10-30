@@ -3538,6 +3538,25 @@ identical (07:48), so the new bridge (effects, timed effects, RNG save) and bush
 a start costs four games, about 85 pairs an hour: look 1 near 09:45, look 2 near 11:30, look 3 near 16:15, then a
 confirmation of anything adopted (about 4 hours).
 
+**Look 1** (09:11, about 153 pairs an arm; quicker than planned, about 110 pairs an hour with four arms):
+
+| Arm | Pairs | PH(10) | z | Deep death rate (p) | Decision |
+|---|---|---|---|---|---|
+| spellfx | 153 | 0.957 | 0.43 | 0.85 (0.80) | continue |
+| spellfight | 153 | 0.957 | 0.44 | 0.84 (0.83) | continue |
+| auditfix | 152 | 1.064 | −0.59 | 1.25 (0.09) | reject, futility |
+
+- **auditfix** played differently in 107 of 156 starts. Its fear handling fired in 54 games (300 times) and it
+  dropped junk in 83 (151 items), but no class gained clearly: deaths 97 → 100, Paladin deaths 12 → 17, Warrior mean
+  max depth 8.5 → 7.6, Ranger 6.4 → 7.3. Death causes moved around (snagas 6 → 2, Mughash 7 → 4; Grishnákh 0 → 3,
+  panthers 0 → 3). Nothing in 152 pairs separates the parts of the bundle; at this size the futility bound is a cheap
+  stop, not evidence of harm.
+- **spellfight is almost spellfx.** 140 of 159 starts gave the same outcome in both; its attack spells were cast 230
+  times against 6,422 monster detections and 2,933 buffs. Warriors are identical to base in both, as expected
+  (no spells). Blackguards gain most from spellfx (deaths 20 → 14 of 25, actions 9,900 → 13,400); Rangers lose depth
+  (6.4 → 5.6).
+- Pace with three arms: look 2 near 10:15, look 3 near 13:00, a confirmation ending near 17:15.
+
 **Why corridor failed** (704 pairs; `<scratchpad>/corr/`). PH(10) 1.06 (80%: 0.98–1.15), death rate 1.01, pace 0.98:
 no effect, rather than harm. It fired in 570 games (81%), median 15 times, 13,660 steps and holds in all (0.16% of
 actions), and the 134 games where it never fired played identically.
