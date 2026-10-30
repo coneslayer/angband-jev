@@ -3524,6 +3524,20 @@ stationmem's z went 1.49, 0.94, 3.00 across the looks, and the deep-death excess
 stationmem against D23, seed 4800000) plays two games a start, so about 170 pairs an hour: look 3 near 07:30 unless a
 bound is crossed at look 1 or 2. Session 25 then launches on D24 if the confirmation adopts.
 
+**Confirmation (03:28–07:42, seed 4800000): stationmem adopted.** Looks: PH(10) 0.90 (z 0.59) at 152 pairs, 0.93
+(z 0.64) at 304, **0.837 (z 2.77, bound 1.67) at 701**; deep death ratio 0.85. Death rate 0.91 (80%: 0.85–1.00), pace
+1.05 (1.02–1.09). Deaths 455 against 442, mean depth 6.70 against 6.93, starvation 13 against 11, poison 35 against 33;
+on the old capped score 277 wins to 221 (p 0.007). The default is now D24 (`...,neutdrink,digskill,stationmem`,
+`busho-player.ts:320`).
+
+### Session 25 (launched 2026-10-30 07:45)
+
+Base D24; variants spellfx, spellfight (implies spellfx), auditfix; all classes; seed 4900000; screen until 19:45,
+session until 23:45 (`launch25.sh`, driver PID 27578). Canary: session 24's confirmQ combo, 20 starts: 20 of 20
+identical (07:48), so the new bridge (effects, timed effects, RNG save) and busho's new code leave D24 play unchanged. With four arms
+a start costs four games, about 85 pairs an hour: look 1 near 09:45, look 2 near 11:30, look 3 near 16:15, then a
+confirmation of anything adopted (about 4 hours).
+
 **Why corridor failed** (704 pairs; `<scratchpad>/corr/`). PH(10) 1.06 (80%: 0.98–1.15), death rate 1.01, pace 0.98:
 no effect, rather than harm. It fired in 570 games (81%), median 15 times, 13,660 steps and holds in all (0.16% of
 actions), and the 134 games where it never fired played identically.
