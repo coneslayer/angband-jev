@@ -12,7 +12,7 @@ sample size (the pilot: branching multiplied savepoints within a few lineages).
           slots run branches at once, so fresh games keep measuring yield.
   fresh   a new character of the class furthest under its --quota10 of DL10+ lineages (counting the expected yield of
           its games in flight), then of classes still under --quota15; rotation breaks ties (--rotate: rotation only, as
-          the pilot). Casters (--casters) get --caster-extra added to RULEFIX.
+          the pilot). Casters (--casters) get --caster-extra added to RULEFIX, and --class-extra adds flags by class.
 Every game's outcome and lineage go to RUN/harvest.jsonl (seed, class, parent savepoint, root seed). Replays and
 snapshots are deleted after each game; no danger log. RUN/REPORT-harvest.json counts savepoints by class and depth.
 
@@ -132,7 +132,8 @@ class Harvest:
             return seed, cls, None, seed
 
     def rulefix(self, cls):
-        return self.a.base + ("," + self.a.caster_extra if cls in self.casters and self.a.caster_extra else "")
+        return ",".join(filter(None, [self.a.base, self.a.caster_extra if cls in self.casters else "",
+                                      class_extras(self.a.class_extra).get(cls, "")]))
 
     def play(self, slot, deadline):
         seed, cls, restore, root = self.next_job()
@@ -185,6 +186,15 @@ class Harvest:
         return rep
 
 
+def class_extras(spec):
+    """'Cls1/Cls2:a,b;Cls3:c' -> {class: 'a,b'}: flags adopted for some classes only."""
+    out = {}
+    for part in filter(None, spec.split(";")):
+        cls, _, flags = part.partition(":")
+        for c in cls.split("/"): out[c] = ",".join(filter(None, [out.get(c), flags]))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run", required=True)
@@ -193,6 +203,7 @@ def main():
     ap.add_argument("--classes", default=CLASSES); ap.add_argument("--casters", default="Mage,Priest,Druid")
     ap.add_argument("--base", default=D24 + ",leavelos,lightout")
     ap.add_argument("--caster-extra", default="spellfx,spellfight")
+    ap.add_argument("--class-extra", default="Paladin/Ranger/Rogue:spellfx", help="per-class flags added to RULEFIX: Cls1/Cls2:flag,flag;Cls3:flag (spellfx adopted 2026-10-31)")
     ap.add_argument("--maxa", type=int, default=60000); ap.add_argument("--cap-s", type=int, default=2400)
     ap.add_argument("--min-depth", type=int, default=8); ap.add_argument("--branch-depth", type=int, default=12)
     ap.add_argument("--branches", type=int, default=3); ap.add_argument("--lineage-cap", type=int, default=12)
@@ -208,7 +219,7 @@ def main():
     cbin = D.freeze_c(run)
     hv = Harvest(run, a)
     run.log(f"harvest start (smoke={a.smoke}, slots={run.slots}, c_bin={cbin}, port_offset={D.PORT_OFFSET}, free "
-            f"{free_gb(run.path):.0f} GB); base {a.base}; casters {a.casters} +{a.caster_extra}; classes {a.classes}; "
+            f"{free_gb(run.path):.0f} GB); base {a.base}; casters {a.casters} +{a.caster_extra}; class extra {a.class_extra}; classes {a.classes}; "
             f"maxa {a.maxa}; min depth {a.min_depth}; branch from DL{a.branch_depth} x{a.branches}, lineage cap "
             f"{a.lineage_cap}; quotas DL10+ {a.quota10} DL15+ {a.quota15} lineages per class{' (rotation)' if a.rotate else ''}; app={app}")
     threading.Thread(target=D2.watchdog, args=(run,), daemon=True).start()

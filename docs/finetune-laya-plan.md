@@ -4283,6 +4283,22 @@ two games passed `ok()` (as alive at depth 0), and the `None` broke `compare()` 
 reject was logged but never recorded and the arm stayed open; the screen was stopped by hand (STOP) about 13:35.
 `ok()` now rejects results without an action count.
 
+### devicefx with all three dfx flags: full screen (2026-10-31 13:36–14:39)
+
+`runs/deep/2026-10-31-dfxall`, variant devicefx+dfxnotry+dfxnoarrive+dfxnokeep, same banks, base and seed as the
+other deep screens, engine 9f6208367 (gold pickup fix). Looks: 156 pairs PH 0.78 (z 1.64); 319 pairs PH 0.86 (z 1.20);
+final 701 pairs PH 0.90, z 1.10 against the bound 1.67: **reject** (not shown to help; death_rr 0.91, pace_rr 0.96).
+709 pairs: deaths 692 → 683, levels gained 1.82 → 1.88, DL15+ 204 → 204, deeper 56 / shallower 47; only about 100
+games end at a different depth. By class (about 89 each), levels gained: Paladin 1.81 → 2.16, Priest 1.43 → 1.55,
+Blackguard 1.67 → 1.76, Mage 1.45 → 1.52, Druid and Warrior unchanged, Ranger 1.55 → 1.51, Rogue 2.23 → 2.09. The flags
+removed devicefx's harm (PH 2.06 → 0.90) but what remains is a small effect this screen can't confirm.
+
+**spellfx in the base for Paladin, Ranger and Rogue** (adopted 08:15, above). driver18 and harvest.py take
+`--class-extra` (default `Paladin/Ranger/Rogue:spellfx`; form `Cls1/Cls2:flag,flag;Cls3:flag`), added to RULEFIX after
+the base and the casters' `--caster-extra`. Mage, Priest and Druid keep spellfx,spellfight; Warrior and Blackguard
+(Blackguards lost with spellfx in session 25) are unchanged. Screens from here on compare against this base, so they
+are not paired with the earlier deep screens on Paladin, Ranger and Rogue starts.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

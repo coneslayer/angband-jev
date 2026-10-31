@@ -13,7 +13,8 @@ Every game writes a danger log. Disk guard as session 15; replays and snapshots 
 Resumable via RUN/state.json; `touch RUN/STOP` stops between games. Never restart it mid-stage.
 
 Usage: driver18.py --run runs/deep/<date> --bank runs/harvest/<run>[,...] --base RULEFIX --variants a,b@Cls1/Cls2,c,d+e
-       [--seed 7000000] [--hours 24] [--slots 13] [--k 20] [--start 10] [--min-depth 10] [--max-depth 19] [--smoke]
+       [--seed 7000000] [--hours 24] [--slots 13] [--k 20] [--start 10] [--min-depth 10] [--max-depth 19]
+       [--class-extra Paladin/Ranger/Rogue:spellfx] [--smoke]
 """
 import argparse, json, os, random, shutil, signal, sys, threading, time  # noqa: E401
 
@@ -35,6 +36,15 @@ D.SCHEDULE = [("deepS", 24)]
 D6.SMOKE_MINUTES.update({"deepS": 20})
 SMOKE_LOOKS = (3, 6, 9)
 free_gb, disk_low, ok = D15.free_gb, D15.disk_low, D14.ok
+
+
+def class_extras(spec):
+    """'Cls1/Cls2:a,b;Cls3:c' -> {class: 'a,b'}: flags adopted for some classes only."""
+    out = {}
+    for part in filter(None, spec.split(";")):
+        cls, _, flags = part.partition(":")
+        for c in cls.split("/"): out[c] = ",".join(filter(None, [out.get(c), flags]))
+    return out
 
 
 def bank_starts(banks, lo, hi, seed, n):
@@ -144,7 +154,9 @@ def stage_deep(run, name, deadline):
     for s in ss: by[s["cls"]] = by.get(s["cls"], 0) + 1
     run.log(f"{name}: {len(ss)} starts from {len({s['cluster'] for s in ss})} lineages; by class {by}")
     casters = set(run.casters)
-    base_of = lambda s: run.base + (f",{run.caster_extra}" if s["cls"] in casters and run.caster_extra else "")  # noqa: E731
+    extra = class_extras(run.class_extra)
+    base_of = lambda s: ",".join(filter(None, [run.base, run.caster_extra if s["cls"] in casters else "",  # noqa: E731
+                                               extra.get(s["cls"], "")]))
     variants = {}
     for v in run.variants:  # "name" or "name@Class1/Class2": the variant only on those classes' starts
         arm, _, cls = v.partition("@")
@@ -162,6 +174,7 @@ def main():
     ap = argparse.ArgumentParser()
     for p in ("--run", "--bank", "--base", "--variants"): ap.add_argument(p, required=True)
     ap.add_argument("--casters", default="Mage,Priest,Druid"); ap.add_argument("--caster-extra", default="spellfx,spellfight")
+    ap.add_argument("--class-extra", default="Paladin/Ranger/Rogue:spellfx", help="per-class flags added to RULEFIX: Cls1/Cls2:flag,flag;Cls3:flag (spellfx adopted 2026-10-31)")
     ap.add_argument("--seed", type=int, default=7000000); ap.add_argument("--hours", type=float, default=24)
     ap.add_argument("--slots", type=int, default=13); ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--k", type=int, default=20); ap.add_argument("--start", type=int, default=10)
@@ -174,7 +187,7 @@ def main():
     run = D.Run(a.run, a.hours, a.smoke, a.slots)
     run.banks = [os.path.abspath(b) for b in a.bank.split(",")]
     run.base, run.variants, run.seed = a.base, a.variants.split(","), a.seed
-    run.casters, run.caster_extra = a.casters.split(",") if a.casters else [], a.caster_extra
+    run.casters, run.caster_extra, run.class_extra = a.casters.split(",") if a.casters else [], a.caster_extra, a.class_extra
     run.k, run.s0, run.min_depth, run.max_depth = a.k, a.start, a.min_depth, a.max_depth
     run.maxa, run.cap_s, run.looks = a.maxa, a.cap_s, tuple(int(x) for x in a.looks.split(","))
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
@@ -182,7 +195,7 @@ def main():
     cbin = D.freeze_c(run)
     run.log(f"driver18 start (smoke={a.smoke}, slots={run.slots}, c_bin={cbin}, port_offset={D.PORT_OFFSET}, "
             f"free {free_gb(run.path):.0f} GB); banks {run.banks}; DL{run.min_depth}-{run.max_depth}; base {run.base}; "
-            f"casters {run.casters} +{run.caster_extra}; variants {run.variants}; PH({run.k}) from {run.s0}; looks "
+            f"casters {run.casters} +{run.caster_extra}; class extra {run.class_extra}; variants {run.variants}; PH({run.k}) from {run.s0}; looks "
             f"{run.looks}; maxa {run.maxa}; seed {run.seed}; app={app}")
     threading.Thread(target=D2.watchdog, args=(run,), daemon=True).start()
     threading.Thread(target=D15.disk_guard, args=(run,), daemon=True).start()
