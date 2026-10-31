@@ -103,13 +103,15 @@ def rates(games):
     return t
 
 
-def ctable(t, prior=(1.0, 1.0)):
+def ctable(t, prior=(1.0, 1.0), start=0):
     """C[d] for d = 0..: expected actions to first reach stage d from a fresh start. A weak prior (one death and one
-    advance at the pooled time per event) keeps thin stages finite; stages with no exposure extend the last ratio."""
+    advance at the pooled time per event) keeps thin stages finite; stages with no exposure extend the last ratio.
+    start > 0: from a character at stage `start` who starts over there on death (deep bank starts); C[d] = 0 up to
+    `start`."""
     events = sum(r[1] + r[2] for r in t.values()) or 1
     pooled_tau = sum(r[0] for r in t.values()) / events
-    C, last = [0.0], None
-    for d in range(MAX_STAGE):
+    C, last = [0.0] * (start + 1), None
+    for d in range(start, MAX_STAGE):
         r = t.get(d)
         if r is None or r[0] == 0 and r[1] + r[2] == 0:
             if last is None: C.append(C[-1] + pooled_tau); continue
@@ -281,30 +283,30 @@ def _start_vectors(base, var, ids):
     return vecs, S
 
 
-def _screen_stats(tot, S, k=SCREEN_K):
-    """(log PH(k), log death_rr_deep) from summed start vectors."""
+def _screen_stats(tot, S, k=SCREEN_K, start=0):
+    """(log PH(k), log death_rr_deep) from summed start vectors (PH from stage `start`: see ctable)."""
     tb = {d: tot[3 * d:3 * d + 3] for d in range(S)}
     tv = {d: tot[3 * S + 3 * d:3 * S + 3 * d + 3] for d in range(S)}
     dr, pr = mh_ratio(tb, tv, 1), mh_ratio(tb, tv, 2)
     deep = mh_ratio(tb, tv, 1, DEEP_STAGE)
     lph = float("nan")
     if dr > 0 and pr > 0:
-        lph = math.log(ctable(scaled(tb, dr, pr))[k] / ctable(tb)[k])
+        lph = math.log(ctable(scaled(tb, dr, pr), start=start)[k] / ctable(tb, start=start)[k])
     return lph, (math.log(deep) if deep > 0 and math.isfinite(deep) else float("nan"))
 
 
-def _boot_sd(vecs, S, n_boot, seed):
+def _boot_sd(vecs, S, n_boot, seed, k=SCREEN_K, start=0):
     rng, n, ph, dp = random.Random(seed), len(vecs), [], []
     for _ in range(n_boot):
         tot = [sum(c) for c in zip(*[vecs[rng.randrange(n)] for _ in range(n)])]
-        a, b = _screen_stats(tot, S)
+        a, b = _screen_stats(tot, S, k, start)
         if math.isfinite(a): ph.append(a)
         if math.isfinite(b): dp.append(b)
     sd = lambda xs: statistics.stdev(xs) if len(xs) > 2 else float("nan")  # noqa: E731
     return sd(ph), sd(dp)
 
 
-def _delta_sd(vecs, S, tot):
+def _delta_sd(vecs, S, tot, k=SCREEN_K, start=0):
     """Linearised (infinitesimal jackknife) sd: the start-level influence of each total, by central differences.
     It estimates the same quantity as the paired bootstrap, in milliseconds; the simulation studies use it."""
     n = len(vecs)
@@ -316,7 +318,7 @@ def _delta_sd(vecs, S, tot):
         h = 1e-4 * max(abs(tot[j]), 1.0)
         up, dn = list(tot), list(tot)
         up[j] += h; dn[j] -= h
-        a1, b1 = _screen_stats(up, S); a0, b0 = _screen_stats(dn, S)
+        a1, b1 = _screen_stats(up, S, k, start); a0, b0 = _screen_stats(dn, S, k, start)
         ga, gb = (a1 - a0) / (2 * h), (b1 - b0) / (2 * h)
         grads[j] = (ga if math.isfinite(ga) else 0.0, gb if math.isfinite(gb) else 0.0)
     va = vb = 0.0
@@ -327,12 +329,16 @@ def _delta_sd(vecs, S, tot):
     return math.sqrt(va), math.sqrt(vb)
 
 
-def screen(base, var, look=None, sd="bootstrap", n_boot=1000, seed=0, looks=LOOKS, ids=None):
+def screen(base, var, look=None, sd="bootstrap", n_boot=1000, seed=0, looks=LOOKS, ids=None, k=SCREEN_K, start=0,
+           clusters=None):
     """The sequential adoption decision for a variant against the baseline on their common complete starts.
 
     look: 1-based look number; None picks the last look the pair count has reached. A look uses every common start
     available (at least looks[look-1]); the bounds are those of the planned information fractions.
     sd: "bootstrap" (paired over starts, n_boot resamples) or "delta" (linearised; the simulation studies).
+    k, start: the verdict score PH(k) from stage `start` (deep bank starts: e.g. k=20, start=10; see ctable).
+    clusters: {start id: cluster} (deep bank starts: the fresh game a savepoint descends from); the sd then resamples
+    clusters (each cluster's starts summed), as starts from one lineage aren't independent. Looks still count pairs.
     Returns {"decision": "adopt"|"reject"|"continue", "look", "pairs", "z", "bound", "futility", "PH", "sd",
     "death_rr_deep", "deep_p", "reason"}."""
     ids = sorted(set(base) & set(var)) if ids is None else list(ids)
@@ -343,9 +349,16 @@ def screen(base, var, look=None, sd="bootstrap", n_boot=1000, seed=0, looks=LOOK
     if look == 0 or n < looks[look - 1]:
         return {**res, "decision": "continue", "reason": f"need {looks[max(look, 1) - 1]} complete pairs"}
     vecs, S = _start_vectors(base, var, ids)
+    if clusters:  # one vector per cluster: the sum of its starts
+        by = {}
+        for i, v in zip(ids, vecs):
+            c = clusters.get(i, i)
+            by[c] = [a + b for a, b in zip(by[c], v)] if c in by else list(v)
+        vecs = list(by.values())
+        res["clusters"] = len(vecs)
     tot = [sum(c) for c in zip(*vecs)]
-    lph, ldeep = _screen_stats(tot, S)
-    sd_ph, sd_deep = _boot_sd(vecs, S, n_boot, seed) if sd == "bootstrap" else _delta_sd(vecs, S, tot)
+    lph, ldeep = _screen_stats(tot, S, k, start)
+    sd_ph, sd_deep = _boot_sd(vecs, S, n_boot, seed, k, start) if sd == "bootstrap" else _delta_sd(vecs, S, tot, k, start)
     z = -lph / sd_ph if sd_ph > 0 and math.isfinite(lph) else 0.0
     up, fut = obf_bounds(looks), futility_bounds(looks)
     deep_p = 1 - _Phi(ldeep / sd_deep) if math.isfinite(ldeep) and sd_deep > 0 else None

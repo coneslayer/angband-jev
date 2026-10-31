@@ -4025,6 +4025,238 @@ a kill or a depth change (184 of 706 games).
   bank. The decision model is not used for equipment: the decisions are too rare to train or check (user,
   2026-10-30).
 
+### Deep-start screen: driver18, the deep score, devicefx (2026-10-30 night)
+
+- **Full harvest** (`runs/harvest/2026-10-30-full`, 20:04–04:05, 13 slots, seed 6400000): base D24 + leavelos +
+  lightout + invfix + home (casters + spellfx, spellfight); quotas 40 DL10+ and 15 DL15+ lineages per class.
+  Result (finished 04:02, 7.97 h): 5,319 games (3,692 fresh, 1,627 branches), 21,936 savepoints, 955 MB. Lineages
+  (fresh games) and how many reached DL10 / DL15 / DL20, deepest:
+
+  | Class | Lineages | DL10+ | DL15+ | DL20+ | Deepest |
+  |---|---|---|---|---|---|
+  | Warrior | 67 | 44 | 26 | 11 | 34 |
+  | Blackguard | 310 | 124 | 25 | 6 | 31 |
+  | Paladin | 154 | 59 | 27 | 13 | 29 |
+  | Rogue | 212 | 88 | 26 | 14 | 28 |
+  | Ranger | 237 | 85 | 25 | 4 | 22 |
+  | Priest | 449 | 133 | 26 | 5 | 23 |
+  | Druid | 588 | 91 | 27 | 2 | 20 |
+  | Mage | 1,675 | 171 | 24 | 4 | 23 |
+
+  Every class met both quotas (the driver kept starting fresh games of the classes short of DL15+). A DL10+ lineage
+  costs 1 fresh game for Warriors in 1.5, Mages 1 in 10.
+- **Deep screen launched** 2026-10-31 04:03 (`runs/deep/2026-10-31`, until 02:57 on 11-01): both banks, 3,000 starts
+  from 871 lineages (375 a class), variants gearset, devicefx, auditfix, curefx, teleshop, spellfx@Paladin/Ranger/Rogue.
+- **First looks** (05:02, about 150 pairs; PH(20) from DL10, below 1 is better):
+
+  | Variant | PH | Death-rate ratio | Pace ratio | Levels gained (base 2.22) | Decision |
+  |---|---|---|---|---|---|
+  | devicefx | 2.18 | 1.01 | 0.79 | 1.72 | reject (futility) |
+  | gearset | 1.38 | 1.03 | 0.92 | 1.92 | reject (futility) |
+  | auditfix | 1.09 | 0.99 | 0.97 | 2.05 | reject (futility) |
+  | curefx | 0.96 (look 2, 306 pairs: 0.96) | 1.05 | | 1.98 (base 2.00) | continue |
+  | teleshop | 0.95 (look 2, 308 pairs: 0.96) | 0.93 | | 2.01 (base 2.01) | continue |
+
+  devicefx fired about 4 times a game (detection on arrival, slow, confuse, hold, stun); its cost is pace, not deaths,
+  and not stalls (stalled share 2.9% against base 4.4%). Why it descends slower is not yet known.
+- **Deep starts are lethal.** Base: 151 of 153 died within 20,000 actions, on average after 3,700 actions and 2.2
+  levels. The CL−DL margin at the start orders it (base, first 290 starts): ≤ −2: 1,475 actions, +0.7 levels; −1..0:
+  3,124, +1.6; 1..2: 4,242, +2.3; 3..5: 3,806, +2.7; 6+ (13 starts): 9,704, +13.5 (confounded with class).
+  **RULEFIX=deepgate**: from DL8, descend only at CL ≥ DL+3 (the long-stay bypass waits 4× the too-long threshold).
+  A separate 3-slot screen, base vs deepgate on the same starts, ran 05:39–08:34 (`runs/deep/2026-10-31-gate`). Result below.
+- **`hazard.py`**: `ctable(start=s0)` is the expected actions from stage s0 to each later stage for a character
+  who starts over at s0 on death (C[d] = 0 up to s0), so PH(k) from s0 scores deep bank starts. `screen(k, start,
+  clusters)`: the sd resamples clusters (each cluster's starts summed): starts from one lineage (the fresh game the
+  savepoints descend from) aren't independent. Defaults unchanged; the 14 tests pass.
+- **`tools/overnight/driver18.py`**: one stage, deepS. Starts are level-entry savepoints at DL10–19 from one or more
+  harvest runs, classes in rotation and lineages in rotation within a class, each with its own continuation seed.
+  The base is per class (casters add spellfx, spellfight). Variants close by `hazard.screen` with PH(20) from DL10 and
+  lineage clusters. 20,000 actions and 900 s a game.
+- **Bridge**: wands, staves and rods carry `charges` (once the kind is known), `charging` (rods) and `failPermil`
+  (`get_use_device_chance`, the item screen's "x.y% chance of failing"); monster recall carries `neverMove` ("does
+  not deign to chase intruders", from the flags the player knows: the lore flag is set once the monster is seen not
+  to move).
+- **`RULEFIX=devicefx`** (devices plus): attack devices by role (the best expected damage, amount × (1 − fail), among
+  ready wands and rods that reach the target) instead of a name list; before fleeing a monster (fight's flee, the
+  danger flee), Teleport Other (control role, AWAY_*) and otherwise slow, confuse, sleep, hold, stun or scare (not on
+  uniques), at most 3 times per monster; on arrival at a level, one mapping or stair detection and one monster
+  detection device; unknown devices tried only on monsters that are neither dangerous nor unique (devices tried them
+  on a baby black dragon at range 2). Fail 50% or more: not used to attack or control.
+- **Test** (pilot bank, 34 paired DL10–19 starts, 8,000 actions): base 29 dead, devicefx 31 (before the trial
+  restriction). Deep starts are lethal: most die within 8,000 actions in either arm. devicefx used detection on
+  arrival (Detect Invisible, Mapping), Hold, Stun and Confuse Monster.
+- **Remaining invfix stalls, fixed.** The two longest (96-start comparison) were a Paladin in the dark two squares from
+  a bloodshot eye (30,000 actions) and a Blackguard in the dark beside a blue jelly (4,800). Causes, in turn:
+  - the old per-item pickup comparison swapped a lit torch for an empty Lantern (score 20 > 0) with no oil carried;
+    under invfix lights are left to the light rules, and an empty light is swapped for a fuelled torch;
+  - an empty wielded Lantern with oil carried: the lantern rule wielded it and the torch rule swapped back, in a loop
+    (3,460 swaps); invfix now refills it on the spot (before lightout's refill, which came too late);
+  - a **Lantern of Shadows** (4.2 ego: LIGHT −4, stealth, resist light) left the character at light −1, unable to
+    read or see; invfix never wields a lantern with a known negative light modifier and swaps any light that leaves
+    the character unlit for a torch (remembering it). Necromancers (UNLIGHT: they see without light, out to
+    2 + level/6 − light squares, and fail spells 25% more on lit squares) are exempt: negative light helps them;
+  - lightout: a monster known never to move (`neverMove`) no longer counts as a foe near the player.
+  Replays: Paladin DL9 → DL12 and Blackguard DL8 → DL13, neither stalled. 22 further starts with the final invfix
+  reproduced the earlier invfix games where none of this arose (one Warrior went from DL14 to DL22).
+- **Confirmation** (`runs/invfix4`, 48 new fresh starts, seeds 6500000–6500047, base vs final invfix, deleted):
+
+  | | base | invfix |
+  |---|---|---|
+  | DL10+ | 8 | 15 |
+  | DL12+ | 2 | 10 |
+  | DL15+ | 1 | 3 |
+  | Mean deepest | 5.98 | 7.25 |
+  | Stalled actions | 27.8% | 4.9% |
+
+  Paired: deeper 21, shallower 6, same 21 (sign test p ≈ 0.006). Stalled = runs of 2,000+ actions with neither the
+  depth nor the kill count changing. All 48 invfix games ended in death; base had 5 alive at the action cap, stalled.
+
+### Deaths at DL10+ in the full harvest, and RULEFIX=curefx, teleshop (2026-10-30 23:00)
+
+At 22:40 the harvest had 2,119 games (832 fresh). Lineages reaching DL10 / DL15 / DL20, per class: Warrior 25/16/10,
+Blackguard 27/15/6, Paladin 26/14/11, Rogue 26/13/9, Ranger 26/11/3, Priest 27/10/3, Druid 27/7/1, Mage 25/11/3
+(quotas 40 and 15). Of 1,470 deaths at DL10+, the commonest killers were the 4.2 humanoid
+casters (ironfist priest 86, blacklock mage 64, blackguard 61, priest 53, drúadan mage 53), umber hulk 56 and dark
+hound 51. The last 15 lessons before death mention confusion in 369 (25%): 339 of them drinking a potion "to endure"
+while confused, 54 resting while confused. Two 4.2 facts make that worse than it looks:
+
+- the rules drink the **weakest** Cure when confused, and in 4.2 Cure Light Wounds only shortens confusion by 20 turns
+  (CSW and CCW cure it); a replayed DL14 Warrior (umber hulk, 21 monsters in view) drank CLW holding 16 CSW;
+- **no store sells Scrolls of Teleportation** in 4.2 (the Alchemist has Phase Door, WoR, CLW and sometimes CSW/CCW; the
+  Magic shop sometimes a Staff of Teleportation, 2,000 gold base). The same Warrior had 7 Phase Door and no teleport.
+  Restock looked for Teleportation scrolls in stores 4–6 and never for the staff; without `devices` a found staff was
+  sold.
+
+Rules (off by default):
+- **curefx**: confused, drink a potion that cures confusion (CSW, then CCW...; strongest first under 35% HP), CLW only
+  if there is none; confused with an awake, moving monster within 7 squares, drink instead of resting.
+- **teleshop**: from max depth 5, buy a Staff of Teleportation (Magic shop, black market) when none with charges is
+  carried, before CCW; keep it (never sold or dropped); wherever the rules look for a Teleportation scroll, use the
+  staff when there is no scroll or the player can't read (blind, confused): staffs work blind and confused. Confused
+  with a monster within 2 and HP under 50%, use the staff before drinking.
+
+Smoke (`runs/conf2`, deleted): 14 savepoints whose harvest continuation died confused at DL13–28, 6,000 actions,
+base / curefx / teleshop / both. The games are identical until a rule fires. curefx: one alive at the cap where base
+died (Druid DL13), four lived longer (Druid 1,651 → 3,824 actions; Warrior 904 → 3,651 and DL19 → 20; Warrior 1,810 →
+3,688; Priest 973 → 1,233), one died sooner (Paladin 416 → 352). teleshop bought the staff (2,800–2,900 gold) in 3 of
+14 (the rest lacked the gold or never reached town) and used it (a DL27 Warrior: 9–11 staff uses). A restock count bug
+(the staff counted as a Teleportation scroll) is fixed. Both go into the deep screen as variants.
+Under teleshop the descent check (DL10+ wants 1 teleport, DL15+ 3) also counts the staff's charges.
+
+**RULEFIX=castergate** (off; not screened): Mage and Druid on DL1–4 descend only at CL ≥ 2·DL+1. Why: of 321 fresh
+Mage games in the harvest, 172 stopped at DL2–4, and the top two killers were Grip and Fang. 4.2 gave them 25 and 28
+HP, speed +20 and AC 36 (in the 1990s about 5 HP); a CL2 Mage (13–17 HP, 4 SP) can't kill them or Phase Door away.
+Test (`runs/cgate`, 40 fresh starts, 20 Mage and 20 Druid, 15,000 actions, deleted): DL10+ 6 vs 5, mean deepest 5.0 vs
+5.4, deeper 16, shallower 12, same 12. No clear effect, and slower pacing costs depth under an action cap; dropped.
+
+### Deep screen: later looks, deepgate, devheal (2026-10-31 morning)
+
+Looks at the screen's planned 150 / 300 / 700 pairs; at 700 the bound and futility meet (z 1.67), so a variant is
+adopted or rejected there. Paired games (same starts), from `driver.log`:
+
+| Variant | Pairs | PH(20) | z | Deaths base / arm | Levels gained base / arm | Deeper / shallower | Decision |
+|---|---|---|---|---|---|---|---|
+| curefx | 700 (look 3) | 1.06 | −0.48 | 687 / 691 | 1.83 / 1.78 | 74 / 94 | reject |
+| teleshop | 703 (look 3) | 0.95 | 0.95 | 692 / 687 | 1.82 / 1.84 | 25 / 18 | reject |
+| spellfx (Paladin, Ranger, Rogue) | 705 (look 3) | 0.76 | 1.88 | 688 / 673 | 1.98 / 2.15 | 238 / 206 | **adopt** |
+| deepgate (own screen) | 150 (look 1) | 1.43 | −2.46 | 150 / 147 | 2.21 / 1.93 | 12 / 24 | reject (futility) |
+
+- **curefx** changes many games (168 of 704 end at another depth) and on balance slightly for the worse: the stronger
+  potion is drunk sooner and is gone later. Rejected; the confusion deaths need something else (escape rather than
+  endure).
+- **teleshop** changes only the games that can afford the staff: 47 of 709 bought it (2,800–2,900 gold, Magic shop;
+  the black market also sold Teleportation **scrolls** at 120 gold, which restock already bought, so "no store sells
+  them" above holds only for the ordinary stores). In those 47 pairs: deaths 41 → 36, mean deepest 17.0 → 17.3, mean
+  actions 11,300 → 13,200, deeper 25 / shallower 18; the other 662 games are identical to base. The screen's PH is
+  diluted 15:1 by unchanged games, so the reject says "too rare to move the average", not "harmful". A candidate
+  for adoption on its logic, or for a screen restricted to starts with 3,000+ gold.
+- **deepgate** cut deaths a little (death-rate ratio 0.89) but slowed descent more (pace ratio 0.82): fewer levels in
+  20,000 actions, and 24 of 36 changed games ended shallower. Rejected. The CL−DL margin matters (above), but waiting
+  for it on deep starts costs more than it saves; the margin has to be built earlier (fresh games) or by better play
+  at the level, not by stalling.
+- **devheal** (off by default, with devices/devicefx): the weak healing staves (Cure Light Wounds, Curing: about 20 HP)
+  only when no awake, moving monster is within 5 squares. Why: devicefx used them at HP under 50% in combat 132 times,
+  before the priority-2 emergency heal and escape; one turn for 20 HP next to a DL15 monster is a lost turn. The
+  Healing staff (300 HP) is unchanged. Screen: `runs/deep/2026-10-31-devheal`, base vs `devicefx+devheal` (driver18
+  now takes `a+b` as one variant with both flags), 3 slots, seed 7000000 (the main screen's starts), from 07:22.
+  Also seen in devicefx games, not yet fixed: a Staff of Detect Invisible used as monster detection on every arrival
+  (209 uses), and unknown wands tried on a drúadan mage. After the devheal screen started, devicefx's arrival
+  detection skips devices that detect only invisible monsters (`DETECT_INVISIBLE_MONSTERS`); the devheal screen ran
+  on the frozen copy without that change.
+- **devicefx+devheal** (151 pairs, 07:22–08:25): PH 2.17, z −2.54, pace ratio 0.80, levels gained 2.22 → 1.75, deeper
+  39 / shallower 48: the same as devicefx alone (2.18). Healing staves weren't the cost. Rejected; devicefx's slower
+  descent is still unexplained.
+- **spellfx adopted** for Paladin, Ranger and Rogue (look 3 at 08:15: PH 0.76, z 1.88 over the bound 1.67; death-rate
+  ratio 0.93, pace ratio 1.04). By class (pairs; deaths base → spellfx; levels gained; deeper / shallower): Paladin
+  239, 231 → 219, 2.13 → 2.57, 93 / 63; Ranger 238, 228 → 232, 1.63 → 1.72, 70 / 63; Rogue 238, 229 → 222, 2.17 →
+  2.14, 75 / 80. The gain is mostly Paladin's; Ranger and Rogue are about even. (Session 25 rejected spellfx on fresh
+  games because Blackguards lost; Blackguards weren't in this arm.) The main screen finished at 08:17, every variant
+  closed.
+
+### Why devicefx loses: ablation (2026-10-31 09:52–10:35)
+
+Log analysis of the 153 paired devicefx games (main screen) first:
+- **Not slowness in descent.** devicefx reached each new depth faster (median 601 actions between new depths against 731)
+  but arrived weaker: the CL−DL margin on reaching +1 / +2 / +3 / +4 was 0.60 / 0.78 / 0.60 / 0.75 against 0.75 / 1.03 /
+  1.10 / 1.46, and 60 games got past +2 against 78. In the 131 games that diverge from base (22 are identical), 22
+  devicefx characters died within 300 actions of the first difference, against 13 base.
+- **Three suspects**, all from the first actions (median first difference at action 60–80): trying unknown devices
+  (identify by use: unknown wands at approaching wolves and jellies, unknown staves on arrival); arrival detection (a
+  Staff of Mapping finds the stairs at once); and keeping every device (devices make shouldKeepItem true and take
+  devices out of shedRank: 0 device drops and 0 sales, against 417 drops and 108 sales in base; 50% of actions below
+  speed 110, against 32%).
+- Harmful kinds are not the cause: games that met Summoning, Darkness, Haste Monster(s), Heal or Clone Monster did
+  about as well as base (−0.13 levels); the others did worse (−0.77).
+
+Ablation flags (off by default, with devicefx): **dfxnotry** (no identify by use), **dfxnoarrive** (no arrival
+detection), **dfxnokeep** (unknown and useless devices are shed and sold as without devices; known useful ones kept).
+Same 150 starts and seeds as the main screen (base games replay identically), one look at 150 pairs:
+
+| Arm | PH(20) | z | Death-rate ratio | Pace ratio | Levels gained (base 2.22) | Deeper / shallower |
+|---|---|---|---|---|---|---|
+| devicefx (with the Detect Invisible fix) | 2.06 | −2.38 | 0.93 | 0.77 | 1.76 | 38 / 50 |
+| devicefx + dfxnotry | 1.57 | −1.75 | 1.07 | 0.91 | 1.81 | 31 / 47 |
+| devicefx + dfxnoarrive | 1.70 | −1.77 | 0.89 | 0.79 | 1.89 | 41 / 47 |
+| devicefx + dfxnokeep | 1.35 | −1.11 | 0.92 | 0.86 | 2.01 | 33 / 40 |
+| devicefx + all three | **0.85** | 1.13 | 0.85 | 0.95 | **2.37** | 15 / 12 |
+
+Each of the three costs something and the costs add up; keeping every device costs most. With all three off, what is
+left (attack devices chosen by expected damage, Teleport Other and control before fleeing, healing staves) beats base:
+deaths 151 → 145, levels gained 2.22 → 2.37, 4,389 actions survived against 3,734. "reject" in the driver is only the
+single-look bound (z 1.13 < 3.6 at one look); it is the candidate for a full screen.
+
+### Burden: RULEFIX=packlight, floorpick, gearweight (2026-10-31 late morning)
+
+In 4.2 the weight carried (pack and equipment) costs speed above half the STR limit (`burdenSlowAt`), −1 per tenth of
+the limit beyond it. 313 level-entry savepoints from the full harvest, loaded into the engine: 59% over the threshold,
+36% losing 1+ speed (DL20+: 64%, mean −1.4). Per character: oil 11 lb, torches 11 lb (lantern users carrying 4–16),
+rations 8 lb (6–25), shovel 7 lb, chests 6 lb (20% carry an unopened 25 lb chest), spellbooks 8–9 lb (3–4 copies),
+equipment 35–40 lb. invfix dropped only whole stacks of ranked kinds; none of these had a rank. Two further causes: the
+game's `pickup_inven` option (on by default) picks up anything matching a carried item whenever the character walks
+over it, and a drop made on a staircase lands on the next square, so the "dropped here" mark missed it (a chest was
+dropped and picked up again).
+
+- **Bridge**: `floorObjects` in /state (the objects the player knows of on the level, as the object list collects them:
+  oid, position, name, tval, quantity, weight; a pile seen only from afar is `unknown`); PICKUP takes `objectId` (one
+  object under the player); `POST /option` sets an interface option.
+- **packlight** (with invfix): chests always dropped; when overweight, the excess of a stack is dropped (torches 1 with
+  a fuelled lantern, else 4; 2 copies of a book; rations 8; oil 8; arrows or bolts without a matching launcher), heaviest
+  first; no shedding on stairs; restock stops past essentials (food 4, CCW and Phase 5, Teleportation 2, others 1) when
+  a purchase would cross the threshold.
+- **floorpick**: `pickup_inven` off; picks one wanted object at a time from the floor list and doesn't walk to squares
+  with nothing wanted; skips chests, junk, books held twice, kinds at their target, its own drops; past the threshold
+  only potions, scrolls, rings, amulets, wands, rods and gear for an empty slot.
+- **gearweight**: gearid's comparison charges the weight left over the threshold (the loser assumed dropped), 20 points
+  per speed (itemPower's rate for a speed modifier).
+
+Smoke (8 of the most burdened savepoints, one per class, 3,000 actions), share of actions slowed by weight: base 100%
+in all; packlight Mage 77%, Priest 84%, Druid 97%, Rogue 2%, Ranger 34%, Warrior 13%, Paladin and Blackguard 100%; with
+floorpick Mage 7%, Priest 7%, Druid 67%, Rogue 5%, Ranger 5%, Warrior 13%, Paladin and Blackguard 100% (the Paladin's
+game ended mid-shed; the Blackguard, STR 17, is left with kept gear: Chain Mail [32,−9], an unknown Morning Star,
+shovel, 12 Scrolls of Light). gearweight made no difference in games this short. Deep screen (base vs packlight,
+packlight+floorpick, packlight+floorpick+gearweight; same starts and seeds as the main screen) launched 11:06,
+`runs/deep/2026-10-31-pack`.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

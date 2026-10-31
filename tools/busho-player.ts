@@ -95,7 +95,7 @@ const TVAL = {
   SOFT_ARMOR: 16, HARD_ARMOR: 17, DRAG_ARMOR: 18,
   LIGHT: 19, AMULET: 20, RING: 21,
   STAFF: 22, WAND: 23, ROD: 24,
-  BOW: 5, SHOT: 2, ARROW: 3, BOLT: 4,
+  BOW: 5, SHOT: 2, ARROW: 3, BOLT: 4, CHEST: 1, GOLD: 35,
   // 魔法書 (装備対象外)
   MAGIC_BOOK: 30, PRAYER_BOOK: 31, NATURE_BOOK: 32, SHADOW_BOOK: 33, OTHER_BOOK: 34,
 };
@@ -328,6 +328,14 @@ const RULEFIX = new Set((process.env.RULEFIX ?? "danger,restock,escape,upnavfood
 // 明示した時だけ (セッション18で検証): clgate0 (DL1-3 は CL >= DL で降下)、leave2 (この階で 2 回逃げたら去る)、
 // leavemore (leave の名前に、セッション17の新しい既定で多かった死因を加える)
 const EARLY_CL_MARGIN = RULEFIX.has("clgate0") ? 0 : RULEFIX.has("clgate1") ? 1 : 2;
+// RULEFIX=castergate: Mage と Druid (HP の少ない純術者) は DL1-4 で CL >= 2*DL+1 まで降りない。4.2 の Grip/Fang は HP 25/28、
+// 速度 +20、AC 36 (昔は HP 5 前後): CL2 の Mage (HP 13-17、MP 4) は倒せず、Phase Door でも逃げられない。harvest の Mage の新規
+// 321 局中 DL2-4 止まりが 172、死因の 1-2 位が Grip と Fang
+const CASTERGATE = RULEFIX.has("castergate");
+// RULEFIX=deepgate: DL8 以降は CL >= DL+3 まで降りない (長居 veryLongOnLevel の緩和も 4 倍の滞在まで効かない)。深層スタート
+// (driver18、2026-10-31) の base は 99% が 2 万手以内に死に、開始時の CL-DL が大きいほど長く生きて深く進んだ
+// (CL-DL <= 0: 平均 3,000 手で +1.6 階、1-2: 4,200 手で +2.3、3-5: 3,800 手で +2.7、6+: 9,700 手で +13.5。職業の交絡あり)
+const DEEPGATE = RULEFIX.has("deepgate");
 const FOOD_KEEP = RULEFIX.has("food8") ? 8 : 6; // 町で買う食料の目標 (深い階の帰り道で餓死していた)
 // RULEFIX=breed: 繁殖する敵 (思い出に「爆発的に繁殖する」と出たもの = C サーバーの breeds。繁殖を見た後だけ) を
 // 少ないうちに最優先で倒し、増え始めたら (4 体以上見える、またはこの階で 150 行動見え続けた) 最寄りの階段から階を去る
@@ -371,6 +379,20 @@ const LIGHTOUT = RULEFIX.has("lightout");
 // 松明の交換は失敗した時だけ止める、指輪は弱い方と比べて差し替える (両方埋まっていれば外す方を指定)、Free Action と See Invisible は深いほど高く評価
 // (2026-10-30: 満杯の荷物で町の WoR・食料を買えず餓死、拾ったランタンの 9 割を売却、燃え残りの松明で暗闇、2 つ目の指輪が着けられないループ)
 const INVFIX = RULEFIX.has("invfix");
+// RULEFIX=packlight (invfix と): 重さで速度を落とさない。4.2 では持ち物と装備の重さが力の上限の半分 (burdenSlowAt) を超えると、上限の
+// 1/10 ごとに速度 −1。harvest の 313 セーブポイントで 59% が半分を超え、36% は実際に −1 以上 (DL20+ は 64%、平均 −1.4)。重さの内訳
+// (1 人平均): 油 11 lb、松明 11 lb (ランタンを持ちながら 4〜16 本)、食料 8 lb (6〜25 個)、シャベル 7 lb、宝箱 6 lb (20% が 25 lb の箱を
+// 開けずに持つ)、魔法書 8〜9 lb (同じ本を 3〜4 冊)。invfix は山ごとにしか落とさず、これらは落とす順位が無かった。packlight: 宝箱は
+// いつでも落とす。重すぎる時は山の余りを落とす (松明はランタンがあれば 1 本、無ければ 4 本、同じ魔法書 2 冊、食料 8 個、油 8 個、
+// 合う発射台の無い矢・ボルト)
+const PACKLIGHT = RULEFIX.has("packlight");
+// RULEFIX=floorpick: 足元の山をまとめて拾わず、見えている床の品 (ブリッジの floorObjects: ゲームの物品一覧と同じ、名前・種類・数・重さ)
+// から拾う物を 1 品ずつ選ぶ。拾う物の無いマスへは歩かない。ゲームの pickup_inven (持ち物と同じ品は歩けば拾う、既定で有効) を切る:
+// 落とした松明・食料・油を歩くたびに拾い直していた。自分で落とした品 (oid) は拾わない (階段の上では隣のマスに落ちる)
+const FLOORPICK = RULEFIX.has("floorpick");
+// RULEFIX=gearweight: 装備の比べ方 (gearid) に重さを入れる。着けない方は手放すとして、残る重さが速度の落ち始め (burdenSlowAt) を
+// 超える分を速度に直して引く (上限の 1/10 で −1、速度 1 = 20 点: itemPower の速度修正と同じ)
+const GEARWEIGHT = RULEFIX.has("gearweight");
 const PACKFULL = RULEFIX.has("packfull") || INVFIX;
 function packIsFull(p: any, inv: any[]): boolean {
   return PACKFULL && typeof p.packFree === "number" ? p.packFree <= 0 : inv.length >= 23;
@@ -416,8 +438,10 @@ function equipCmd(item: any, rival: any | undefined): Record<string, unknown> {
   return INVFIX && item.tval === TVAL.RING && rival ? { type: CMD.EQUIP, itemIndex: item.slot, replaceSlot: rival.slot }
     : { type: CMD.EQUIP, itemIndex: item.slot };
 }
-function wieldsLantern(): boolean {
-  return ((lastKnownState?.player?.equipment ?? []) as any[]).some((e: any) => e.tval === TVAL.LIGHT && /Lantern/i.test(e.name ?? ""));
+function wieldsLantern(): boolean { // 燃料があるか、給油できる油を持っているランタン (空のランタンは光源に数えない)
+  const p = lastKnownState?.player;
+  const oil = ((p?.inventory ?? []) as any[]).some((i: any) => /Flask~? of oil/i.test(i.name ?? "") && i.qty > 0);
+  return ((p?.equipment ?? []) as any[]).some((e: any) => e.tval === TVAL.LIGHT && /Lantern/i.test(e.name ?? "") && ((e.fuel ?? 0) > 0 || oil));
 }
 /** invfix: ランタンを使っていれば予備の松明は 1 本で足りる */
 function torchTarget(n: number): number { return INVFIX && wieldsLantern() ? Math.min(n, 1) : n; }
@@ -436,7 +460,8 @@ function shedRank(item: any, equip: any[]): number | null {
   if (item.tval === TVAL.LIGHT && /Lantern/i.test(item.name ?? "") && wieldsLantern()) return 2; // 2 つ目のランタン
   if (item.tval === TVAL.SCROLL && item.aware === false) return 3; // 未知の巻物 (読まない。町で店に渡して識別)
   if (item.tval === TVAL.SCROLL && /^(Treasure Detection|Detect Invisible)$/.test(item.name ?? "")) return 4;
-  if (!DEVICES && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval)) return 4;
+  if ((!DEVICES || (DFXNOKEEP && (item.aware === false || deviceUseless(item)))) && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval)
+    && !(TELESHOP && isTeleStaff(item))) return 4;
   // 5-6: 荷物が詰まった時だけ (町では空きが 3 枠未満の時に売る): 未知の薬 (店に渡せば識別)、小物の食料と薬、2 本目の掘削具
   if (item.tval === TVAL.POTION && item.aware === false) return 5;
   if (item.tval === TVAL.FOOD && !/Ration|Remove Hunger/i.test(item.name ?? "")) return 6;
@@ -444,6 +469,80 @@ function shedRank(item: any, equip: any[]): number | null {
   if (item.tval === TVAL.DIGGING && ((lastKnownState?.player?.inventory ?? []) as any[])
     .some((i: any) => i !== item && i.tval === TVAL.DIGGING && ((i.weight ?? 0) > (item.weight ?? 0) || ((i.weight ?? 0) === (item.weight ?? 0) && i.slot < item.slot)))) return 6;
   return null;
+}
+/** packlight: この山から手放してよい数 (目標を超える分)。宝箱は全部。重すぎる時に使う */
+function shedExcess(item: any, inv: any[]): number {
+  if (!PACKLIGHT || !item || (item.qty ?? 0) <= 0) return 0;
+  const q = item.qty ?? 1, name = item.name ?? "";
+  const keepOf = (keep: number, same: (i: any) => boolean, better: (a: any, b: any) => number) => {
+    // 同じ種類の山を良い順に並べ、良い方から keep 個まで残す。この山の残りを返す
+    let left = keep;
+    for (const i of inv.filter(same).sort(better)) {
+      const k = Math.min(left, i.qty ?? 1); left -= k;
+      if (i === item) return q - k;
+    }
+    return 0;
+  };
+  if (item.tval === TVAL.CHEST) return q;
+  if (item.tval >= 30 && item.tval <= 34) return Math.max(0, q - 2); // 火で 1 冊焼けても残るように 2 冊
+  if (item.tval === TVAL.LIGHT && /Torch/i.test(name))
+    return keepOf(wieldsLantern() ? 1 : 4, (i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? ""), (a: any, b: any) => (b.fuel ?? 0) - (a.fuel ?? 0));
+  if (item.tval === TVAL.FOOD && /Ration/i.test(name)) return keepOf(Math.max(FOOD_KEEP, 8), (i: any) => i.tval === TVAL.FOOD && /Ration/i.test(i.name ?? ""), () => 0);
+  if (item.tval === TVAL.FLASK && /oil/i.test(name)) return keepOf(8, (i: any) => i.tval === TVAL.FLASK && /oil/i.test(i.name ?? ""), () => 0);
+  if (item.tval === TVAL.ARROW || item.tval === TVAL.BOLT) {
+    const bow = ((lastKnownState?.player?.equipment ?? []) as any[]).find((e: any) => e.tval === TVAL.BOW)?.name ?? "";
+    const fits = item.tval === TVAL.BOLT ? /Crossbow/i.test(bow) : /Bow/i.test(bow) && !/Crossbow/i.test(bow);
+    if (!fits) return q; // 石と弾は投げられる (THROWING) ので残す
+  }
+  return 0;
+}
+const ignoredOids = new Set<number>(); // floorpick: 自分で落とした・拾えなかった床の品 (この階)
+/** floorpick: 落とす前の床の品の oid。落とした後の state と比べて、新しく現れた品を拾わない品にする */
+function floorOids(st: any): Set<number> { return new Set(((st?.floorObjects ?? []) as any[]).map((o: any) => o.oid)); }
+function noteDropped(before: Set<number>, st: any): void {
+  if (FLOORPICK) for (const o of (st?.floorObjects ?? []) as any[]) if (!before.has(o.oid)) ignoredOids.add(o.oid);
+}
+/** floorpick: 床の品を拾うか。見えている名前・種類・数・重さだけで決める。遠くから見ただけの山 (unknown) は見に行く */
+function wantFloor(o: any, p: any, inv: any[]): boolean {
+  if (ignoredOids.has(o.oid) || o.ignored) return false;
+  if (o.unknown) return true;
+  if (o.tval === TVAL.GOLD) return true;
+  const it = { ...o, slot: -1, aware: true };
+  if (o.tval === TVAL.CHEST || auditJunk(it)) return false;
+  if ([TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(o.tval) && deviceUseless(it)) return false;
+  if (o.tval >= 30 && o.tval <= 34) return inv.filter((i: any) => i.tval === o.tval && i.name === o.name).reduce((n: number, i: any) => n + (i.qty ?? 1), 0) < 2;
+  if (PACKLIGHT && shedExcess(it, [...inv, it]) >= (o.qty ?? 1)) return false; // 持っている分で目標に足りている (松明・食料・油・合わない矢)
+  const w = (o.weight ?? 0) * (o.qty ?? 1);
+  if (typeof p?.burden === "number" && typeof p?.burdenSlowAt === "number" && p.burden + w > p.burdenSlowAt) {
+    // 拾うと速度が落ち始める: 軽くて役に立つ物 (薬・巻物・指輪・首飾り・魔法の道具) と、空いた部位の装備だけ
+    if ([TVAL.POTION, TVAL.SCROLL, TVAL.RING, TVAL.AMULET, TVAL.WAND, TVAL.ROD].includes(o.tval)) return true;
+    if (EQUIPPABLE_TVALS.has(o.tval) && o.tval !== TVAL.LIGHT && o.tval !== TVAL.DIGGING)
+      return !((p.equipment ?? []) as any[]).some((e: any) => sameEquipCategory(e.tval, o.tval));
+    return false;
+  }
+  return true;
+}
+let pickOid = -1;
+/** floorpick: 足元で拾う 1 品の PICKUP。拾う物が無ければ null (このマスには印を付け、二度と拾いに来ない) */
+function floorPickCmd(st: any, px: number, py: number): Record<string, unknown> | null {
+  if (!FLOORPICK) return { type: CMD.PICKUP };
+  const here = ((st.floorObjects ?? []) as any[]).filter((o: any) => o.x === px && o.y === py);
+  if (here.length === 0) return { type: CMD.PICKUP }; // 一覧に無い (上限超え): 今まで通り
+  const want = here.find((o: any) => !o.unknown && wantFloor(o, st.player, st.player.inventory ?? []));
+  if (!want) { droppedTiles.add(`${px},${py}`); return null; }
+  pickOid = want.oid;
+  return { type: CMD.PICKUP, objectId: want.oid };
+}
+/** floorpick: 拾いに行く価値のあるマスか */
+function tileWanted(st: any, x: number, y: number): boolean {
+  if (!FLOORPICK) return true;
+  const here = ((st.floorObjects ?? []) as any[]).filter((o: any) => o.x === x && o.y === y);
+  return here.length === 0 || here.some((o: any) => wantFloor(o, st.player, st.player.inventory ?? []));
+}
+/** gearweight: 重さ b の時の速度の費用 (itemPower の点) */
+function burdenCost(b: number, p: any): number {
+  if (!GEARWEIGHT || typeof p?.burdenSlowAt !== "number" || p.burdenSlowAt <= 0) return 0;
+  return 20 * Math.max(0, b - p.burdenSlowAt) / (p.burdenSlowAt / 5);
 }
 let lightTripNoted = false, darkSteps = 0;
 const darkFelt = new Set<string>(); // 暗闇で踏んだマス (この階)
@@ -694,6 +793,20 @@ const TRYUNKNOWN = RULEFIX.has("tryunknown");
 // (休むと殴られ続ける。session 22 の確認の新既定: 死亡 183 件中 14 件が盲目で休み続けて死に、うち 8 件は飲んだ直後で治す薬なし。
 // tryunknown の Blindness は 75+4d25 ターン)。tryunknown は治す薬を持っている時だけ未知の薬を飲む
 const BLINDSAFE = RULEFIX.has("blindsafe");
+// RULEFIX=teleshop: 4.2 の店は Teleportation の巻物を売らない (魔法店と闇市の Teleportation の杖だけ)。最深 DL5 以上で使える杖がなければ
+// 買い、売らず落とさず、Teleportation の巻物を探す所すべてで巻物がない (または読めない: 盲目・混乱) 時は杖を使う。杖は盲目でも混乱中でも使える
+const TELESHOP = RULEFIX.has("teleshop");
+// RULEFIX=curefx: 混乱中に飲む薬は混乱を治すもの (CSW、CCW。4.2 の CLW は 20 ターン減らすだけ) を先に、HP 35% 未満なら強い順。
+// 2 マス以内に敵がいなくても、起きて動く敵が 7 マス以内に見えれば休まず飲む (遠くから混乱させ続ける術者: ironfist priest など)
+const CUREFX = RULEFIX.has("curefx");
+const CONF_CURES = /^(Cure Serious Wounds|Cure Critical Wounds|Healing|\*Healing\*|Life)$/;
+/** curefx: 混乱を治す薬 (なければ CLW)。HP 35% 未満なら強い順 */
+function findConfusionCure(inv: any[], hpPct: number): number | null {
+  const cures = inv.filter((i: any) => i.tval === TVAL.POTION && i.qty > 0 && i.aware !== false && CONF_CURES.test(i.name ?? ""))
+    .sort((a: any, b: any) => hpPct < 0.35 ? b.sval - a.sval : a.sval - b.sval);
+  return cures.length ? cures[0].slot : findHealingPotion(inv);
+}
+function isTeleStaff(i: any): boolean { return i?.tval === TVAL.STAFF && i.aware !== false && /^Teleportation$/.test(i.name ?? ""); }
 let lastTryAction = -99, potionsTried = 0;
 // RULEFIX=corridor: 起きている動く敵が 2 体以上 7 マス以内に見え、まだ隣にいない時、開けた場所 (通れる隣接 3 以上) なら
 // 6 歩以内の通路 (通れる隣接 2 以下、敵の隣でない) へ下がり、通路では最大 CORRIDOR_HOLD 回その場で待つ (近づいて部屋で囲まれない)。
@@ -734,7 +847,20 @@ const DIGSKILL = RULEFIX.has("digskill");
 // まとめて狙う。session 23 の devices は識別した Wand of Light を一度も使わなかった。未知の魔法棒/ロッドはユニークに試さない
 // (Haste Monster を Sméagol に撃って殺されていた)
 const DEVICES2 = RULEFIX.has("devices2");
-const DEVICES = RULEFIX.has("devices") || DEVICES2;
+// RULEFIX=devicefx (devices を含む): 魔法の道具を名前の表ではなく効果 (ブリッジの keffects → spell-roles の役割) で選ぶ。攻撃は
+// 届く道具のうち期待ダメージ × (1 − 失敗率) の最大、逃げる相手 (fight の flee、危険な敵) には先に Teleport Other (AWAY)、
+// 無ければ減速・混乱・睡眠・恐怖 (control)、到着時に地図・階段・敵の感知。失敗率 (ブリッジの failPermil) 50% 以上は攻撃・制御に使わない。
+// 4.2 では深くなるほど道具が増えるが (Teleport Other、Stone to Mud、Slow/Confuse/Sleep Monster、Mapping、Detect Evil、Curing…)、
+// devices は攻撃の魔法棒・回復の杖・Teleportation の杖しか使わなかった
+const DEVICEFX = RULEFIX.has("devicefx");
+const DEVICES = RULEFIX.has("devices") || DEVICES2 || DEVICEFX;
+// RULEFIX=devheal (devices と): 弱い回復の杖 (Cure Light Wounds、Curing: 20 HP 前後) は起きた敵が 5 マス以内にいない時だけ (休む代わり)。
+// 戦闘中の HP 半分未満で使うと、緊急回復と逃走 (優先度 2) より先に 1 手を無駄にしていた (深層スタート 2026-10-31: devicefx の
+// PH 2.18、杖の回復 132 回)。Healing の杖 (300 HP) は今まで通り
+const DEVHEAL = RULEFIX.has("devheal");
+// devicefx の部分を外す切り分け用 (2026-10-31: devicefx の深層 PH 2.18 の原因探し)。dfxnotry: 未知の道具を使って識別しない。
+// dfxnoarrive: 到着時の感知をしない。dfxnokeep: 未知・使い道のない道具は devices なしと同じく手放す (既知の役に立つ道具だけ持つ)
+const DFXNOTRY = RULEFIX.has("dfxnotry"), DFXNOARRIVE = RULEFIX.has("dfxnoarrive"), DFXNOKEEP = RULEFIX.has("dfxnokeep");
 const LIGHT_ORC_RE = /^(snaga|cave orc|orc (tracker|shaman|archer))$/;
 // RULEFIX=spellfx: 呪文を名前ではなく効果で選ぶ (tools/spell-roles.ts: ブリッジが送る効果の列から役割を決める)。名前の表は angband-ts 用で
 // 4.2.6 の多くの呪文に当たらなかった (session 23 の確認: Ranger は Remove Hunger と Herbal Curing を覚えて一度も唱えず、Blackguard は
@@ -815,8 +941,37 @@ function deviceCharges(it: any): number | null { const m = /\((\d+) charges?\)/.
 function deviceUseless(it: any): boolean { return it.aware !== false && USELESS_DEVICES.test(it.name ?? ""); }
 const deviceEmpty = new Set<string>(); // 使えなかった (充填なし・充填中) 道具。階を移ると忘れる
 function deviceReady(it: any): boolean {
+  if (typeof it.charges === "number" && it.charges <= 0) return false;
+  if (typeof it.charging === "number" && it.charging >= (it.qty ?? 1)) return false;
   return it.qty > 0 && deviceCharges(it) !== 0 && !deviceEmpty.has(`${it.tval}:${it.name}`) && !/charging|\bempty\b/i.test(it.desc ?? "");
 }
+/** devicefx: 役割を持つ使える道具 (既知、充填あり、失敗率が maxFail‰ 未満) のうち最良。score は期待値 (既定: 量 × 成功率) */
+function devFx(inv: any[], role: Role, pick: (e: RoleEntry) => boolean = () => true, maxFail = 500): { it: any; entry: RoleEntry; ok: number } | null {
+  if (!DEVICEFX) return null;
+  let best: { it: any; entry: RoleEntry; ok: number } | null = null;
+  for (const it of inv) {
+    if (![TVAL.WAND, TVAL.STAFF, TVAL.ROD].includes(it.tval) || it.aware === false || !deviceReady(it)) continue;
+    const fail = typeof it.failPermil === "number" ? it.failPermil : 300;
+    if (fail >= maxFail) continue;
+    const e = itemRoles(it).find(r => r.role === role && pick(r));
+    if (!e) continue;
+    const ok = 1 - fail / 1000;
+    if (!best || e.amount * ok > best.entry.amount * best.ok) best = { it, entry: e, ok };
+  }
+  return best;
+}
+const devFxUses: Record<string, number> = {};
+function devFxNote(k: string): void { devFxUses[k] = (devFxUses[k] ?? 0) + 1; }
+/** devicefx: 道具を使うコマンド (魔法棒は aim、ロッドは zap、杖は use)。target があれば狙う */
+function devCmd(it: any, target?: { x: number; y: number }): Record<string, unknown> {
+  const type = it.tval === TVAL.WAND ? CMD.AIM : it.tval === TVAL.ROD ? CMD.ZAP : CMD.USE;
+  return target && it.tval !== TVAL.STAFF ? { type, itemIndex: it.slot, target } : { type, itemIndex: it.slot };
+}
+let devDetectLevel = -1, devMapLevel = -1;
+const dimLights = new Set<string>(); // invfix: 着けて暗かった光源 (二度と着けない)
+/** Necromancer (4.2 の UNLIGHT): 光なしで近くが見え、明るい所では呪文の失敗が +25%。負の光 (Lantern of Shadows) はむしろ良い */
+function UNLIGHT_CLASS(p: any): boolean { return /Necromancer/.test(p?.class ?? ""); }
+function lightKey(it: any): string { return `${it.sval}:${(it.desc ?? it.name ?? "").replace(/\(\d+ turns?\)/, "")}`; } // 燃料の残りは説明から外す
 // 未知の杖を試すのは 1 階につき 1 種類 1 回。{tried} (使っても識別されなかった = 敵に効く杖: Sleep/Slow/Confuse Monsters など) は
 // 次は見えている敵 (2-6 マス) がいる時に試す
 const staffTriedLevel = new Set<string>();
@@ -922,7 +1077,7 @@ function castBlocked(): boolean { return (noTimeUntil[CMD.CAST] ?? 0) > sendSeq;
 function isEscapeCommand(cmd: Record<string, unknown>): boolean {
   const pl = lastKnownState?.player;
   if (!pl) return false;
-  if (cmd.type === CMD.READ) {
+  if (cmd.type === CMD.READ || (TELESHOP && cmd.type === CMD.USE)) {
     const it = (pl.inventory ?? []).find((i: any) => i.slot === cmd.itemIndex);
     return /Phase Door|Teleport/.test(it?.name ?? "");
   }
@@ -942,6 +1097,10 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     noTimeStreak = 0;
   }
   const turnBefore = lastKnownState?.turn;
+  if (TELESHOP && cmd.type === CMD.READ
+    && isTeleStaff((lastKnownState?.player?.inventory ?? []).find((i: any) => i.slot === cmd.itemIndex))) {
+    cmd = { type: CMD.USE, itemIndex: cmd.itemIndex }; // teleshop: findTeleportScroll が返した杖
+  }
   // 混乱中のREAD/CASTは必ず失敗する → RESTに差し替えて無限ループ防止
   if (lastKnownState?.player?.timed?.confused > 0 && (cmd.type === CMD.READ || cmd.type === CMD.CAST)) {
     console.log(`  [CMD-GUARD] confused中のREAD/CASTをRESTに差し替え`);
@@ -1653,6 +1812,7 @@ async function decideFight(state: any, monster: any, rules: FightChoice): Promis
 // 個体ごとに決まった fight 判断 (モデル/強制)。ルール任せの個体は入らない
 const fightPlan = new Map<string, FightChoice>();
 const fleeSteps = new Map<string, number>();
+const devCtl = new Map<string, number>(); // devicefx: 個体ごとの Teleport Other・制御の道具の使用回数
 // サーバに射線なしで拒否された投擲 ("px,py>mx,my")。同じ地点からは投げずに殴る (拒否はターンが進まず無限ループになる)
 const noThrowLOS = new Set<string>();
 let shotsFired = 0, throwHits = 0, throwKills = 0, throwsMade = 0, earlyFleeActions = 0, earlyFleeStairs = 0, phasesRead = 0, lastEarlyPhaseAction = -99;
@@ -1997,11 +2157,15 @@ function safeStairPath(tiles: any[], px: number, py: number, threats: any[], mon
 }
 
 function findTeleportScroll(inventory: any[]): number | null {
-  if (readBlocked()) return null; // 読めない (暗闇/盲目): 読もうとし続けない
+  // teleshop: 巻物がない・読めない時は Teleportation の杖 (sendCommand が READ を USE に替える)
+  const staff = TELESHOP ? inventory.find((i: any) => isTeleStaff(i) && deviceReady(i))?.slot ?? null : null;
+  const tm = lastKnownState?.player?.timed ?? {};
+  if (staff !== null && ((tm.confused ?? 0) > 0 || (tm.blind ?? 0) > 0)) return staff;
+  if (readBlocked()) return staff; // 読めない (暗闇/盲目): 読もうとし続けない
   const scroll = inventory.find((item: any) =>
     item.tval === TVAL.SCROLL && item.name.includes("Teleportation") && item.qty > 0
   );
-  return scroll ? scroll.slot : null;
+  return scroll ? scroll.slot : staff;
 }
 
 function findSpeedPotion(inventory: any[]): number | null {
@@ -2429,7 +2593,8 @@ function shouldKeepItem(item: any, equipment: any[]): boolean {
   if (TRYUNKNOWN && item.tval === TVAL.SCROLL && item.aware === false) return false;
   if ([TVAL.SCROLL, TVAL.POTION, TVAL.FOOD, TVAL.FLASK].includes(item.tval)) return true; // 油は投擲武器
   // RULEFIX=devices: 魔法の道具は持つ (使い道のないと分かったものはダンジョンで落とす)
-  if (DEVICES && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval)) return true;
+  if (DEVICES && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval)) return !(DFXNOKEEP && (item.aware === false || deviceUseless(item)));
+  if (TELESHOP && isTeleStaff(item)) return true;
   // 魔法書は保持
   if ([30, 31, 32, 33, 34].includes(item.tval)) return true;
   // 掘削具は保持 (stuck 脱出用)
@@ -2675,6 +2840,7 @@ async function buySupplies(state: any) {
     // RULEFIX=wor: 帰還の巻物 1 枚を回復薬より先に。無いと食料切れのとき上り階段を歩いて餓死していた
     ...(RULEFIX.has("wor") ? [{ name: "Word of Recall" as string | null, tvals: [25], target: 1, stores: [4, 5] }] : []),
     ...(RULEFIX.has("neutpois") ? [{ name: "Neutralize Poison" as string | null, tvals: [26], target: 2, stores: [4] }] : []), // 錬金術店 (闇市は 3 倍)
+    ...(TELESHOP && (p.maxDepth ?? state.depth ?? 0) >= 5 ? [{ name: "Teleportation" as string | null, tvals: [TVAL.STAFF], target: 1, stores: [5, 6] }] : []),
     { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [4, 5] },
     { name: "Phase Door", tvals: [25], target: 20, stores: [4, 5] },
     { name: "Teleportation", tvals: [25], target: 12, stores: [4, 5, 6] },
@@ -2689,7 +2855,8 @@ async function buySupplies(state: any) {
     const inv = freshState.player.inventory;
     let current: number;
     if (item.name) {
-      current = inv.filter((i: any) => i.name?.includes(item.name) && i.qty > 0 && torchCounts(i))
+      current = inv.filter((i: any) => i.name?.includes(item.name) && i.qty > 0 && torchCounts(i)
+        && (!TELESHOP || (item.tvals.includes(i.tval) && (i.tval !== TVAL.STAFF || deviceReady(i)))))
         .reduce((s: number, i: any) => s + i.qty, 0);
     } else {
       current = inv.filter((i: any) => item.tvals.includes(i.tval) && i.qty > 0)
@@ -2723,6 +2890,10 @@ async function buySupplies(state: any) {
 
           if (matching.length === 0) continue;
           const stockItem = matching[0];
+          // packlight: 最低限 (食料 4、松明 1、CCW・Phase 5、Teleportation 2、他 1) を超えた分は、買うと速度が落ち始めるなら買わない
+          const pl = stRes.player, least = /Ration/.test(item.name ?? "Ration") ? 4 : /Cure Critical|Phase/.test(item.name ?? "") ? 5 : /^Teleportation$/.test(item.name ?? "") ? 2 : 1;
+          if (PACKLIGHT && current + bought >= least && typeof pl?.burden === "number" && typeof pl?.burdenSlowAt === "number"
+            && pl.burden + (stockItem.weight ?? 0) > pl.burdenSlowAt) break;
 
           const res = await fetch(`${API}/buy`, {
             method: "POST",
@@ -2851,6 +3022,8 @@ async function playGame() {
   }
 
   let state = await getState();
+  if (FLOORPICK) await fetch(`${API}/option`, { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "pickup_inven", value: 0 }) }).catch(() => null);
   const rolloutStart = {
     depth: state.depth, cl: state.player.level, exp: state.player.exp ?? 0,
     hp: state.player.hp, maxHp: state.player.maxHp,
@@ -3003,6 +3176,7 @@ async function playGame() {
       for (const invItem of inv) {
         if (GEARSET) break; // gearset: 一式で選ぶ
         if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
+        if (INVFIX && invItem.tval === TVAL.LIGHT) continue; // invfix: 光源は光源の規則で (空のランタンに替えて暗闇になっていた)
         if (invItem.tval === TVAL.DIGGING) continue; // 掘削具は持ち物のまま (装備しない)
         // 既に装備したことのあるアイテムは無視 (ループ防止)
         if (equippedNames.has(invItem.name)) continue;
@@ -3032,7 +3206,7 @@ async function playGame() {
       if (state.depth > maxDepthReached) maxDepthReached = state.depth;
       lastKnownDepth = state.depth;
       // RULEFIX=leave/seal/arrive: 階ごとの状態 (フラグが無効なら使われない)
-      levelEscapes = 0; leaving = ""; leaveWalk = 0; sealedDoors.clear(); sealFailed.clear(); sealPrev = null; deviceEmpty.clear(); droppedTiles.clear(); staffTriedLevel.clear();
+      levelEscapes = 0; leaving = ""; leaveWalk = 0; sealedDoors.clear(); sealFailed.clear(); sealPrev = null; deviceEmpty.clear(); droppedTiles.clear(); ignoredOids.clear(); staffTriedLevel.clear();
       const arrivedOn = tiles.find((t: any) => t.x === px && t.y === py)?.feat;
       arrivePending = ARRIVE && state.depth >= 1 && (arrivedOn === FEAT.UP_STAIR || arrivedOn === FEAT.DOWN_STAIR);
       if (savepointBank.enabled && !ROLLOUT) await savepointBank.onLevelEntry(state, gameIdOf(state), GAME_SEED === null ? null : Number(GAME_SEED), fetchSnapshotBody);
@@ -3679,8 +3853,16 @@ async function playGame() {
             continue;
           }
         }
+        // teleshop: 混乱中でも杖は使える。HP 半分未満なら Teleportation の杖で離れる
+        const tstaff = TELESHOP && hpPct < 0.5 ? inv.find((i: any) => isTeleStaff(i) && deviceReady(i)) : null;
+        if (tstaff) {
+          addLesson(state.turn, state.depth, "状態異常", `${status}中+敵${nearbyEnemies.length}体接近、HP${Math.round(hpPct * 100)}%。Teleportationの杖で離脱`);
+          fleeAttempts++;
+          state = await sendCommand({ type: CMD.USE, itemIndex: tstaff.slot });
+          continue;
+        }
         // 混乱+敵が近い → ポーション飲む (混乱中でもquaffは可能)
-        const healSlot = findHealingPotion(inv);
+        const healSlot = CUREFX ? findConfusionCure(inv, hpPct) : findHealingPotion(inv);
         if (healSlot !== null) {
           addLesson(state.turn, state.depth, "状態異常", `${status}中+敵${nearbyEnemies.length}体接近。回復薬で耐える`);
           healingsUsed++;
@@ -3712,6 +3894,17 @@ async function playGame() {
           blindSteps++;
           if (blindSteps <= 3 || blindSteps % 20 === 0) addLesson(state.turn, state.depth, "状態異常", `盲目で動かない敵の隣。休まず離れる (#${blindSteps})`);
           state = await sendCommand({ type: CMD.WALK, direction: away });
+          continue;
+        }
+      }
+      // RULEFIX=curefx: 混乱中、起きて動く敵が 7 マス以内に見える → 休まず混乱を治す薬を飲む
+      if (CUREFX && isConfused && !isParalyzed
+          && monsters.some((m: any) => m.distance <= 7 && !STATIONARY_RE.test(m.name ?? "") && m.neverMove !== true && !m.asleep)) {
+        const cure = findConfusionCure(inv, hpPct);
+        if (cure !== null) {
+          addLesson(state.turn, state.depth, "状態異常", `混乱中、7マス以内に敵。休まず薬で治す`);
+          healingsUsed++;
+          state = await sendCommand({ type: CMD.QUAFF, itemIndex: cure });
           continue;
         }
       }
@@ -3753,6 +3946,7 @@ async function playGame() {
       // RULEFIX=invfix: ランタン (松明より明るく燃え尽きず、持っている油で給油できる) を持っていれば松明から替える
       const lanternInv = INVFIX && !/Lantern/i.test(cur?.name ?? "") && actionCount >= lightBlockedUntil
         ? inv.find((i: any) => i.tval === TVAL.LIGHT && /Lantern/i.test(i.name ?? "") && !gearCursed(i) && itemPower(i) >= 0
+          && (UNLIGHT_CLASS(p) || (((gearView(i).modifiers ?? [])[OMOD.LIGHT] ?? 0) >= 0 && !dimLights.has(lightKey(i)))) // Lantern of Shadows (LIGHT -4) は暗くなる
           && ((i.fuel ?? 0) > 0 || inv.some((o: any) => /Flask~? of oil/i.test(o.name ?? "") && o.qty > 0))) : undefined;
       if (lanternInv && monsters.every((m: any) => m.distance > 2)) {
         addLesson(state.turn, state.depth, "光源", `${cur?.name ?? "光源なし"}からランタンに替える`);
@@ -3760,9 +3954,20 @@ async function playGame() {
         if (!/Lantern/i.test((state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT)?.name ?? "")) lightBlockedUntil = actionCount + 200;
         continue;
       }
-      const low = cur ? (typeof cur.fuel === "number" && /Torch/i.test(cur.name ?? "") && cur.fuel < 300) : true;
-      const spare = low && actionCount >= lightBlockedUntil ? spareTorchSlot(inv) : null;
-      if (spare !== null && !(INVFIX && cur && (inv.find((i: any) => i.slot === spare)?.fuel ?? 0) <= (cur.fuel ?? 0))) {
+      // invfix: 空のランタンは油があればその場で給油、無ければ松明に替える (給油は lightout の規則より先: 替えては戻すループになっていた)
+      const oilInv = inv.find((i: any) => /Flask~? of oil/i.test(i.name ?? "") && i.qty > 0);
+      if (INVFIX && cur && /Lantern/i.test(cur.name ?? "") && (cur.fuel ?? 0) <= 0 && oilInv && actionCount >= lightBlockedUntil) {
+        state = await sendCommand({ type: CMD.REFILL, itemIndex: oilInv.slot });
+        const after = (state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+        if ((after?.fuel ?? 0) <= 0) lightBlockedUntil = actionCount + 200;
+        continue;
+      }
+      const low = cur ? (typeof cur.fuel === "number" && (/Torch/i.test(cur.name ?? "") ? cur.fuel < 300 : INVFIX && cur.fuel <= 0 && !oilInv)) : true;
+      // invfix: 着けている光源で明るくならない (Lantern of Shadows など、光の修正が負) → 燃料のある松明に替える
+      const dim = INVFIX && !UNLIGHT_CLASS(p) && !!cur && !/Torch/i.test(cur.name ?? "") && (p.light ?? 1) <= 0 && (cur.fuel ?? 1) > 0;
+      if (dim) dimLights.add(lightKey(cur));
+      const spare = (low || dim) && actionCount >= lightBlockedUntil ? spareTorchSlot(inv) : null;
+      if (spare !== null && (dim || !(INVFIX && cur && (inv.find((i: any) => i.slot === spare)?.fuel ?? 0) <= (cur.fuel ?? 0)))) {
         addLesson(state.turn, state.depth, "光源", `松明の残り${cur?.fuel ?? 0}ターン。予備の松明に替える`);
         state = await sendCommand({ type: CMD.EQUIP, itemIndex: spare });
         const after = (state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
@@ -3778,7 +3983,9 @@ async function playGame() {
       const fuel = cur ? (typeof cur.fuel === "number" ? cur.fuel : Infinity) : 0; // fuel の無い光源 (燃え尽きない) は無限
       const lantern = !!cur && /Lantern/i.test(cur.name ?? "");
       const oil = inv.find((i: any) => /Flask~? of oil/i.test(i.name ?? "") && i.qty > 0);
-      const nearFoe = monsters.some((m: any) => m.distance <= 2 && m.asleep !== true);
+      // 動かないと分かっている敵 (思い出の「追って来ない」: neverMove) は数えない: 隣なら離れればよい (2026-10-30: 2 マス先の bloodshot eye の
+      // そばで給油も手探りもせず、暗闇で数千行動止まっていた)
+      const nearFoe = monsters.some((m: any) => m.distance <= 2 && m.asleep !== true && m.neverMove !== true);
       if (lantern && fuel < 7500 && oil && !nearFoe && actionCount >= lightBlockedUntil) {
         state = await sendCommand({ type: CMD.REFILL, itemIndex: oil.slot });
         const after = (state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
@@ -3828,6 +4035,20 @@ async function playGame() {
             }
           }
         }
+      }
+    }
+
+    // === RULEFIX=devicefx: 到着した階で 1 回ずつ、地図・階段の感知と敵の感知の道具 (杖・ロッド) ===
+    if (DEVICEFX && !DFXNOARRIVE && !ROLLOUT && state.depth >= 1 && monsters.every((m: any) => m.distance > 3)) {
+      const map = devMapLevel !== levelEntryTurn ? devFx(inv, "detect-stairs", undefined, 700) : null;
+      const det = !map && devDetectLevel !== levelEntryTurn ? devFx(inv, "detect-monsters", e => e.sub !== "DETECT_INVISIBLE_MONSTERS", 700) : null; // 透明な敵だけの感知は到着時には使わない (209 回の無駄、2026-10-31)
+      const d = map ?? det;
+      if (map) devMapLevel = levelEntryTurn; else if (det) devDetectLevel = levelEntryTurn;
+      if (d) {
+        devFxNote(d.entry.role);
+        addLesson(state.turn, state.depth, "魔法の道具", `到着: ${d.it.desc ?? d.it.name} (${d.entry.role})`);
+        state = await sendCommand(devCmd(d.it));
+        continue;
       }
     }
 
@@ -3937,9 +4158,10 @@ async function playGame() {
       const tele = dev(/^Teleportation$/, TVAL.STAFF);
       const heal = dev(HEAL_STAVES, TVAL.STAFF);
       if (tele && hpPct < 0.35 && near3) use = { it: tele, why: "緊急逃走" };
-      else if (heal && hpPct < 0.5) use = { it: heal, why: "回復" };
+      else if (heal && hpPct < 0.5 && !(DEVHEAL && heal.name !== "Healing"
+        && monsters.some((m: any) => m.distance <= 5 && m.asleep !== true && m.neverMove !== true))) use = { it: heal, why: "回復" };
       else {
-        const unk = inv.find((i: any) => i.tval === TVAL.STAFF && i.aware === false && deviceReady(i) && !staffTriedLevel.has(i.name));
+        const unk = DFXNOTRY ? undefined : inv.find((i: any) => i.tval === TVAL.STAFF && i.aware === false && deviceReady(i) && !staffTriedLevel.has(i.name));
         const tried = /tried/.test(unk?.desc ?? "");
         const ok = tried
           ? hpPct >= 0.5 && monsters.some((m: any) => m.distance >= 2 && m.distance <= 6) && !monsters.some((m: any) => m.distance <= 1)
@@ -4458,7 +4680,9 @@ async function playGame() {
           }
         }
         // RULEFIX=devices: 隣にいない見えている敵へ、未知の魔法棒/ロッドを試す (識別)
-        if (DEVICES && state.depth >= 1 && m.distance >= 2 && choice !== "flee" && !(DEVICES2 && m.isUnique)
+        if (DEVICES && !DFXNOTRY && state.depth >= 1 && m.distance >= 2 && choice !== "flee" && !(DEVICES2 && m.isUnique)
+          // devicefx: 未知の道具は危険でない敵 (ユニークを除く) にだけ試す (Haste Monster や Clone を危険な敵に撃たない)
+          && !(DEVICEFX && (m.isUnique || choice !== null || lowCLDanger(m, p.level) || meleeTooCostly(m, p)))
           && hasLOS(tiles, px, py, m.x, m.y)) {
           const unk = inv.find((i: any) => (i.tval === TVAL.WAND || i.tval === TVAL.ROD) && i.aware === false && deviceReady(i));
           if (unk) {
@@ -4476,7 +4700,9 @@ async function playGame() {
         }
         // RULEFIX=devices: 危険な敵 (油/逃走/近接見送りの対象) が離れているうちに、攻撃の魔法棒/ロッドを使う (油より先)
         if (DEVICES && m.distance >= 2 && choice !== "flee" && hasLOS(tiles, px, py, m.x, m.y)) {
-          const wand = inv.find((i: any) => (i.tval === TVAL.WAND || i.tval === TVAL.ROD) && i.aware !== false
+          const wand = DEVICEFX // devicefx: 届く攻撃の道具で期待ダメージ最大 (名前の表ではなく効果で)
+            ? devFx(inv.filter((i: any) => i.tval !== TVAL.STAFF), "attack-target", e => reachOf(e, p.level) >= m.distance)?.it
+            : inv.find((i: any) => (i.tval === TVAL.WAND || i.tval === TVAL.ROD) && i.aware !== false
             && ATTACK_DEVICES.test(i.name ?? "") && deviceReady(i));
           if (wand) {
             const turnBefore = state.turn;
@@ -4513,6 +4739,20 @@ async function playGame() {
           }
           choice = "melee"; // 油なし/射線なし → 殴る
         }
+        // RULEFIX=devicefx: 逃げる相手には先に Teleport Other、無ければ減速・混乱・睡眠・恐怖の道具 (同じ個体に 3 回まで)
+        if (DEVICEFX && choice === "flee" && hasLOS(tiles, px, py, m.x, m.y) && (devCtl.get(key) ?? 0) < 3) {
+          const away = devFx(inv, "control", e => /^AWAY/.test(e.sub ?? ""));
+          const ctl = away ?? (m.isUnique ? null : devFx(inv, "control", e => !/^AWAY/.test(e.sub ?? "")));
+          if (ctl && ctl.it.tval !== TVAL.STAFF) {
+            devCtl.set(key, (devCtl.get(key) ?? 0) + 1);
+            const turnBefore = state.turn;
+            devFxNote(away ? "away" : `control:${ctl.entry.sub}`);
+            addLesson(state.turn, state.depth, "魔法の道具", `${m.name}(Lv${m.level},dist${m.distance})から逃げる前に${ctl.it.desc ?? ctl.it.name} (${ctl.entry.sub})`);
+            state = await sendCommand(devCmd(ctl.it, { x: m.x, y: m.y }));
+            if (state.turn !== turnBefore) { acted = true; break; }
+            deviceEmpty.add(`${ctl.it.tval}:${ctl.it.name}`);
+          }
+        }
         if (choice === "flee") {
           const fleeN = (fleeSteps.get(key) ?? 0) + 1;
           fleeSteps.set(key, fleeN);
@@ -4537,6 +4777,19 @@ async function playGame() {
     }
     if (nearDangerous.length > 0 && nearDangerous[0].distance <= dangerFleeRange) {
       const dangerMon = nearDangerous[0];
+      // RULEFIX=devicefx: 危険な敵から逃げる前に Teleport Other (同じ個体に 3 回まで)
+      if (DEVICEFX && hasLOS(tiles, px, py, dangerMon.x, dangerMon.y) && (devCtl.get(fkey(dangerMon)) ?? 0) < 3) {
+        const away = devFx(inv, "control", e => /^AWAY/.test(e.sub ?? ""));
+        if (away && away.it.tval !== TVAL.STAFF) {
+          devCtl.set(fkey(dangerMon), (devCtl.get(fkey(dangerMon)) ?? 0) + 1);
+          const turnBefore = state.turn;
+          devFxNote("away");
+          addLesson(state.turn, state.depth, "魔法の道具", `危険な${dangerMon.name}(Lv${dangerMon.level},dist${dangerMon.distance})に${away.it.desc ?? away.it.name}`);
+          state = await sendCommand(devCmd(away.it, { x: dangerMon.x, y: dangerMon.y }));
+          if (state.turn !== turnBefore) continue;
+          deviceEmpty.add(`${away.it.tval}:${away.it.name}`);
+        }
+      }
       const monFleeCount = fleeCountByMonster.get(dangerMon.name) || 0;
       fleeCountByMonster.set(dangerMon.name, monFleeCount + 1);
 
@@ -5131,15 +5384,26 @@ async function playGame() {
     if (INVFIX && !ROLLOUT && state.depth >= 1 && actionCount - lastShedAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
       const over = typeof p.burden === "number" && typeof p.burdenSlowAt === "number" ? p.burden - p.burdenSlowAt : 0;
       const full = typeof p.packFree === "number" && p.packFree <= 0;
-      if (over > 0 || full) {
+      const chest = PACKLIGHT && inv.some((i: any) => i.tval === TVAL.CHEST);
+      // packlight: 階段の上では落とさない (落とした物は隣のマスに落ち、落としたマスの印が外れて拾い直していた)
+      const onStair = PACKLIGHT && [FEAT.UP_STAIR, FEAT.DOWN_STAIR].includes(tiles.find((t: any) => t.x === px && t.y === py)?.feat);
+      if ((over > 0 || full || chest) && !onStair) {
         lastShedAction = actionCount;
-        const wt = (i: any) => (i.weight ?? 0) * (i.qty ?? 1);
-        const c = inv.map((i: any) => ({ i, r: shedRank(i, p.equipment ?? []) })).filter((x: any) => x.r !== null)
-          .sort((a: any, b: any) => over > 0 ? wt(b.i) - wt(a.i) || a.r - b.r : a.r - b.r || wt(b.i) - wt(a.i))[0];
+        // packlight: 山ごとの候補に、山の余り (shedExcess) を加える。重すぎる時は落とす重さの大きい順
+        const cand = inv.map((i: any) => ({ i, r: shedRank(i, p.equipment ?? []), q: i.qty ?? 1 })).filter((x: any) => x.r !== null) as { i: any; r: number; q: number }[];
+        if (PACKLIGHT) for (const i of inv) {
+          const q = shedExcess(i, inv);
+          if (q > 0 && (over > 0 || i.tval === TVAL.CHEST) && !cand.some(x => x.i === i)) cand.push({ i, r: i.tval === TVAL.CHEST ? 0 : 3, q });
+        }
+        const wt = (x: { i: any; q: number }) => (x.i.weight ?? 0) * x.q;
+        const c = cand.filter(x => over > 0 || full || x.i.tval === TVAL.CHEST)
+          .sort((a, b) => over > 0 ? wt(b) - wt(a) || a.r - b.r : a.r - b.r || wt(b) - wt(a))[0];
         if (c) {
           droppedTiles.add(`${px},${py}`); // 落とした物を拾い直さない
-          addLesson(state.turn, state.depth, "持ち物", `${full ? "荷物が満杯" : `重量超過 ${(over / 10).toFixed(1)}lb`}。${c.i.name}x${c.i.qty}を落とす (順位${c.r})`);
-          state = await sendCommand({ type: CMD.DROP, itemIndex: c.i.slot, quantity: c.i.qty });
+          addLesson(state.turn, state.depth, "持ち物", `${full ? "荷物が満杯" : over > 0 ? `重量超過 ${(over / 10).toFixed(1)}lb` : "宝箱"}。${c.i.name}x${c.q}を落とす (順位${c.r})`);
+          const before = floorOids(state);
+          state = await sendCommand({ type: CMD.DROP, itemIndex: c.i.slot, quantity: c.q });
+          noteDropped(before, state);
           continue;
         }
       }
@@ -5156,7 +5420,9 @@ async function playGame() {
           : equip.find((e: any) => sameEquipCategory(e.tval, it.tval));
         if (cur && it.tval === TVAL.BOW && launcherFamily(it.name ?? "") !== launcherFamily(cur.name ?? "")) continue;
         const pw = itemPower(it), cpw = cur ? itemPower(cur) : -1;
-        if (!GEARSET && (cur ? pw > cpw : pw > 0)) { pick = { item: it, why: `${pw} > ${cur ? cpw : "空き"}`, rival: cur }; break; } // 分かっている性質で良い方
+        // gearweight: 着けない方は手放すとして、残る重さの速度の費用を引く
+        const wb = p.burden ?? 0, wIt = burdenCost(wb - (cur?.weight ?? 0), p), wCur = burdenCost(wb - (it.weight ?? 0), p);
+        if (!GEARSET && (cur ? pw - wIt > cpw - wCur : pw - wIt > -wCur)) { pick = { item: it, why: `${pw} > ${cur ? cpw : "空き"}${GEARWEIGHT && (wIt || wCur) ? ` (重さ ${wIt.toFixed(1)} / ${wCur.toFixed(1)})` : ""}`, rival: cur }; break; } // 分かっている性質で良い方
         const key = `${it.tval}:${it.sval}`;
         if (gearUnknown(it) && (gearTries.get(key) ?? 0) < 3 && (cur ? pw >= cpw : pw >= 0)) { // 試着: 着ければ明らかな性質が分かる
           gearTries.set(key, (gearTries.get(key) ?? 0) + 1);
@@ -5193,10 +5459,13 @@ async function playGame() {
         if (packIsFull(p, inv)) {
           // Don't try to pick up — move on to avoid stuck loop
           // (future: drop lowest-value item to make room)
+        } else if (FLOORPICK && !floorPickCmd(state, px, py)) {
+          // floorpick: 拾う物が無い (印を付けた)
         } else {
-        const prevInvCount = inv.length;
-        state = await sendCommand({ type: CMD.PICKUP });
+        const prevInvCount = inv.length, prevWeight = p.burden;
+        state = await sendCommand(floorPickCmd(state, px, py) ?? { type: CMD.PICKUP });
         const newInv = state.player.inventory;
+        if (FLOORPICK && state.player.burden === prevWeight) ignoredOids.add(pickOid); // 拾えなかった品は二度と試さない
         if (PACKFULL && newInv.length === prevInvCount) droppedTiles.add(`${px},${py}`); // 拾えなかった: この階では二度と試さない
         if (newInv.length > prevInvCount) {
           for (const item of newInv.slice(prevInvCount)) {
@@ -5207,7 +5476,9 @@ async function playGame() {
           if (junk) {
             droppedTiles.add(`${px},${py}`);
             console.log(`  [不要品] ${junk.name}を落とす`);
+            const before = floorOids(state);
             state = await sendCommand({ type: CMD.DROP, itemIndex: junk.slot, quantity: junk.qty });
+            noteDropped(before, state);
             continue;
           }
         }
@@ -5216,6 +5487,7 @@ async function playGame() {
         for (const invItem of state.player.inventory) {
           if (GEARSET) break; // gearset: 一式で選ぶ
           if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
+          if (INVFIX && invItem.tval === TVAL.LIGHT) continue; // invfix: 光源は光源の規則で
           const invPower2 = itemPower(invItem);
           const currentEquip2 = equip2.find((e: any) => sameEquipCategory(e.tval, invItem.tval));
           if (!currentEquip2 && invPower2 > 0) {
@@ -5350,7 +5622,7 @@ async function playGame() {
     if (monsters.filter((m: any) => m.distance <= 3).length === 0 && noProgressCount < 50 && !(PACKFULL && packIsFull(p, inv))) {
       const itemTiles = tiles.filter((t: any) =>
         t.hasObj && (t.x !== px || t.y !== py) &&
-        !unreachableItems.has(`${t.x},${t.y}`) && !droppedTiles.has(`${t.x},${t.y}`)
+        !unreachableItems.has(`${t.x},${t.y}`) && !droppedTiles.has(`${t.x},${t.y}`) && tileWanted(state, t.x, t.y)
       );
       if (itemTiles.length > 0) {
         // 最寄りのアイテムタイルへBFS
@@ -5373,10 +5645,12 @@ async function playGame() {
 
     // 6b: 足元アイテム拾い + 装備比較
     const currentTile = tiles.find((t: any) => t.x === px && t.y === py);
-    if (currentTile?.hasObj && !packIsFull(p, inv) && !droppedTiles.has(`${px},${py}`)) {
+    const pick6 = currentTile?.hasObj && !packIsFull(p, inv) && !droppedTiles.has(`${px},${py}`) ? floorPickCmd(state, px, py) : null;
+    if (pick6) {
       // フロアにアイテムあり → 拾う (pack full時はスキップ)
-      const prevInvCount = inv.length;
-      state = await sendCommand({ type: CMD.PICKUP });
+      const prevInvCount = inv.length, prevWeight = p.burden;
+      state = await sendCommand(pick6);
+      if (FLOORPICK && state.player.burden === prevWeight) ignoredOids.add(pickOid);
       const newInv = state.player.inventory;
       if (PACKFULL && newInv.length === prevInvCount) droppedTiles.add(`${px},${py}`);
       if (newInv.length > prevInvCount) {
@@ -5391,6 +5665,7 @@ async function playGame() {
       for (const invItem of updatedInv) {
         if (GEARSET) break; // gearset: 一式で選ぶ
         if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
+        if (INVFIX && invItem.tval === TVAL.LIGHT) continue; // invfix: 光源は光源の規則で
         const invPower = itemPower(invItem);
         // 同カテゴリの現装備を探す
         const currentEquip = equip.find((e: any) => sameEquipCategory(e.tval, invItem.tval));
@@ -5458,7 +5733,8 @@ async function playGame() {
     const phaseCount = inv.filter((item: any) => item.tval === TVAL.SCROLL && item.name.includes("Phase Door") && item.qty > 0)
       .reduce((s: number, i: any) => s + i.qty, 0);
     const teleCount = inv.filter((item: any) => item.tval === TVAL.SCROLL && item.name.includes("Teleportation") && item.qty > 0)
-      .reduce((s: number, i: any) => s + i.qty, 0);
+      .reduce((s: number, i: any) => s + i.qty, 0)
+      + (TELESHOP ? inv.filter((i: any) => isTeleStaff(i) && deviceReady(i)).reduce((s: number, i: any) => s + Math.max(1, i.charges ?? 1), 0) : 0); // teleshop: 杖の残り回数
     const minPhaseForEscape = state.depth >= 15 ? 5 : 3;
     const minTeleForEscape = state.depth >= 15 ? 3 : state.depth >= 10 ? 1 : 0;
     const hasEscapeMeans = (phaseCount >= minPhaseForEscape || teleCount >= 2 ||
@@ -5484,8 +5760,11 @@ async function playGame() {
     // 絶対最低CL: DL10→CL8, DL15→CL12, DL20→CL16, DL25→CL20, DL30→CL25
     const absoluteMinCl = state.depth >= 30 ? 25 : state.depth >= 25 ? 20 : state.depth >= 20 ? 16 : state.depth >= 15 ? 12 : state.depth >= 10 ? 8 : 0;
     // 序盤 (DL1-3) は CL >= DL+2 まで降りない (CL1 の 12HP で DL2-4 に潜って Fang/Grip/ゼリーに殺される対策)。長期滞在 (veryLongOnLevel) では緩和
-    const clOk = (p.level >= Math.floor(state.depth * minClRatio) && p.level >= absoluteMinCl && (state.depth > 3 || state.depth === 0 || p.level >= state.depth + EARLY_CL_MARGIN))
-      || (state.depth >= 1 && state.depth <= 3 && p.level >= state.depth + EARLY_CL_MARGIN);
+    const casterGate = CASTERGATE && /^(Mage|Druid)$/.test(p.class ?? "") && state.depth >= 1 && state.depth <= 4
+      && p.level < 2 * state.depth + 1 && turnsOnLevel <= 8000;
+    const deepGate = DEEPGATE && state.depth >= 8 && p.level < state.depth + 3;
+    const clOk = !casterGate && !deepGate && ((p.level >= Math.floor(state.depth * minClRatio) && p.level >= absoluteMinCl && (state.depth > 3 || state.depth === 0 || p.level >= state.depth + EARLY_CL_MARGIN))
+      || (state.depth >= 1 && state.depth <= 3 && p.level >= state.depth + EARLY_CL_MARGIN));
 
     // === 装備品質ゲート (v9: CLだけでなく装備の準備状況もチェック) ===
     // DL15+: blows >= 2 (最低限の火力)
@@ -5510,12 +5789,12 @@ async function playGame() {
     // tooLongOnLevelでもclOkは必須 (レベル不足での降下は死因上位)
     // ただし超長期滞在(2x閾値)ではCLチェック・装備チェックも緩和
     const veryLongOnLevel = turnsOnLevel > tooLongThreshold * 2;
-    const clCheck = clOk || veryLongOnLevel;
+    const clCheck = clOk || (veryLongOnLevel && !(deepGate && turnsOnLevel <= tooLongThreshold * 4));
     const equipCheck = equipmentReady || veryLongOnLevel;
     // 耐性ソフトゲート: 不足分×3000ターン追加滞在で降下許可
     const resistCheck = resistOk || turnsOnLevel > resistPenaltyTurns;
     const readyToDescend = !restockTrip && hpPct >= 0.7 && healingOk && escapeOk && resistCheck && equipCheck &&
-      ((clCheck && (enoughKills || explorationStalled || tooLongOnLevel || overleveled)) || lowExplorationEarlyDescent);
+      ((clCheck && (enoughKills || explorationStalled || tooLongOnLevel || overleveled)) || (lowExplorationEarlyDescent && !casterGate && !deepGate));
     if (process.env.DESCENT_DEBUG && actionCount % 200 === 0) console.log(`  [DESCENT?] ready=${readyToDescend} restock=${restockTrip} hp=${hpPct.toFixed(2)} heal=${healingOk} escape=${escapeOk} resist=${resistCheck} equip=${equipCheck} cl=${clCheck} kills=${enoughKills} stalled=${explorationStalled} tooLong=${tooLongOnLevel} over=${overleveled} lowEarly=${lowExplorationEarlyDescent} stair=${!!findTile(tiles, FEAT.DOWN_STAIR)}`);
 
     // LLM降下判断: DL15+でLLMに確認（深度ごとに最大2回まで）
@@ -5903,6 +6182,7 @@ async function playGame() {
   console.log(`  序盤キット: 射撃${shotsFired}回 投擲${throwsMade}回(命中${throwHits}/撃破${throwKills}) 逃走行動${earlyFleeActions}回(階段${earlyFleeStairs}, Phase${phasesRead})`);
   if (CORRIDOR) console.log(`  回廊: 通路へ${corridorMoves}歩, 通路で待機${corridorWaits}回`);
   if (DEVICES2) console.log(`  光の魔法棒: ${lightWandUses}回, 列のオーク計${lightWandOrcs}体`);
+  if (DEVICEFX) console.log(`  devicefx: ${JSON.stringify(devFxUses)}`);
 
   // 最終フレーム + 録画保存
   recordFrame(finalState, finalState.dead ? `死亡: ${deathCause}` : "生存");
