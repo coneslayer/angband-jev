@@ -267,8 +267,11 @@ function itemPower(item: {
 
   // フラグボーナス
   const flags = new Set(item.flags ?? []);
-  if (flags.has(OF.FREE_ACT)) score += 15;
-  if (flags.has(OF.SEE_INVIS)) score += 12;
+  // RULEFIX=invfix: 深いほど麻痺 (Free Action) と見えない敵 (See Invisible) が命取り: DL10 で 45 と 32。種族 (Gnome、High-Elf) や
+  // 他の装備で既に持っていれば 0 (指輪はもう片方の指輪も他の装備として数える)
+  const invDepth = INVFIX ? (lastKnownState?.player?.maxDepth ?? lastKnownState?.depth ?? 0) : 0;
+  if (flags.has(OF.FREE_ACT) && !(INVFIX && hasElsewhere(OF.FREE_ACT, item))) score += 15 + 3 * invDepth;
+  if (flags.has(OF.SEE_INVIS) && !(INVFIX && hasElsewhere(OF.SEE_INVIS, item))) score += 12 + 2 * invDepth;
   if (flags.has(OF.HOLD_LIFE)) score += 10;
   if (flags.has(OF.REGEN)) score += 8;
   if (flags.has(OF.PROT_CONF)) score += 8;
@@ -361,6 +364,87 @@ const LEAVELOS = RULEFIX.has("leavelos");
 // 1 歩おきに上り階段を試す (階段の上でなければ時間は経たない)、まだ触れていないマスを優先して手探りで 1 歩
 // (session 25: 燃え残りの松明 (各 300 ターン) を替え続けて最後に暗闇になり、同じマスで数千行動休み続けた試合があった)
 const LIGHTOUT = RULEFIX.has("lightout");
+// RULEFIX=packfull: 荷物の空きはゲームの数え方で (矢筒は 40 本ごとに 1 枠を使う: inventory の件数では満杯が分からない)。満杯なら床のアイテムへ
+// 向かわず、拾えなかったマスはこの階では拾わない (2026-10-30 の試走: 満杯で拾えないアイテムの間を数万行動往復し、食料と松明が尽きて餓死)
+// RULEFIX=invfix: 持ち物の管理一式 (packfull を含む)。害のある既知の薬・使えない本は持たない (auditfix の判定)、町では使い道の無い物と燃え残りの
+// 松明を売って必需品の枠を空ける、ダンジョンでは荷物が満杯か重すぎる (速度が落ちる) 時に要らない物を落とす、ランタンを使う (油で給油)、
+// 松明の交換は失敗した時だけ止める、指輪は弱い方と比べて差し替える (両方埋まっていれば外す方を指定)、Free Action と See Invisible は深いほど高く評価
+// (2026-10-30: 満杯の荷物で町の WoR・食料を買えず餓死、拾ったランタンの 9 割を売却、燃え残りの松明で暗闇、2 つ目の指輪が着けられないループ)
+const INVFIX = RULEFIX.has("invfix");
+const PACKFULL = RULEFIX.has("packfull") || INVFIX;
+function packIsFull(p: any, inv: any[]): boolean {
+  return PACKFULL && typeof p.packFree === "number" ? p.packFree <= 0 : inv.length >= 23;
+}
+/** invfix: 種族か、この品と同じ部位以外の装備 (指輪はもう片方の指輪も) で既にその性質 (OF) を持っているか */
+const RACE_OF: Record<string, number[]> = { Gnome: [OF.FREE_ACT], "High-Elf": [OF.SEE_INVIS] };
+function hasElsewhere(flag: number, item: any): boolean {
+  const p = lastKnownState?.player;
+  if (!p) return false;
+  if ((RACE_OF[p.race] ?? []).includes(flag)) return true;
+  return ((p.equipment ?? []) as any[]).some((e: any) => {
+    if (e === item || (e.slot === item.slot && e.name === item.name && e.tval === item.tval)) return false; // この品自身
+    if (e.tval !== TVAL.RING && sameEquipCategory(e.tval, item.tval)) return false; // 替えられる側
+    return new Set(gearView(e).flags ?? []).has(flag);
+  });
+}
+// RULEFIX=home: 価値のありそうな装備 (指輪・アミュレット、性質や修正値のある物、未知のルーンのある物。呪いの分かっている物は除く) は
+// 売らず捨てず家に預ける。町に戻るたびに家の装備を今の装備と比べ、良ければ引き出して着ける (例: Speed のブーツで Free Action の
+// ブーツを外したら、家の Free Action の指輪の評価が上がって引き出される)
+const HOME = RULEFIX.has("home");
+const ABILITY_OF = new Set([OF.SUST_STR, OF.SUST_INT, OF.SUST_WIS, OF.SUST_DEX, OF.SUST_CON, OF.PROT_FEAR, OF.PROT_BLIND, OF.PROT_CONF,
+  OF.PROT_STUN, OF.SLOW_DIGEST, OF.FEATHER, OF.REGEN, OF.TELEPATHY, OF.SEE_INVIS, OF.FREE_ACT, OF.HOLD_LIFE]);
+function homeWorthy(item: any): boolean {
+  if (!HOME || !item || !EQUIPPABLE_TVALS.has(item.tval) || item.tval === TVAL.LIGHT || item.tval === TVAL.DIGGING) return false;
+  if (gearCursed(item)) return false;
+  if (item.tval === TVAL.RING || item.tval === TVAL.AMULET || gearUnknown(item)) return itemPower(item) >= 0; // Open Wounds などの負の物は除く
+  const v = gearView(item);
+  return (v.flags ?? []).some((f: number) => ABILITY_OF.has(f)) || (v.resists ?? []).some((r: any) => r.level > 0)
+    || (v.modifiers ?? []).some((m: number | undefined) => (m ?? 0) > 0) || (v.brands ?? []).length > 0 || (v.slays ?? []).length > 0;
+}
+function homeStore(st: any): any | undefined { return (st?.stores ?? []).find((s: any) => /home/i.test(s.name ?? "")); }
+/** invfix: 新しい指輪と比べる装備中の指輪。両手に嵌めていれば評価の低い方、空きがあれば無し */
+function ringRival(equip: any[]): any | undefined {
+  const rings = equip.filter((e: any) => e.tval === TVAL.RING);
+  return rings.length < 2 ? undefined : rings.sort((a: any, b: any) => itemPower(a) - itemPower(b))[0];
+}
+/** 新しい装備と比べる現装備 (invfix: 指輪は ringRival) */
+function equipRival(equip: any[], tval: number): any | undefined {
+  return INVFIX && tval === TVAL.RING ? ringRival(equip) : equip.find((e: any) => sameEquipCategory(e.tval, tval));
+}
+/** 装備コマンド (invfix: 指輪で両方埋まっていれば外す指輪を指定。ゲームは "Replace which ring?" と聞く) */
+function equipCmd(item: any, rival: any | undefined): Record<string, unknown> {
+  return INVFIX && item.tval === TVAL.RING && rival ? { type: CMD.EQUIP, itemIndex: item.slot, replaceSlot: rival.slot }
+    : { type: CMD.EQUIP, itemIndex: item.slot };
+}
+function wieldsLantern(): boolean {
+  return ((lastKnownState?.player?.equipment ?? []) as any[]).some((e: any) => e.tval === TVAL.LIGHT && /Lantern/i.test(e.name ?? ""));
+}
+/** invfix: ランタンを使っていれば予備の松明は 1 本で足りる */
+function torchTarget(n: number): number { return INVFIX && wieldsLantern() ? Math.min(n, 1) : n; }
+/** invfix: 手放す順 (小さいほど先)。null は手放さない (食料、回復・脱出・帰還、油、自分の本、掘削具、矢弾、良い装備…) */
+function shedRank(item: any, equip: any[]): number | null {
+  if (!INVFIX || !item || item.qty <= 0) return null;
+  if (auditJunk(item)) return 0; // 使えない本、害のある既知の薬・巻物・食料
+  if (EQUIPPABLE_TVALS.has(item.tval) && item.tval !== TVAL.DIGGING && item.tval !== TVAL.LIGHT && !shouldKeepItem(item, equip)) return homeWorthy(item) ? null : 1; // home: 家まで持ち帰る
+  if (item.tval === TVAL.LIGHT && /Torch/i.test(item.name ?? "")) {
+    const otherLight = wieldsLantern() || ((lastKnownState?.player?.inventory ?? []) as any[])
+      .some((i: any) => i !== item && i.tval === TVAL.LIGHT && (i.fuel ?? 0) >= 1000);
+    if ((item.fuel ?? 0) < 1000 && otherLight) return 2; // 燃え残り (燃料の違う松明は重ならず 1 枠ずつ使う)
+    if (wieldsLantern() && ((lastKnownState?.player?.inventory ?? []) as any[])
+      .filter((i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? "") && (i.fuel ?? 0) > (item.fuel ?? 0)).length >= 1) return 2;
+  }
+  if (item.tval === TVAL.LIGHT && /Lantern/i.test(item.name ?? "") && wieldsLantern()) return 2; // 2 つ目のランタン
+  if (item.tval === TVAL.SCROLL && item.aware === false) return 3; // 未知の巻物 (読まない。町で店に渡して識別)
+  if (item.tval === TVAL.SCROLL && /^(Treasure Detection|Detect Invisible)$/.test(item.name ?? "")) return 4;
+  if (!DEVICES && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval)) return 4;
+  // 5-6: 荷物が詰まった時だけ (町では空きが 3 枠未満の時に売る): 未知の薬 (店に渡せば識別)、小物の食料と薬、2 本目の掘削具
+  if (item.tval === TVAL.POTION && item.aware === false) return 5;
+  if (item.tval === TVAL.FOOD && !/Ration|Remove Hunger/i.test(item.name ?? "")) return 6;
+  if (item.tval === TVAL.POTION && /^(Boldness|Infravision|Slime Mold Juice|Salt Water|Sleep)$/.test(item.name ?? "")) return 6;
+  if (item.tval === TVAL.DIGGING && ((lastKnownState?.player?.inventory ?? []) as any[])
+    .some((i: any) => i !== item && i.tval === TVAL.DIGGING && ((i.weight ?? 0) > (item.weight ?? 0) || ((i.weight ?? 0) === (item.weight ?? 0) && i.slot < item.slot)))) return 6;
+  return null;
+}
 let lightTripNoted = false, darkSteps = 0;
 const darkFelt = new Set<string>(); // 暗闇で踏んだマス (この階)
 /** lightout: 買い物で数える松明は燃料 2500 以上 (新品は 5000) だけ。燃え残りを在庫に数えて買わずにいた */
@@ -602,7 +686,7 @@ function gearCursed(it: any): boolean { return (it?.kcurses ?? 0) > 0 || /\{[^}]
 function gearUnknown(it: any): boolean { return /\?\?/.test(it?.desc ?? ""); }
 // 射撃武器の弾の種類 (違う種類には替えない: 買った矢弾が無駄になる)
 function launcherFamily(name: string): string { return /Sling/i.test(name) ? "shot" : /Crossbow/i.test(name) ? "bolt" : "arrow"; }
-let gearTries = new Map<string, number>(), lastGearAction = -99;
+let gearTries = new Map<string, number>(), lastGearAction = -99, lastShedAction = -99;
 // RULEFIX=tryunknown: 未知の薬を、5 マス以内に敵がいない時に飲んで識別する (HP 75% 未満なら回復薬かもしれない。町なら HP を問わない)。
 // 未知の巻物は町で錬金術店に渡す (shouldKeepItem)。持ち物の名前は知っている時だけ本当の名前 (C の aware)
 const TRYUNKNOWN = RULEFIX.has("tryunknown");
@@ -674,7 +758,7 @@ function bookUsable(tval: number): boolean {
 }
 /** auditfix: 持っていても仕方がない物 (使えない領域の本、害のある既知の薬・巻物・食料) */
 function auditJunk(item: any): boolean {
-  if (!AUDITFIX || !item) return false;
+  if (!(AUDITFIX || INVFIX) || !item) return false;
   if (item.tval >= 30 && item.tval <= 33) return !bookUsable(item.tval);
   return [TVAL.POTION, TVAL.SCROLL, TVAL.FOOD].includes(item.tval) && itemHarmful(item);
 }
@@ -1524,7 +1608,8 @@ async function buyEarlyKit(steps: [string, number][] = EARLY_KIT_STEPS): Promise
       : inv.filter(i => kinds[kind]!(i) && i.qty > 0 && torchCounts(i)).reduce((a, i) => a + i.qty, 0);
   const bought: Record<string, number> = { food: 0, torch: 0, oil: 0, phase: 0, digger: 0, clw: 0, csw: 0, ammo: 0, neut: 0 };
   let spent = 0, n = 0;
-  for (const [kind, target] of steps) {
+  for (const [kind, target0] of steps) {
+    const target = kind === "torch" ? torchTarget(target0) : target0; // invfix: ランタンなら松明は 1 本
     const test = kinds[kind]!;
     for (let guard = 0; guard < 6 && n < 40; guard++) {
       const st = await getState();
@@ -2351,6 +2436,7 @@ function shouldKeepItem(item: any, equipment: any[]): boolean {
   if (item.tval === TVAL.DIGGING) return true;
   // 予備の松明は保持 (vanilla の松明は燃え尽きる。燃え尽きたものは売る)
   if (item.tval === TVAL.LIGHT && /Torch/i.test(item.name ?? "") && (item.fuel === undefined || item.fuel > 0)) return true;
+  if (INVFIX && item.tval === TVAL.LIGHT && /Lantern/i.test(item.name ?? "")) return true; // invfix: 油で給油できる光源
   // 装備品: 現装備より良いなら保持
   if (EQUIPPABLE_TVALS.has(item.tval)) {
     const currentEquip = equipment.find((e: any) => sameEquipCategory(e.tval, item.tval));
@@ -2374,7 +2460,9 @@ async function sellJunk(state: any) {
     const crowded = PACKROOM && inv.length >= PACK_ROOM_AT;
     const torchKeep = new Set(inv.filter((i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? ""))
       .sort((a: any, b: any) => (b.fuel ?? 0) - (a.fuel ?? 0)).slice(0, 2).map((i: any) => i.slot));
-    const roomJunk = (item: any) => crowded && (
+    const invRank = (item: any) => INVFIX ? shedRank(item, equip2) : null;
+    const tight = INVFIX && typeof freshState.player.packFree === "number" && freshState.player.packFree < 3;
+    const roomJunk = (item: any) => (invRank(item) !== null && (invRank(item)! <= 4 || tight)) || crowded && (
       ([TVAL.POTION, TVAL.SCROLL].includes(item.tval) && item.aware === false)
       || (!DEVICES && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval))
       || (item.tval === TVAL.LIGHT && /Torch/i.test(item.name ?? "") && !torchKeep.has(item.slot)));
@@ -2386,8 +2474,10 @@ async function sellJunk(state: any) {
       if (!item || item.qty <= 0) continue;
       if (shouldKeepItem(item, equip2) && !roomJunk(item)) continue;
 
-      const stores = roomJunk(item) && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval) ? [5]
-        : AUDITFIX && item.tval >= 30 && item.tval <= 33 ? [3] // RULEFIX=auditfix: 本は本屋 (雑貨屋は本を買わない)
+      const home = HOME && homeWorthy(item) ? homeStore(freshState) : undefined;
+      const stores = home ? [home.type, ...(SELL_STORE_FOR_TVAL[item.tval] ?? [0])] // home: 家に預ける (家が一杯なら売る)
+        : roomJunk(item) && [TVAL.STAFF, TVAL.WAND, TVAL.ROD].includes(item.tval) ? [5]
+        : (AUDITFIX || INVFIX) && item.tval >= 30 && item.tval <= 33 ? [3] // RULEFIX=auditfix: 本は本屋 (雑貨屋は本を買わない)
         : SELL_STORE_FOR_TVAL[item.tval] ?? [0]; // default: General
       for (const storeType of stores) {
         try {
@@ -2400,7 +2490,7 @@ async function sellJunk(state: any) {
           if (result.success) {
             totalSold++;
             totalGold += result.price;
-            console.log(`  [売却] ${item.name} → store${storeType} (${result.price}G)`);
+            console.log(home && storeType === home.type ? `  [家に預ける] ${item.desc ?? item.name}` : `  [売却] ${item.name} → store${storeType} (${result.price}G)`);
             soldThisRound = true;
             break; // sold successfully, re-fetch inventory
           }
@@ -2415,6 +2505,155 @@ async function sellJunk(state: any) {
   if (totalSold > 0) {
     console.log(`  [売却合計] ${totalSold}個売却、${totalGold}G獲得`);
   }
+}
+
+/** home: 家の装備で今の装備 (指輪は弱い方) より評価の高い物を引き出して着ける。外した物は次の sellJunk で預ける */
+async function retrieveHomeGear(): Promise<number> {
+  let n = 0;
+  for (let k = 0; k < 4; k++) {
+    const st = await getState();
+    const home = homeStore(st);
+    if (!home || (typeof st.player.packFree === "number" && st.player.packFree <= 0)) break;
+    const equip = st.player.equipment ?? [];
+    let best: { it: any; rival: any; gain: number } | null = null;
+    for (const it of home.stock ?? []) {
+      if (!EQUIPPABLE_TVALS.has(it.tval) || it.tval === TVAL.LIGHT || it.tval === TVAL.DIGGING || gearCursed(it)) continue;
+      const rival = equipRival(equip, it.tval);
+      if (it.tval === TVAL.BOW && rival && launcherFamily(it.name ?? "") !== launcherFamily(rival.name ?? "")) continue;
+      const pw = itemPower(it), gain = pw - (rival ? itemPower(rival) : 0);
+      if (gain > 0 && (rival || pw > 0) && (!best || gain > best.gain)) best = { it, rival, gain };
+    }
+    if (!best) break;
+    const res = await fetch(`${API}/buy`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ storeType: home.type, itemIndex: best.it.index }) }).then(r => r.json()).catch(() => null);
+    if (!res?.success) break;
+    const got = ((await getState()).player.inventory as any[]).find((i: any) => i.tval === best!.it.tval && i.sval === best!.it.sval);
+    if (!got) break;
+    console.log(`  [家から引き出す] ${best.it.desc ?? best.it.name} (評価 +${Math.round(best.gain)}${best.rival ? `、${best.rival.name}の代わり` : ""})`);
+    await sendCommand(equipCmd(got, best.rival));
+    n++;
+  }
+  return n;
+}
+
+// ── RULEFIX=gearset: 装備一式で選ぶ ──
+// 1 品ずつ部位ごとに比べる代わりに、着る物の組み合わせ全体を評価する。各組み合わせの能力値はゲーム自身の計算で求める (ブリッジの /whatif:
+// calc_bonuses を既知のルーンだけで。攻撃回数は武器の重さと STR/DEX で変わり、STR の指輪で武器の回数が変わる)。性質と耐性は何品で
+// 持っても 1 回だけ数え、深いほど高い。候補は着ている物、荷物の装備 (未知のルーンのある物は gearid の試着に任せる)、町では家の装備。
+// 1 部位の交換と、2 部位の同時交換 (Speed のブーツ + Free Action の指輪のように、片方だけでは損な組み合わせ) を試して最良を着る。
+// 光源・射撃武器・掘削具は対象外 (それぞれの規則がある)
+const GEARSET = RULEFIX.has("gearset");
+const GEAR_SLOTS: [number[], number[]][] = [ // [tval, 装備欄] (4.2 の人型: 0 武器 2-3 指輪 4 首 6 胴 7 外套 8 盾 9 頭 10 手 11 足)
+  [[TVAL.SWORD, TVAL.POLEARM, TVAL.HAFTED], [0]], [[TVAL.RING], [2, 3]], [[TVAL.AMULET], [4]],
+  [[TVAL.SOFT_ARMOR, TVAL.HARD_ARMOR, TVAL.DRAG_ARMOR], [6]], [[TVAL.CLOAK], [7]], [[TVAL.SHIELD], [8]],
+  [[TVAL.HELM, TVAL.CROWN], [9]], [[TVAL.GLOVES], [10]], [[TVAL.BOOTS], [11]],
+];
+function gearSlotsOf(tval: number): number[] { return GEAR_SLOTS.find(([t]) => t.includes(tval))?.[1] ?? []; }
+/** 性質の価値 (OF 番号 → 深さ d での点)。何品で持っても 1 回 */
+function abilityValue(flag: number, d: number): number {
+  switch (flag) {
+    case OF.FREE_ACT: return 15 + 3 * d;
+    case OF.SEE_INVIS: return 12 + 2 * d;
+    case OF.TELEPATHY: return 20 + 2 * d;
+    case OF.HOLD_LIFE: return 5 + d;
+    case OF.PROT_CONF: case OF.PROT_BLIND: return 6 + 0.5 * d;
+    case OF.PROT_FEAR: return MELEE_CLASS() ? 8 : 3;
+    case OF.PROT_STUN: return 4 + 0.5 * d;
+    case OF.REGEN: return 8;
+    case OF.SLOW_DIGEST: case OF.FEATHER: return 3;
+    default: return flag >= OF.SUST_STR && flag <= OF.SUST_CON ? 2 + 0.2 * d : 0;
+  }
+}
+function MELEE_CLASS(): boolean { return /Warrior|Blackguard|Paladin/.test(lastKnownState?.player?.class ?? ""); }
+/** 耐性の価値 (要素 → 深さ d での点。免疫は 2 倍、弱点は負) */
+function resistValue(elem: number, level: number, d: number): number {
+  const v = elem <= 3 ? 4 + 0.6 * d : elem === 4 ? 2 + 0.8 * d : elem <= 6 ? 2 + 0.3 * d : elem <= 12 ? 1 + 0.4 * d : 0;
+  return level >= 3 ? 2 * v : level > 0 ? v : level < 0 ? -v : 0;
+}
+/** 一式の評価: 近接の 1 ターンの与ダメージ、命中、AC、速度、光、隠密、性質、耐性 */
+function gearsetValue(w: any, weapon: any | undefined, d: number): number {
+  const wv = weapon ? gearView(weapon) : undefined;
+  const dice = wv ? (wv.dd ?? 1) * ((wv.ds ?? 1) + 1) / 2 : 1;
+  const dmg = (w.blows / 100) * Math.max(0, dice + (wv?.toD ?? 0) + w.toD);
+  const casterish = /Mage|Necromancer/.test(lastKnownState?.player?.class ?? "");
+  let v = dmg * (casterish ? 1 : 2) + (w.toH + (wv?.toH ?? 0)) * 0.5 + w.ac + (w.speed - 110) * 15 + w.light * 4 + w.stealth;
+  if (w.heavyWield) v -= 30;
+  if (w.cumberArmor && (lastKnownState?.player?.maxSp ?? 0) > 0) v -= 25; // 鎧の重さで MP が減る (4.2 に手袋の罰は無い)
+  for (const f of w.flags ?? []) v += abilityValue(f, d);
+  for (const [e, lv] of w.res ?? []) v += resistValue(e, lv, d);
+  return v;
+}
+async function whatIf(set: string): Promise<any | null> {
+  try {
+    const r = await fetch(`${API}/whatif`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ set }) });
+    return r.ok ? await r.json() : null;
+  } catch { return null; }
+}
+type GearMove = { slot: number; src: "p" | "h"; item: any };
+/** 今の一式より良い交換 (1 部位、または 2 部位の同時交換) を探す。無ければ null */
+async function gearsetPlan(st: any, withHome: boolean): Promise<{ moves: GearMove[]; gain: number; base: number } | null> {
+  const p = st.player, d = p.maxDepth ?? st.depth ?? 0;
+  const equip: any[] = p.equipment ?? [];
+  const worn = (slot: number) => equip.find((e: any) => e.slot === slot);
+  const fits = (it: any) => gearSlotsOf(it.tval).length > 0 && !gearCursed(it) && !gearUnknown(it) && itemPower(it) > -50;
+  const cands: { src: "p" | "h"; item: any }[] = [
+    ...((p.inventory ?? []) as any[]).filter(fits).map(item => ({ src: "p" as const, item })),
+    ...(withHome ? ((homeStore(st)?.stock ?? []) as any[]).filter(fits).map(item => ({ src: "h" as const, item: { ...item, slot: item.index } })) : []),
+  ];
+  if (cands.length === 0) return null;
+  const val = async (moves: GearMove[]) => {
+    const w = await whatIf(moves.map(m => `${m.slot}:${m.src}${m.item.slot}`).join(","));
+    if (!w) return null;
+    const wm = moves.find(m => m.slot === 0);
+    return gearsetValue(w, wm ? wm.item : worn(0), d);
+  };
+  const base = await val([]);
+  if (base === null) return null;
+  const singles: { m: GearMove; v: number }[] = [];
+  for (const c of cands) for (const slot of gearSlotsOf(c.item.tval)) {
+    if (c.item.tval === TVAL.RING && slot === 3 && !worn(2)) continue; // 空いた指輪欄は 1 つ試せば足りる
+    const m = { slot, src: c.src, item: c.item };
+    const v = await val([m]);
+    if (v !== null) singles.push({ m, v });
+  }
+  let best: { moves: GearMove[]; v: number } = { moves: [], v: base };
+  for (const s1 of singles) if (s1.v > best.v) best = { moves: [s1.m], v: s1.v };
+  const top = [...singles].sort((a, b) => b.v - a.v).slice(0, 8);
+  for (let i = 0; i < top.length; i++) for (let j = i + 1; j < top.length; j++) {
+    const a = top[i]!.m, b = top[j]!.m;
+    if (a.slot === b.slot || (a.src === b.src && a.item.slot === b.item.slot)) continue;
+    const v = await val([a, b]);
+    if (v !== null && v > best.v) best = { moves: [a, b], v };
+  }
+  const gain = best.v - base;
+  return best.moves.length && gain >= Math.max(3, 0.02 * Math.abs(base)) ? { moves: best.moves, gain, base } : null; // 小さな差では替えない
+}
+let gearsetSig = "", gearsetAt = -99;
+/** gearset: 計画を実行する (家の品は先に引き出す)。替えたら true */
+async function gearsetApply(withHome: boolean): Promise<boolean> {
+  const st = await getState();
+  const plan = await gearsetPlan(st, withHome);
+  if (!plan) return false;
+  const home = homeStore(st);
+  addLesson(st.turn, st.depth, "装備一式", plan.moves.map(m => `${m.item.desc ?? m.item.name}${m.src === "h" ? " (家から)" : ""} → 欄${m.slot}`).join("、")
+    + ` (評価 ${Math.round(plan.base)} → ${Math.round(plan.base + plan.gain)})`);
+  for (const m of plan.moves) {
+    let item = m.item;
+    if (m.src === "h") {
+      if (!home) return false;
+      const res = await fetch(`${API}/buy`, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ storeType: home.type, itemIndex: m.item.index }) }).then(r => r.json()).catch(() => null);
+      if (!res?.success) return false;
+      item = ((await getState()).player.inventory as any[]).find((i: any) => i.tval === m.item.tval && i.sval === m.item.sval && (i.desc ?? i.name) === (m.item.desc ?? m.item.name))
+        ?? ((await getState()).player.inventory as any[]).find((i: any) => i.tval === m.item.tval && i.sval === m.item.sval);
+      if (!item) return false;
+    } else {
+      item = ((await getState()).player.inventory as any[]).find((i: any) => i.tval === m.item.tval && i.sval === m.item.sval && (i.desc ?? i.name) === (m.item.desc ?? m.item.name)) ?? item;
+    }
+    const occupied = ((await getState()).player.equipment as any[]).find((e: any) => e.slot === m.slot);
+    await sendCommand(item.tval === TVAL.RING && occupied ? { type: CMD.EQUIP, itemIndex: item.slot, replaceSlot: m.slot } : { type: CMD.EQUIP, itemIndex: item.slot });
+  }
+  return true;
 }
 
 // ── 町での補給 ──
@@ -2432,7 +2671,7 @@ async function buySupplies(state: any) {
   // tval 25=scroll, 26=potion, 28=food
   const shoppingList = [
     { name: "Ration" as string | null, tvals: [28], target: FOOD_KEEP, stores: [0] }, // food first: starvation
-    { name: "Wooden Torch", tvals: [TVAL.LIGHT], target: 3, stores: [0] }, // vanilla torches burn out
+    { name: "Wooden Torch", tvals: [TVAL.LIGHT], target: torchTarget(3), stores: [0] }, // vanilla torches burn out
     // RULEFIX=wor: 帰還の巻物 1 枚を回復薬より先に。無いと食料切れのとき上り階段を歩いて餓死していた
     ...(RULEFIX.has("wor") ? [{ name: "Word of Recall" as string | null, tvals: [25], target: 1, stores: [4, 5] }] : []),
     ...(RULEFIX.has("neutpois") ? [{ name: "Neutralize Poison" as string | null, tvals: [26], target: 2, stores: [4] }] : []), // 錬金術店 (闇市は 3 倍)
@@ -2545,7 +2784,7 @@ async function buyEquipment(state: any) {
 
       // 現装備と比較
       const stockPower = itemPower(stockItem);
-      const currentSlotEquip = currentEquip.find((e: any) => sameEquipCategory(e.tval, stockItem.tval));
+      const currentSlotEquip = INVFIX ? equipRival(currentEquip, stockItem.tval) : currentEquip.find((e: any) => sameEquipCategory(e.tval, stockItem.tval));
       const currentPower = currentSlotEquip ? itemPower(currentSlotEquip) : 0;
 
       // 耐性装備チェック: 足りない耐性を持つアイテムは強く優先
@@ -2554,7 +2793,9 @@ async function buyEquipment(state: any) {
       );
 
       // 20%以上パワーアップ or 空スロット or 足りない耐性を持つ
-      if (stockPower > currentPower * 1.2 || (!currentSlotEquip && stockPower > 10) || hasNeededResist) {
+      // invfix: 空きスロットは 10 を超える物だけ (評価 0 の 1.2 倍は何でも通り、Feather Falling を買っていた)
+      if ((INVFIX ? currentSlotEquip && stockPower > currentPower * 1.2 : stockPower > currentPower * 1.2)
+        || (!currentSlotEquip && stockPower > 10) || hasNeededResist) {
         // 耐性装備はゴールドの80%まで出す、通常は60%
         const maxSpend = hasNeededResist ? 0.8 : 0.6;
         if (stockItem.price > currentGold * maxSpend) continue;
@@ -2578,7 +2819,7 @@ async function buyEquipment(state: any) {
               i.tval === stockItem.tval && i.name === stockItem.name
             );
             if (boughtItem) {
-              await sendCommand({ type: CMD.EQUIP, itemIndex: boughtItem.slot });
+              await sendCommand(equipCmd(boughtItem, currentSlotEquip));
               console.log(`  [装備] ${boughtItem.name}を装備`);
             }
             break; // 再取得が必要なのでストアループを抜ける
@@ -2760,17 +3001,18 @@ async function playGame() {
       // 現在の装備名を記録
       for (const e of equip) { if (e?.name) equippedNames.add(e.name); }
       for (const invItem of inv) {
+        if (GEARSET) break; // gearset: 一式で選ぶ
         if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
         if (invItem.tval === TVAL.DIGGING) continue; // 掘削具は持ち物のまま (装備しない)
         // 既に装備したことのあるアイテムは無視 (ループ防止)
         if (equippedNames.has(invItem.name)) continue;
-        const curEquip = equip.find((e: any) => sameEquipCategory(e.tval, invItem.tval));
+        const curEquip = INVFIX ? equipRival(equip, invItem.tval) : equip.find((e: any) => sameEquipCategory(e.tval, invItem.tval));
         const invPow = itemPower(invItem);
         const curPow = curEquip ? itemPower(curEquip) : -1;
         if (invPow > curPow * 1.2 || (!curEquip && invPow > 0)) {
           equippedNames.add(invItem.name);
           console.log(`  [自動装備] ${invItem.name}(pow=${invPow}) ${curEquip ? `> ${curEquip.name}(pow=${curPow})` : "(空スロット)"}`);
-          state = await sendCommand({ type: CMD.EQUIP, itemIndex: invItem.slot });
+          state = await sendCommand(equipCmd(invItem, curEquip));
           break;
         }
       }
@@ -2810,6 +3052,7 @@ async function playGame() {
         console.log(`  [町到着] Gold:${state.player.gold} Cure:${cureQty} Phase:${phaseQty}`);
         await sellJunk(state); // 先に不要品を売却してゴールド確保
         state = await getState();
+        if (GEARSET ? await gearsetApply(HOME) : HOME && await retrieveHomeGear() > 0) { await sellJunk(state); state = await getState(); } // home/gearset: 家の装備も含めて見直し、外した物を預ける
         await buyEarlyKit([["food", RULEFIX.has("food8") ? FOOD_KEEP : 5], ["torch", 3]]); // 装備で資金を使い切る前に食料と光源
         // RULEFIX=restock8: CL15 未満は装備より先に序盤の一式 (油/Phase/CLW)。buySupplies は CLW を買わない
         if (RULEFIX.has("restock8") && state.player.level < 15) { await buyEarlyKit(); state = await getState(); }
@@ -3507,13 +3750,24 @@ async function playGame() {
     // === 優先度1.2: 光源 (vanilla の松明は燃え尽きる: 暗闇では読めず唱えられない) ===
     {
       const cur = (p.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
+      // RULEFIX=invfix: ランタン (松明より明るく燃え尽きず、持っている油で給油できる) を持っていれば松明から替える
+      const lanternInv = INVFIX && !/Lantern/i.test(cur?.name ?? "") && actionCount >= lightBlockedUntil
+        ? inv.find((i: any) => i.tval === TVAL.LIGHT && /Lantern/i.test(i.name ?? "") && !gearCursed(i) && itemPower(i) >= 0
+          && ((i.fuel ?? 0) > 0 || inv.some((o: any) => /Flask~? of oil/i.test(o.name ?? "") && o.qty > 0))) : undefined;
+      if (lanternInv && monsters.every((m: any) => m.distance > 2)) {
+        addLesson(state.turn, state.depth, "光源", `${cur?.name ?? "光源なし"}からランタンに替える`);
+        state = await sendCommand({ type: CMD.EQUIP, itemIndex: lanternInv.slot });
+        if (!/Lantern/i.test((state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT)?.name ?? "")) lightBlockedUntil = actionCount + 200;
+        continue;
+      }
       const low = cur ? (typeof cur.fuel === "number" && /Torch/i.test(cur.name ?? "") && cur.fuel < 300) : true;
       const spare = low && actionCount >= lightBlockedUntil ? spareTorchSlot(inv) : null;
-      if (spare !== null) {
+      if (spare !== null && !(INVFIX && cur && (inv.find((i: any) => i.slot === spare)?.fuel ?? 0) <= (cur.fuel ?? 0))) {
         addLesson(state.turn, state.depth, "光源", `松明の残り${cur?.fuel ?? 0}ターン。予備の松明に替える`);
         state = await sendCommand({ type: CMD.EQUIP, itemIndex: spare });
         const after = (state.player?.equipment ?? []).find((e: any) => e.tval === TVAL.LIGHT);
-        if ((after?.fuel ?? 0) < 300) lightBlockedUntil = actionCount + 200; // 替えられなかった: ループ防止
+        // 替えられなかった: ループ防止 (invfix: 燃料が増えなかった時だけ。燃え残りに替えるのは正しい交換で、止めると予備を残したまま暗闇になる)
+        if (INVFIX ? (after?.fuel ?? 0) <= (cur?.fuel ?? 0) : (after?.fuel ?? 0) < 300) lightBlockedUntil = actionCount + 200;
         continue;
       }
     }
@@ -4863,22 +5117,50 @@ async function playGame() {
       }
     }
 
+    // === RULEFIX=gearset: 装備や荷物の装備品が変わった時 (安全な時、20 行動に 1 回まで) に一式を見直す ===
+    if (GEARSET && !ROLLOUT && state.depth >= 1 && actionCount - gearsetAt >= 20 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
+      const sig = [p.maxDepth, ...((p.equipment ?? []) as any[]).map((e: any) => `${e.slot}:${e.desc ?? e.name}`),
+        ...(inv as any[]).filter((i: any) => gearSlotsOf(i.tval).length > 0).map((i: any) => i.desc ?? i.name)].join("|");
+      if (sig !== gearsetSig) {
+        gearsetSig = sig; gearsetAt = actionCount;
+        if (await gearsetApply(false)) { state = await getState(); continue; }
+      }
+    }
+
+    // === RULEFIX=invfix: 荷物が満杯、または重すぎて速度が落ちている時に、要らない物を落とす (shedRank の順。重すぎる時は重い物から) ===
+    if (INVFIX && !ROLLOUT && state.depth >= 1 && actionCount - lastShedAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
+      const over = typeof p.burden === "number" && typeof p.burdenSlowAt === "number" ? p.burden - p.burdenSlowAt : 0;
+      const full = typeof p.packFree === "number" && p.packFree <= 0;
+      if (over > 0 || full) {
+        lastShedAction = actionCount;
+        const wt = (i: any) => (i.weight ?? 0) * (i.qty ?? 1);
+        const c = inv.map((i: any) => ({ i, r: shedRank(i, p.equipment ?? []) })).filter((x: any) => x.r !== null)
+          .sort((a: any, b: any) => over > 0 ? wt(b.i) - wt(a.i) || a.r - b.r : a.r - b.r || wt(b.i) - wt(a.i))[0];
+        if (c) {
+          droppedTiles.add(`${px},${py}`); // 落とした物を拾い直さない
+          addLesson(state.turn, state.depth, "持ち物", `${full ? "荷物が満杯" : `重量超過 ${(over / 10).toFixed(1)}lb`}。${c.i.name}x${c.i.qty}を落とす (順位${c.r})`);
+          state = await sendCommand({ type: CMD.DROP, itemIndex: c.i.slot, quantity: c.i.qty });
+          continue;
+        }
+      }
+    }
+
     // === RULEFIX=gearid: 安全な時 (5 マス以内に敵なし、HP 半分以上、10 行動に 1 回) に装備を見直す ===
     if (GEARID && !ROLLOUT && actionCount - lastGearAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
       const equip = p.equipment ?? [];
-      let pick: { item: any; why: string } | null = null;
+      let pick: { item: any; why: string; rival?: any } | null = null;
       for (const it of inv) {
         if (!EQUIPPABLE_TVALS.has(it.tval) || it.tval === TVAL.DIGGING || it.tval === TVAL.LIGHT || gearCursed(it)) continue;
-        const cur = it.tval === TVAL.RING
+        const cur = INVFIX ? equipRival(equip, it.tval) : it.tval === TVAL.RING
           ? (equip.filter((e: any) => e.tval === TVAL.RING).length >= 2 ? equip.find((e: any) => e.tval === TVAL.RING) : undefined)
           : equip.find((e: any) => sameEquipCategory(e.tval, it.tval));
         if (cur && it.tval === TVAL.BOW && launcherFamily(it.name ?? "") !== launcherFamily(cur.name ?? "")) continue;
         const pw = itemPower(it), cpw = cur ? itemPower(cur) : -1;
-        if (cur ? pw > cpw : pw > 0) { pick = { item: it, why: `${pw} > ${cur ? cpw : "空き"}` }; break; } // 分かっている性質で良い方
+        if (!GEARSET && (cur ? pw > cpw : pw > 0)) { pick = { item: it, why: `${pw} > ${cur ? cpw : "空き"}`, rival: cur }; break; } // 分かっている性質で良い方
         const key = `${it.tval}:${it.sval}`;
         if (gearUnknown(it) && (gearTries.get(key) ?? 0) < 3 && (cur ? pw >= cpw : pw >= 0)) { // 試着: 着ければ明らかな性質が分かる
           gearTries.set(key, (gearTries.get(key) ?? 0) + 1);
-          pick = { item: it, why: `試着 {??} ${pw} >= ${cur ? cpw : "空き"}` };
+          pick = { item: it, why: `試着 {??} ${pw} >= ${cur ? cpw : "空き"}`, rival: cur };
           break;
         }
       }
@@ -4896,7 +5178,7 @@ async function playGame() {
       if (pick) {
         lastGearAction = actionCount;
         addLesson(state.turn, state.depth, "装備識別", `${pick.item.desc ?? pick.item.name}: ${pick.why}`);
-        state = await sendCommand({ type: CMD.EQUIP, itemIndex: pick.item.slot });
+        state = await sendCommand(equipCmd(pick.item, pick.rival));
         continue;
       }
     }
@@ -4908,14 +5190,14 @@ async function playGame() {
       const currentTile2 = tiles.find((t: any) => t.x === px && t.y === py);
       if (currentTile2?.hasObj && !droppedTiles.has(`${px},${py}`)) {
         // Pack full check: skip pickup if inventory is full (23 slots max)
-        const MAX_PACK = 23;
-        if (inv.length >= MAX_PACK) {
+        if (packIsFull(p, inv)) {
           // Don't try to pick up — move on to avoid stuck loop
           // (future: drop lowest-value item to make room)
         } else {
         const prevInvCount = inv.length;
         state = await sendCommand({ type: CMD.PICKUP });
         const newInv = state.player.inventory;
+        if (PACKFULL && newInv.length === prevInvCount) droppedTiles.add(`${px},${py}`); // 拾えなかった: この階では二度と試さない
         if (newInv.length > prevInvCount) {
           for (const item of newInv.slice(prevInvCount)) {
             console.log(`  [拾得] ${item.name} (tval=${item.tval}, ac=${item.ac ?? 0})`);
@@ -4932,6 +5214,7 @@ async function playGame() {
         // 装備比較: 拾ったものが現装備より良ければ即装備
         const equip2 = state.player.equipment ?? [];
         for (const invItem of state.player.inventory) {
+          if (GEARSET) break; // gearset: 一式で選ぶ
           if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
           const invPower2 = itemPower(invItem);
           const currentEquip2 = equip2.find((e: any) => sameEquipCategory(e.tval, invItem.tval));
@@ -5064,7 +5347,7 @@ async function playGame() {
 
     // === 優先度6: アイテム拾い + 装備最適化 ===
     // 6a: 近くのフロアアイテムに向かう (敵がいない場合のみ、停滞中はスキップ)
-    if (monsters.filter((m: any) => m.distance <= 3).length === 0 && noProgressCount < 50) {
+    if (monsters.filter((m: any) => m.distance <= 3).length === 0 && noProgressCount < 50 && !(PACKFULL && packIsFull(p, inv))) {
       const itemTiles = tiles.filter((t: any) =>
         t.hasObj && (t.x !== px || t.y !== py) &&
         !unreachableItems.has(`${t.x},${t.y}`) && !droppedTiles.has(`${t.x},${t.y}`)
@@ -5090,11 +5373,12 @@ async function playGame() {
 
     // 6b: 足元アイテム拾い + 装備比較
     const currentTile = tiles.find((t: any) => t.x === px && t.y === py);
-    if (currentTile?.hasObj && inv.length < 23 && !droppedTiles.has(`${px},${py}`)) {
+    if (currentTile?.hasObj && !packIsFull(p, inv) && !droppedTiles.has(`${px},${py}`)) {
       // フロアにアイテムあり → 拾う (pack full時はスキップ)
       const prevInvCount = inv.length;
       state = await sendCommand({ type: CMD.PICKUP });
       const newInv = state.player.inventory;
+      if (PACKFULL && newInv.length === prevInvCount) droppedTiles.add(`${px},${py}`);
       if (newInv.length > prevInvCount) {
         const newItems = newInv.slice(prevInvCount);
         for (const item of newItems) {
@@ -5105,6 +5389,7 @@ async function playGame() {
       const equip = state.player.equipment ?? [];
       const updatedInv = state.player.inventory;
       for (const invItem of updatedInv) {
+        if (GEARSET) break; // gearset: 一式で選ぶ
         if (!EQUIPPABLE_TVALS.has(invItem.tval)) continue;
         const invPower = itemPower(invItem);
         // 同カテゴリの現装備を探す

@@ -3905,6 +3905,126 @@ games.
 - For the harvest: casters on D24 + leavelos + lightout + spellfx + spellfight; their yield of DL10+ starts will be
   low, so the pilot measures it per class.
 
+### Step 3: pilot harvest (2026-10-30 16:04–18:05)
+
+`tools/overnight/harvest.py`, 2 hours on 13 slots, seed 6000000 (`runs/harvest/2026-10-30-pilot`, 177 MB, kept
+local). Fresh games rotate the 8 classes; Mage, Priest and Druid add spellfx + spellfight; 60,000 actions; a
+savepoint on each new deepest level from DL8; branches from DL12+ level-entry savepoints (deepest first, 3 per
+savepoint, 12 per lineage, at most half the slots). 758 games (509 fresh, 249 branches), 10.3M actions (about 400k
+per slot-hour), no errors, one timeout. 904 level-entry savepoints.
+
+Savepoints / independent lineages (distinct fresh games they descend from), by the band of the savepoint's depth:
+
+| Class | DL8–9 | DL10–14 | DL15–19 | DL20+ |
+|---|---|---|---|---|
+| Warrior | 65 / 36 | 95 / 15 | 31 / 5 | 0 |
+| Rogue | 43 / 26 | 60 / 14 | 14 / 2 | 0 |
+| Ranger | 34 / 21 | 40 / 10 | 6 / 1 | 16 / 1 |
+| Paladin | 45 / 25 | 75 / 11 | 31 / 3 | 0 |
+| Blackguard | 43 / 27 | 49 / 8 | 3 / 1 | 0 |
+| Mage | 23 / 13 | 38 / 6 | 20 / 2 | 5 / 1 |
+| Priest | 45 / 27 | 55 / 9 | 40 / 3 | 1 / 1 |
+| Druid | 19 / 11 | 8 / 4 | 0 | 0 |
+
+- **Lineages, not savepoints, are the sample size.** Branching multiplies savepoints within a lineage: Ranger's 16
+  DL20+ savepoints are one character. Fresh games reach DL15 rarely (4 of 509; deepest per class 13–15), so DL15+
+  starts come from branches, and deepest-first branching spent them on a few lineages.
+- **Cost per DL10+ lineage is about even across classes**, 90k–155k actions (Rogue 93k, Mage 95k, Paladin 104k,
+  Priest 117k, Warrior 124k, Ranger 126k, Druid 146k, Blackguard 156k): casters reach DL10 less often but die
+  sooner, so their failures are cheap. Class-balanced quotas cost little more than letting the bank land as it may.
+- **Starvation**: 30 deaths (all classes but Druid, 2 of them branches), mostly DL4–7, in long games (mean 36,600
+  actions). A rules bug to fix before the full harvest, since it takes the most productive games. Poison: 39 deaths,
+  mostly DL1–4.
+- Full-harvest changes: allocate fresh games to the class furthest under its quota of DL10+ lineages; choose
+  branches by the class and lineage furthest under the DL15+ quota rather than deepest first. At 400k actions per
+  slot-hour, 40 DL10+ lineages per class (about 320 × 120k actions, less the pilot's 77) is about 6 hours on 13
+  slots; the DL15+ yield from branching sets how many deep starts a class can have.
+
+### Inventory: why characters starved, and RULEFIX=packfull, invfix, home (2026-10-30)
+
+**Starvation was a full pack.** Replays of three pilot starvations (deterministic: same seed, same actions) all
+showed a full pack: the player walked between floor items it could not pick up ("You have no room for 4 Scrolls of
+Light") for ~16,000 actions while food and torches ran out. busho's full test was `inv.length >= 23`, but in 4.2 the
+quiver takes pack slots (one per 40 missiles) and the bridge lists ammo among the inventory items, so a character
+with ammo is full below 23 items. Session 25's base arm spent 11% of all actions in stalls of 2,000+ actions without
+a kill or a depth change (184 of 706 games).
+
+- **Bridge** (angband-c `main-http.c`): `packFree` (pack size minus `pack_slots_used`, as the inventory screen
+  shows), `burden` and `burdenSlowAt` (weight carried and half the weight limit, where speed starts to drop:
+  `player-calcs.c`), an optional `replaceSlot` on wield (the ring to take off when both ring slots are full: the game
+  asks "Replace which ring?" and the command failed), and the home handled by stash/retrieve.
+- **`RULEFIX=packfull`**: full by `packFree`; no walking to items when full; a tile where a pickup failed is not tried
+  again on that level.
+- **Other inventory problems found** (session 25 base, 706 games):
+  - Lanterns: 140 games found one, 67 sold it, 9 ever wielded it. Lights scored by AC (0), so a Lantern (LIGHT_3,
+    refilled from the oil busho carries) never beat a torch.
+  - Torches with different fuel do not stack, so part-burnt torches take a slot each; the torch swap rule blocked
+    swaps for 200 actions after switching to a stub, so the wielded stub burned out with spares in the pack.
+  - Selling pays nothing (`birth_no_selling`, the 4.2 default; 529 games sold, all for 0 gold): selling only
+    disposes and identifies. Known-harmful potions (Poison, Blindness), other classes' books and useless scrolls
+    filled packs until town; twice a full pack in town meant no Word of Recall or food could be bought.
+  - Weight: 200 games ran below normal speed while not Slowed (8% of decisions), mostly −1.
+  - Rings: with both ring slots full the wield failed and gearid retried every 10 actions (11 games, ~4,900
+    commands); the comparison was with the first worn ring (it chose to replace Free Action over Searching); a
+    purchase into an empty slot passed any positive score (30 Rings of Feather Falling).
+- **`RULEFIX=invfix`** (packfull plus): auditfix's junk test (harmful known consumables, unusable books) without
+  auditfix's other changes; in town, sell what `shedRank` ranks (junk, gear worse than worn, torch stubs when other
+  light is carried, unknown scrolls, Treasure Detection / Detect Invisible, devices without `devices`), and when fewer
+  than 3 slots are free also unknown potions, minor food and potions and a second digger; in the dungeon, when full
+  or over `burdenSlowAt`, drop the lowest-ranked item (heaviest first when over weight); wield a non-cursed Lantern;
+  block torch swaps only when the fuel did not rise; torch targets 1 with a Lantern; rings compared with the weaker
+  worn ring and wielded with `replaceSlot`; Free Action and See Invisible worth 15 + 3 × max depth and 12 + 2 × max
+  depth, and nothing when the race (Gnome, High-Elf) or another worn item already gives it; an empty slot is filled
+  from a shop only above 10.
+- **`RULEFIX=home`**: rings and amulets with a non-negative score, gear with an ability, resistance, positive
+  modifier, brand or slay, and gear with unknown runes are stashed at home instead of sold or dropped; each town
+  visit retrieves and wields home gear that scores above the worn item (the dropped Free Action ring comes back when
+  Boots of Speed replace Boots of Free Action).
+- **Checks.** 4 base starts replayed identically with the new bridge and busho. 24 fresh starts (8 classes × 3,
+  60,000 actions; seeds 6100000–6100023):
+
+| Arm | DL8+ | DL10+ | DL12+ | Mean deepest | Stalled actions | Starved |
+|---|---|---|---|---|---|---|
+| base (D24 + leavelos + lightout) | 6 | 0 | 0 | 5.5 | 21.1% | 5 |
+| + packfull | 14 | 10 | 4 | 7.5 | 7.0% | 2 |
+| + invfix (first version) | 14 | 10 | 5 | 8.2 | 1.7% | 1 |
+
+  The first invfix had a cursed Lantern swapped back and forth (44 times in one game) and one Warrior unable to buy
+  Word of Recall (six kinds of unknown potion, four foods, two shovels); both fixed before the 96-start comparison.
+- **96 paired fresh starts** (12 per class, seeds 6200000–6200095, 60,000 actions; `runs/invfix2`), base D24 +
+  leavelos + lightout against + invfix (final version):
+
+| Arm | DL8+ | DL10+ | DL12+ | DL15+ | Mean deepest | Stalled actions | Starved | Dead |
+|---|---|---|---|---|---|---|---|---|
+| base | 35 | 16 | 4 | 0 | 6.26 | 21.6% | 4 | 85 |
+| + invfix | 49 | 36 | 24 | 10 | 8.26 | 5.8% | 1 | 95 |
+
+  Paired: invfix deeper in 53 starts, shallower in 20, the same in 23 (sign test p ≈ 0.0001). DL10+ by class (base →
+  invfix): Warrior 5 → 11, Rogue 1 → 6, Ranger 3 → 3, Paladin 3 → 6, Blackguard 1 → 4, Mage 1 → 0, Priest 2 → 5,
+  Druid 0 → 1. More deaths within 60,000 actions because the games no longer stall and go deeper. **Adopted for the
+  harvest base** (its purpose is deep starts). The longest remaining stalls are not inventory: a character in the dark
+  next to a stationary monster (a bloodshot eye draining mana, a blue jelly).
+- **What-if (bridge `POST /whatif`, user-approved 2026-10-30):** `{"set":"<slot>:<p|h><index>|n,..."}` puts pack (p)
+  or home (h) items in equipment slots, recomputes the character with `calc_bonuses(known_only)` (modifiers count only
+  for runes the player knows, as the item screen's blows), restores everything, and returns speed, blows (×100),
+  shots, to-hit, to-dam, AC, light, stealth, known flags and resistances, heavy wield and armour encumbrance of mana.
+  4.2 has no glove penalty for casters; only armour weight over the class's limit costs mana.
+- **`RULEFIX=gearset`**: chooses the worn set as a whole. Value of a set = melee damage per turn (computed blows ×
+  (dice + to-dam)) × 2 (× 1 for Mage and Necromancer) + to-hit × 0.5 + AC + 15 × speed + 4 × light + stealth, each
+  ability and resistance once (depth-scaled: Free Action 15 + 3d, See Invisible 12 + 2d, telepathy 20 + 2d, base
+  resistances 4 + 0.6d, poison 2 + 0.8d, ...), −30 for a too-heavy weapon, −25 for mana lost to armour weight. Tries
+  every single-slot change over identified pack (and, in town, home) gear and every pair of the 8 best singles
+  (Speed boots + Free Action ring: neither alone may gain); changes only for a gain of 3 points and 2%. Runs when the
+  worn or carried gear changes (safe, at most every 20 actions) and on each town visit; replaces the per-item equip
+  rules (tactical weapon swaps against one monster stay). Not in the harvest base: to be screened on the deep bank.
+- **Smoke** (`runs/gearset1`, 12 starts that reached DL12+ under invfix, + home + gearset): no errors or loops; 25
+  items stashed at home (rings, amulets, unidentified gear); 39 set changes in 12 games (at most 6 in a game); two
+  Warriors reached DL18 and DL19. No home retrieval came up.
+- **Calibrating the values**: hazard models on deep-start data (deaths to paralysis without Free Action, to
+  invisible attackers without See Invisible, to breaths without the resistance, by depth), then experiments on the
+  bank. The decision model is not used for equipment: the decisions are too rare to train or check (user,
+  2026-10-30).
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
