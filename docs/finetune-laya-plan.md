@@ -4257,6 +4257,32 @@ shovel, 12 Scrolls of Light). gearweight made no difference in games this short.
 packlight+floorpick, packlight+floorpick+gearweight; same starts and seeds as the main screen) launched 11:06,
 `runs/deep/2026-10-31-pack`.
 
+First look (11:31, about 150 pairs): packlight PH 0.97 (z 0.14, continue; deeper 49 / shallower 45); packlight+floorpick
+1.43 (reject; levels gained 2.09 → 1.80, actions 3,537 → 3,234); with gearweight 1.52 (reject). Mechanically both work:
+the mean speed lost to weight fell from 0.66 (base) to 0.23 (packlight) and 0.13 (floorpick). What floorpick lost:
+fired ammo held 6.2 → 4.3 (Warriors 3.7 → 2.5) and oil throws 6.7 → 4.6 a game. pickup_inven had recovered fired ammo
+whenever the character walked over it, and the first floorpick picked up only when no monster was within 3; packlight's
+cap of 8 oil also cut throws (6.7 → 5.3). Revised: floorpick picks up, at any time, objects underfoot of a kind already
+carried (as pickup_inven did) unless past a target, at a tenth of a turn each; packlight keeps 15 oil. Smoke (8
+savepoints, 2,000 actions): no loops; a Ranger picked up 75 times (arrows). Screen queued after this one
+(`runs/deep/2026-10-31-pack2`: packlight+floorpick, packlight+floorpick+gearweight).
+
+Results. packlight was rejected at its second look (11:46, 313 pairs): PH 1.14, z −0.69, futility (death_rr 1.02,
+pace_rr 0.98; levels gained 2.02 → 1.89, deeper 81 / shallower 95). In the second screen (launched 11:48) the
+revised floorpick did better than the first but still lost: packlight+floorpick+gearweight was rejected at look 1
+(167 pairs, PH 1.25); packlight+floorpick reached its final look (12:49, 700 pairs) at PH 1.12, z −0.61, below the
+efficacy bound, reject (death_rr 1.15, pace_rr 1.08). Over all 1,116 pairs it played: deaths 1,078 → 1,088, levels
+gained 1.83 → 1.75, deeper 344 / shallower 350. Shedding weight works mechanically but doesn't make these characters
+live longer or go deeper; burden is not what is killing them.
+
+Two bugs found in the second screen. (1) Engine: PICKUP with the objectId of floor **gold** (wantFloor accepts gold)
+crashed the server. player_pickup_item always takes gold first, which frees that object, and then read the freed
+object (ASan: heap-use-after-free in inven_carry_num). Two Rogue games ended with the server gone and `actions: None`.
+Fixed in angband-c `cmd-pickup.c`: a given object is taken only if it is still in the floor pile. (2) Driver: those
+two games passed `ok()` (as alive at depth 0), and the `None` broke `compare()` in every check, so floorpick's final
+reject was logged but never recorded and the arm stayed open; the screen was stopped by hand (STOP) about 13:35.
+`ok()` now rejects results without an action count.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

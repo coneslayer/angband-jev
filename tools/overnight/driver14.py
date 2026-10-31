@@ -44,7 +44,7 @@ def load_outcomes(path, prefix):
     return out
 
 
-def ok(r): return bool(r) and "error" not in r and not r.get("timed_out") and not r.get("cut")
+def ok(r): return bool(r) and "error" not in r and not r.get("timed_out") and not r.get("cut") and r.get("actions") is not None  # None: engine died
 def score(r, k=PENALTY): return r["max_depth"] - k * r["dead"]
 def fingerprint(r): return (r["actions"], r["dead"], r["max_depth"])
 def cause(r, word): return bool(r["dead"] and word in (r.get("death_cause") or ""))

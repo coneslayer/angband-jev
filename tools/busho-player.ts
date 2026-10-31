@@ -383,8 +383,8 @@ const INVFIX = RULEFIX.has("invfix");
 // 1/10 ごとに速度 −1。harvest の 313 セーブポイントで 59% が半分を超え、36% は実際に −1 以上 (DL20+ は 64%、平均 −1.4)。重さの内訳
 // (1 人平均): 油 11 lb、松明 11 lb (ランタンを持ちながら 4〜16 本)、食料 8 lb (6〜25 個)、シャベル 7 lb、宝箱 6 lb (20% が 25 lb の箱を
 // 開けずに持つ)、魔法書 8〜9 lb (同じ本を 3〜4 冊)。invfix は山ごとにしか落とさず、これらは落とす順位が無かった。packlight: 宝箱は
-// いつでも落とす。重すぎる時は山の余りを落とす (松明はランタンがあれば 1 本、無ければ 4 本、同じ魔法書 2 冊、食料 8 個、油 8 個、
-// 合う発射台の無い矢・ボルト)
+// いつでも落とす。重すぎる時は山の余りを落とす (松明はランタンがあれば 1 本、無ければ 4 本、同じ魔法書 2 冊、食料 8 個、油 15 個、
+// 合う発射台の無い矢・ボルト)。油は投げる武器なので 15 個 (初版の 8 個では投擲が 6.7 → 5.3 回に減った)
 const PACKLIGHT = RULEFIX.has("packlight");
 // RULEFIX=floorpick: 足元の山をまとめて拾わず、見えている床の品 (ブリッジの floorObjects: ゲームの物品一覧と同じ、名前・種類・数・重さ)
 // から拾う物を 1 品ずつ選ぶ。拾う物の無いマスへは歩かない。ゲームの pickup_inven (持ち物と同じ品は歩けば拾う、既定で有効) を切る:
@@ -488,7 +488,7 @@ function shedExcess(item: any, inv: any[]): number {
   if (item.tval === TVAL.LIGHT && /Torch/i.test(name))
     return keepOf(wieldsLantern() ? 1 : 4, (i: any) => i.tval === TVAL.LIGHT && /Torch/i.test(i.name ?? ""), (a: any, b: any) => (b.fuel ?? 0) - (a.fuel ?? 0));
   if (item.tval === TVAL.FOOD && /Ration/i.test(name)) return keepOf(Math.max(FOOD_KEEP, 8), (i: any) => i.tval === TVAL.FOOD && /Ration/i.test(i.name ?? ""), () => 0);
-  if (item.tval === TVAL.FLASK && /oil/i.test(name)) return keepOf(8, (i: any) => i.tval === TVAL.FLASK && /oil/i.test(i.name ?? ""), () => 0);
+  if (item.tval === TVAL.FLASK && /oil/i.test(name)) return keepOf(15, (i: any) => i.tval === TVAL.FLASK && /oil/i.test(i.name ?? ""), () => 0);
   if (item.tval === TVAL.ARROW || item.tval === TVAL.BOLT) {
     const bow = ((lastKnownState?.player?.equipment ?? []) as any[]).find((e: any) => e.tval === TVAL.BOW)?.name ?? "";
     const fits = item.tval === TVAL.BOLT ? /Crossbow/i.test(bow) : /Bow/i.test(bow) && !/Crossbow/i.test(bow);
@@ -3105,6 +3105,20 @@ async function playGame() {
       unseenHits = unseenHits.filter(a => actionCount - a <= 20);
     }
     const unseenThreat = unseenHits.length > 0;
+    // RULEFIX=floorpick: 持っている品と同じ種類 (pickup_inven が歩くたびに拾っていた物: 撃った矢弾、薬、巻物、油…) は、目標を超えない
+    // 限り戦闘中でも拾う (1 品 0.1 ターン、自動で拾うのと同じ)。初版は安全な時しか拾わず、矢弾と油が減って深層 PH 1.43 だった
+    if (FLOORPICK && !ROLLOUT && state.depth >= 1 && !packIsFull(p, inv)) {
+      const held = [...inv, ...((p.quiver ?? []) as any[])];
+      const o = ((state.floorObjects ?? []) as any[]).find((o: any) => o.x === px && o.y === py && !o.unknown && !o.ignored
+        && held.some((i: any) => i.tval === o.tval && i.sval === o.sval) && wantFloor(o, p, inv));
+      if (o) {
+        const b0 = p.burden;
+        pickOid = o.oid;
+        state = await sendCommand({ type: CMD.PICKUP, objectId: o.oid });
+        if (state.player.burden === b0) ignoredOids.add(o.oid);
+        continue;
+      }
+    }
     // Player resistances from calcBonuses (race + equipment)
     const playerResists = new Set<string>();
     currentPlayerResists = new Set<number>(); // itemPower用の数値版
