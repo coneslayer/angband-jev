@@ -13,7 +13,7 @@ Every game writes a danger log. Disk guard as session 15; replays and snapshots 
 Resumable via RUN/state.json; `touch RUN/STOP` stops between games. Never restart it mid-stage.
 
 Usage: driver18.py --run runs/deep/<date> --bank runs/harvest/<run>[,...] --base RULEFIX --variants a,b@Cls1/Cls2,c,d+e
-       [--seed 7000000] [--hours 24] [--slots 13] [--k 20] [--start 10] [--min-depth 10] [--max-depth 19]
+       [--seed 7000000] [--hours 24] [--slots 13] [--k 20] [--start 10] [--min-depth 10] [--max-depth 19] [--min-gold 0]
        [--class-extra Paladin/Ranger/Rogue:spellfx] [--smoke]
 """
 import argparse, json, os, random, shutil, signal, sys, threading, time  # noqa: E401
@@ -47,9 +47,10 @@ def class_extras(spec):
     return out
 
 
-def bank_starts(banks, lo, hi, seed, n):
+def bank_starts(banks, lo, hi, seed, n, min_gold=0):
     """Up to n starts: level-entry savepoints at DL lo..hi, classes in rotation, lineages in rotation within a class,
-    savepoints of a lineage in random order. Each: {id, seed, cls, restore, cluster, depth}."""
+    savepoints of a lineage in random order. Each: {id, seed, cls, restore, cluster, depth}. min_gold > 0: only
+    savepoints with that much gold (BANK/gold.jsonl, written by bank_gold.py)."""
     rng = random.Random(seed)
     by_cls = {}
     for b in banks:
@@ -60,10 +61,16 @@ def bank_starts(banks, lo, hi, seed, n):
                 try: g = json.loads(line)
                 except ValueError: continue
                 roots[g["seed"]] = g.get("root", g["seed"])
+        gold = None
+        if min_gold > 0:
+            gj = os.path.join(b, "bank", "gold.jsonl")
+            if not os.path.exists(gj): sys.exit(f"--min-gold needs {gj} (tools/overnight/bank_gold.py)")
+            gold = {g["file"]: g["gold"] for g in map(json.loads, open(gj))}
         for line in open(os.path.join(b, "bank", "index.jsonl")):
             try: m = json.loads(line)
             except ValueError: continue
             if m.get("kind") != "level-entry" or not lo <= m.get("depth", 0) <= hi: continue
+            if gold is not None and gold.get(m["file"], -1) < min_gold: continue
             s = int(os.path.basename(m["file"]).split("-")[0])
             lin = f"{os.path.basename(b.rstrip('/'))}:{roots.get(s, s)}"
             by_cls.setdefault(m.get("class", "?"), {}).setdefault(lin, []).append(
@@ -148,7 +155,7 @@ D17.play_one = play_one  # D17.pool calls play_one by module global
 
 
 def stage_deep(run, name, deadline):
-    ss = bank_starts(run.banks, run.min_depth, run.max_depth, run.seed, 40 if run.smoke else 3000)
+    ss = bank_starts(run.banks, run.min_depth, run.max_depth, run.seed, 40 if run.smoke else 3000, run.min_gold)
     if not ss: return {"failed": "no savepoints in range"}
     by = {}
     for s in ss: by[s["cls"]] = by.get(s["cls"], 0) + 1
@@ -179,6 +186,7 @@ def main():
     ap.add_argument("--slots", type=int, default=13); ap.add_argument("--smoke", action="store_true")
     ap.add_argument("--k", type=int, default=20); ap.add_argument("--start", type=int, default=10)
     ap.add_argument("--min-depth", type=int, default=10); ap.add_argument("--max-depth", type=int, default=19)
+    ap.add_argument("--min-gold", type=int, default=0, help="only starts with this much gold (bank/gold.jsonl)")
     ap.add_argument("--maxa", type=int, default=20000); ap.add_argument("--cap-s", type=int, default=900)
     ap.add_argument("--looks", default=",".join(map(str, H.LOOKS)))
     a = ap.parse_args()
@@ -188,13 +196,13 @@ def main():
     run.banks = [os.path.abspath(b) for b in a.bank.split(",")]
     run.base, run.variants, run.seed = a.base, a.variants.split(","), a.seed
     run.casters, run.caster_extra, run.class_extra = a.casters.split(",") if a.casters else [], a.caster_extra, a.class_extra
-    run.k, run.s0, run.min_depth, run.max_depth = a.k, a.start, a.min_depth, a.max_depth
+    run.k, run.s0, run.min_depth, run.max_depth, run.min_gold = a.k, a.start, a.min_depth, a.max_depth, a.min_gold
     run.maxa, run.cap_s, run.looks = a.maxa, a.cap_s, tuple(int(x) for x in a.looks.split(","))
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
     app = D.app_dir(run)
     cbin = D.freeze_c(run)
     run.log(f"driver18 start (smoke={a.smoke}, slots={run.slots}, c_bin={cbin}, port_offset={D.PORT_OFFSET}, "
-            f"free {free_gb(run.path):.0f} GB); banks {run.banks}; DL{run.min_depth}-{run.max_depth}; base {run.base}; "
+            f"free {free_gb(run.path):.0f} GB); banks {run.banks}; DL{run.min_depth}-{run.max_depth}{f", gold {run.min_gold}+" if run.min_gold else ""}; base {run.base}; "
             f"casters {run.casters} +{run.caster_extra}; class extra {run.class_extra}; variants {run.variants}; PH({run.k}) from {run.s0}; looks "
             f"{run.looks}; maxa {run.maxa}; seed {run.seed}; app={app}")
     threading.Thread(target=D2.watchdog, args=(run,), daemon=True).start()

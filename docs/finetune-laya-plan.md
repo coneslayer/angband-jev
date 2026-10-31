@@ -4299,6 +4299,68 @@ the base and the casters' `--caster-extra`. Mage, Priest and Druid keep spellfx,
 (Blackguards lost with spellfx in session 25) are unchanged. Screens from here on compare against this base, so they
 are not paired with the earlier deep screens on Paladin, Ranger and Rogue starts.
 
+### Confusion, fear, teleshop on rich starts (2026-10-31 afternoon)
+
+**Confused deaths.** In the main deep screen's base arm, 302 of 1,122 deaths had confusion in the last 30 actions. At the
+onset of the last confused spell: mean HP 50%; 288 had no stairs within 3; 82 carried CSW or CCW, 84 only CLW, 136 no
+cure; 3 a Teleportation scroll; 161 Phase Door. While confused they walked (1,472 actions, the "random walk" fallback),
+rested (747, including with casters 3–7 squares away) and drank (626). Nearest monster at onset: none visible 127,
+umber hulk 25, blacklock mage 17, Orfax 15, ironfist priest 12. 4.2.6 facts: a confused player's move or attack goes
+in a random direction 75% of the time (`player_confuse_dir`); confused players can't read or cast; staffs and potions
+work; CLW reduces confusion by 20 turns, CSW and CCW cure it.
+
+**`RULEFIX=confesc`** (off by default): confused, with an awake mobile monster within 7 or recent unseen hits: on stairs,
+take them; else a ready Teleportation staff; else drink a confusion cure (`findConfusionCure`); else attack an adjacent
+threat, else step to the square farthest from the threats. Within 3 actions of a cure, if a threat is still within 7 and
+HP < 60% or the threat is unique or of the level's depth or deeper, read Teleportation (staff under teleshop) or else
+Phase Door. Smoke (14 starts whose base died confused, 6,000 actions): two Druid and Mage games alive where base died,
+one Druid lived longer, a Paladin went 2 levels deeper; a Ranger died sooner; the rest identical.
+
+**Bat form (engine bridge).** A smoke Warrior quaffed 412 times without time passing: a Potion of Surprise (tryunknown)
+had turned it into a bat, and in 4.2 a shapechanged player asked to use an item gets "Change back and quaff? (y/n)",
+which the bridge answered with Escape (no). The bridge now changes the player back first for the commands that ask
+(`shape_blocks` in `main-http.c`), and on any command in town (shops slam the door on a shapechanged player).
+
+**Fear (`RULEFIX=fearfix`).** 434 of 1,159 base games had 20+ commands in a row that passed no game time; over all
+games 5,097 times `sendCommand`'s guard replaced the 30th failed command with a HOLD, almost always a WALK into an
+adjacent monster. Replays: "You are too afraid to attack the flesh golem!". In 4.2 fear blocks all melee (shooting,
+throwing, casting and potions still work); 60% of the streaks had no timed fear: permanent fear from a worn Ring of
+Escaping (+speed, AFRAID) or a cowardice curse, which the status bar doesn't show. auditfix had a timed-fear handler
+(rejected as a bundle). fearfix uses that handler on its own, treats a "too afraid to attack" message as fear, and when
+there is no timed fear takes off the worn item with the known AFRAID flag (else a cursed ring or amulet) and never
+wears it again (`gearCursed`). Smoke: a Priest with a Ring of Escaping went from 22 guard holds to 0. Only 29 of the
+1,122 deaths ended in such a loop, so the gain, if any, is spread over many fights.
+
+**Teleshop on rich starts.** In the main screen's teleshop arm, purchases by the start's gold: under 1,000: 3 of 199;
+1,000–2,999: 19 of 347; 3,000–4,999: 15 of 119; 5,000+: 10 of 44. 60% of rich starts never went back to town; of the
+rest about 60% found no staff or too little gold left. `bank_gold.py` records each DL10–19 savepoint's gold
+(`bank/gold.jsonl`, 5,840 savepoints, 52 s); driver18 `--min-gold` keeps starts with that much: 1,646 starts from 327
+lineages at 3,000+ (Druid only 98).
+
+**Screens** (all on the new base: spellfx for Paladin, Ranger, Rogue; engine with the shape fix; PH below 1 favours
+the variant; efficacy bound 1.67 at the final look):
+
+| Run (seed) | Starts | Variant | Final look | Pairs | PH | z | Deaths base → arm | Levels gained | Deeper / shallower | Decision |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `conf` (7000000) | all | fearfix | 2 | 307 | 1.06 | −0.52 | 303 → 300 of 313 | 2.12 → 2.09 | 31 / 35 | reject (futility) |
+| `conf` (7000000) | all | confesc | 3 | 700 | 0.86 | 1.30 | 685 → 689 of 709 | 1.91 → 2.01 | 120 / 100 | reject |
+| `tele` (7100000) | 3,000+ gold | teleshop | 3 | 705 | 0.98 | 0.24 | 685 → 688 of 706 | 2.10 → 2.15 | 72 / 53 | reject |
+| `tele` (7100000) | 3,000+ gold | teleshop+confesc | 3 | 704 | 0.89 | 1.37 | 686 → 672 of 707 | 2.11 → 2.22 | 149 / 123 | reject |
+| `teleconf` (7200000; looks 300/700/1,400) | 3,000+ gold | teleshop+confesc | 1 | 311 | 1.03 | −0.18 | 300 → 305 of 312 | 2.01 → 2.00 | 60 / 53 | reject (futility) |
+
+- **fearfix:** the look-1 lean (PH 0.85 at 151 pairs) was gone by look 2. Fear loops end too few games to show.
+- **confesc:** a little deeper (z 1.30) but no lives saved on all starts; only 3 of the confused deaths carried a
+  Teleportation scroll, so the escape usually had only Phase Door.
+- **teleshop:** buying a Teleportation staff on rich starts changes nothing on its own.
+- **teleshop+confesc:** the only variant of the day that cut deaths in the screen (−14, death ratio 0.90), but a
+  confirmation on fresh seeds (same 1,646 starts, double the planned size) stopped for futility at its first look,
+  with PH 1.03. The screen's edge was noise. Neither goes in the base; both flags stay off by default.
+- **Day's tally:** devicefx (+dfx flags), packlight, floorpick v2, +gearweight, fearfix, confesc, teleshop and
+  teleshop+confesc all rejected. One-at-a-time escape and inventory rules on DL10–19 starts have stopped moving the
+  total: the deaths are spread over many monsters (humanoid casters, umber hulks, hounds), each rule touches a few
+  percent of them, and a 700-pair screen can't see an effect that small.
+- Runs archived to `/mnt/x/angband-jev/runs/deep-2026-10-31-{dfxall,conf,tele,teleconf}.tar`.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran

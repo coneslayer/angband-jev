@@ -781,7 +781,9 @@ function gearView(it: any): any {
     flags: it.kflags, modifiers: mods, resists: (it.kres ?? []).map(([elem, level]: number[]) => ({ elem, level })),
     brands: new Array(it.kbrands ?? 0).fill(1), slays: new Array(it.kslays ?? 0).fill(1) };
 }
-function gearCursed(it: any): boolean { return (it?.kcurses ?? 0) > 0 || /\{[^}]*cursed/.test(it?.desc ?? ""); }
+function gearCursed(it: any): boolean {
+  return (it?.kcurses ?? 0) > 0 || /\{[^}]*cursed/.test(it?.desc ?? "") || (FEARFIX && fearShunned.has(it?.name ?? ""));
+}
 function gearUnknown(it: any): boolean { return /\?\?/.test(it?.desc ?? ""); }
 // 射撃武器の弾の種類 (違う種類には替えない: 買った矢弾が無駄になる)
 function launcherFamily(name: string): string { return /Sling/i.test(name) ? "shot" : /Crossbow/i.test(name) ? "bolt" : "arrow"; }
@@ -800,6 +802,28 @@ const TELESHOP = RULEFIX.has("teleshop");
 // 2 マス以内に敵がいなくても、起きて動く敵が 7 マス以内に見えれば休まず飲む (遠くから混乱させ続ける術者: ironfist priest など)
 const CUREFX = RULEFIX.has("curefx");
 const CONF_CURES = /^(Cure Serious Wounds|Cure Critical Wounds|Healing|\*Healing\*|Life)$/;
+// RULEFIX=confesc: 混乱中は耐えずに逃げる。起きて動く敵が 7 マス以内 (または見えない攻撃者) の時、階段の上なら階段、Teleportation の杖
+// (混乱中でも使える) があれば杖、混乱を治す薬 (CSW・CCW、無ければ CLW: 4.2 の混乱の多くは 20 ターン未満) を飲み、治った直後にまだ敵が
+// 見えて危ないなら Teleportation (無ければ Phase Door) を読む。何も無ければ隣の敵を殴り、いなければ離れる (4.2 の混乱は 75% で向きが
+// ランダム、狙った向きの方がランダム歩行よりまし)。2026-10-31: 深層 base の死 1,122 件中 302 件で最後の 30 行動に混乱、混乱中の行動は
+// ランダム歩行 1,472・休む 747 (7 マス先の術者の前で休んでいた)・薬 626
+const CONFESC = RULEFIX.has("confesc");
+// RULEFIX=fearfix: 怯えていると殴れない (4.2)。auditfix の恐怖の手当て (恐怖を治す薬、呪文、射撃、投擲、離れる、Phase Door) を単独で使い、
+// 時限の恐怖だけでなく「too afraid to attack」(移動が時間を使わずに失敗) でも怯えていると見る。その時に時限の恐怖が無ければ恐怖は
+// 装備から (Ring of Escaping、cowardice の呪い): 恐怖の性質を知っている (kflags) 指輪・アミュレット、無ければ呪いのある指輪・アミュレットを
+// 外し、二度と着けない。2026-10-31: 深層 base 1,159 局で、時間の進まない移動 30 回の後の「待機」が 5,097 回 (隣の敵に只で殴られる)
+const FEARFIX = RULEFIX.has("fearfix");
+const OF_AFRAID = 24; // list-object-flags.h
+let fearMsgSeq = -99, fearPerm = false, fearOffs = 0;
+const fearShunned = new Set<string>();
+/** fearfix: 今殴れないか (時限の恐怖、または直近 5 コマンド以内に「too afraid to attack」) */
+function fearBlocked(p: any): boolean { return (p?.timed?.afraid ?? 0) > 0 || (FEARFIX && sendSeq - fearMsgSeq <= 5); }
+/** confesc: 混乱中に逃げる理由になる敵 (起きて動く、7 マス以内) */
+function confThreat(m: any): boolean {
+  return m.distance <= 7 && !m.asleep && m.neverMove !== true && !STATIONARY_RE.test(m.name ?? "");
+}
+let confCuredAt = -99;
+const confEsc = { stairs: 0, staff: 0, cure: 0, attack: 0, away: 0, read: 0 };
 /** curefx: 混乱を治す薬 (なければ CLW)。HP 35% 未満なら強い順 */
 function findConfusionCure(inv: any[], hpPct: number): number | null {
   const cures = inv.filter((i: any) => i.tval === TVAL.POTION && i.qty > 0 && i.aware !== false && CONF_CURES.test(i.name ?? ""))
@@ -1092,7 +1116,7 @@ function isEscapeCommand(cmd: Record<string, unknown>): boolean {
 async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
   sendSeq++;
   if (noTimeStreak >= 30) {
-    console.log(`  [CMD-GUARD] ${noTimeStreak} commands passed no time: holding a turn instead of ${JSON.stringify(cmd)}`);
+    console.log(`  [CMD-GUARD] ${noTimeStreak} commands passed no time: holding a turn instead of ${JSON.stringify(cmd)} | msgs: ${((lastKnownState?.messages ?? []) as any[]).slice(-3).map(String).join(" | ")}`);
     cmd = { type: CMD.SEARCH };
     noTimeStreak = 0;
   }
@@ -1146,6 +1170,10 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
         console.log(`  [NOTIME] walk ${cmd.direction} from (${pl.x},${pl.y}): tile ${JSON.stringify(t)} monster ${mon ? `${mon.name} vis=${mon.visible} dist=${mon.distance} inView=${(lastKnownState.monsters ?? []).includes(mon)}` : "-"} afraid=${pl.timed?.afraid} msgs ${JSON.stringify((lastKnownState.messages ?? []).slice(-4))}`);
       }
       if (cmd.type === CMD.READ || cmd.type === CMD.CAST) noTimeUntil[cmd.type as number] = sendSeq + 20;
+      if (FEARFIX && cmd.type === CMD.WALK && /too afraid to attack/.test(String((lastKnownState.messages ?? []).slice(-1)[0] ?? ""))) {
+        fearMsgSeq = sendSeq;
+        fearPerm = (lastKnownState.player?.timed?.afraid ?? 0) === 0;
+      }
     } else {
       noTimeStreak = 0;
       if (escapeCmd) levelEscapes++;
@@ -3852,6 +3880,46 @@ async function playGame() {
     if (isConfused || isBlind || isParalyzed) {
       const status = isConfused ? "混乱" : isBlind ? "盲目" : "麻痺";
       const nearbyEnemies = monsters.filter((m: any) => m.distance <= 2);
+      const confThreats = CONFESC && isConfused && !isParalyzed ? monsters.filter(confThreat) : [];
+      if (confThreats.length > 0 || (CONFESC && isConfused && !isParalyzed && unseenThreat)) {
+        const shroom = monsters.find((m: any) => m.distance <= 1 && STATIONARY_RE.test(m.name ?? "") && !hurtsOnContact(m));
+        const here = tiles.find((t: any) => t.x === px && t.y === py);
+        const tstaff = inv.find((i: any) => isTeleStaff(i) && deviceReady(i));
+        const cure = findConfusionCure(inv, hpPct);
+        const adj = confThreats.filter((m: any) => m.distance <= 1);
+        const what = confThreats.length ? `${confThreats[0].name}ら${confThreats.length}体` : "見えない敵";
+        if (shroom) {
+          state = await sendCommand({ type: CMD.WALK, direction: directionTo(px, py, shroom.x, shroom.y) });
+        } else if (here?.feat === FEAT.DOWN_STAIR || here?.feat === FEAT.UP_STAIR) {
+          confEsc.stairs++; fleeAttempts++;
+          addLesson(state.turn, state.depth, "混乱脱出", `混乱中、${what}。階段の上なので階段で離脱`);
+          state = await sendCommand({ type: here.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP });
+        } else if (tstaff) {
+          confEsc.staff++; fleeAttempts++;
+          addLesson(state.turn, state.depth, "混乱脱出", `混乱中、${what}。Teleportationの杖で離脱`);
+          state = await sendCommand({ type: CMD.USE, itemIndex: tstaff.slot });
+        } else if (cure !== null) {
+          confEsc.cure++; healingsUsed++; confCuredAt = actionCount;
+          addLesson(state.turn, state.depth, "混乱脱出", `混乱中、${what}。薬で治してから逃げる`);
+          state = await sendCommand({ type: CMD.QUAFF, itemIndex: cure });
+        } else if (adj.length > 0) {
+          confEsc.attack++;
+          state = await sendCommand({ type: CMD.WALK, direction: directionTo(px, py, adj[0].x, adj[0].y) });
+        } else {
+          // 脅威から一番遠くなる隣のマス (見えない敵だけならランダム)
+          let best: number | null = null, bestD = -1;
+          for (const d of ALL_DIRS) {
+            const [dx, dy] = dirOffsets[d]!;
+            const nx = px + dx, ny = py + dy;
+            if (!isPassable(tiles, nx, ny) || monsters.some((m: any) => m.x === nx && m.y === ny)) continue;
+            const md = confThreats.length ? Math.min(...confThreats.map((m: any) => Math.max(Math.abs(m.x - nx), Math.abs(m.y - ny)))) : rand();
+            if (md > bestD) { bestD = md; best = d; }
+          }
+          confEsc.away++;
+          state = await sendCommand(best !== null ? { type: CMD.WALK, direction: best } : { type: CMD.SEARCH });
+        }
+        continue;
+      }
       if (nearbyEnemies.length > 0 && p.timed.confused > 0) {
         // 隣のキノコ (HP1-2、胞子で混乱させ続ける) は殴って倒す
         const shroom = nearbyEnemies.find((m: any) => m.distance <= 1 && STATIONARY_RE.test(m.name ?? "") && !hurtsOnContact(m));
@@ -3928,6 +3996,21 @@ async function playGame() {
       }
       state = await sendCommand({ type: CMD.REST });
       continue;
+    }
+
+    // RULEFIX=confesc: 薬で混乱を治した直後 (3 行動以内)、まだ起きて動く敵が 7 マス以内に見え、HP 60% 未満かユニーク・階層以上の敵なら
+    // Teleportation (無ければ Phase Door) を読む。術者や凝視の敵の前に残るとまた混乱させられる
+    if (CONFESC && actionCount - confCuredAt <= 3 && !isConfused && !isBlind && !isParalyzed) {
+      const threats = monsters.filter(confThreat);
+      if (threats.length > 0 && (hpPct < 0.6 || threats.some((m: any) => m.isUnique || (m.level ?? 0) >= state.depth))) {
+        const scroll = findTeleportScroll(inv) ?? findPhaseScroll(inv);
+        if (scroll !== null) {
+          confCuredAt = -99; confEsc.read++; fleeAttempts++;
+          addLesson(state.turn, state.depth, "混乱脱出", `混乱が治った。${threats[0].name}がまだ${threats[0].distance}マス、HP${Math.round(hpPct * 100)}%。巻物で離脱`);
+          state = await sendCommand({ type: CMD.READ, itemIndex: scroll });
+          continue;
+        }
+      }
     }
 
     // === 優先度0.5: スペル学習 (新スペル枠があれば即学習) ===
@@ -4991,8 +5074,19 @@ async function playGame() {
     }
 
     // === RULEFIX=auditfix: 怯えていて隣に起きた敵 → 殴れない。恐怖を治す薬、呪文、射撃、投擲、離れる、Phase Door の順 ===
-    if (AUDITFIX && (p.timed.afraid ?? 0) > 0) {
+    if ((AUDITFIX && (p.timed.afraid ?? 0) > 0) || (FEARFIX && fearBlocked(p))) {
       const adjAwake = monsters.filter((m: any) => m.distance <= 1 && m.asleep !== true);
+      // fearfix: 時限の恐怖なしで殴れない → 恐怖の元の装備を外す (性質が分かっている物、無ければ呪いのある指輪・アミュレット)
+      const fearItem = FEARFIX && fearPerm && (p.timed.afraid ?? 0) === 0
+        ? ((p.equipment ?? []) as any[]).find((e: any) => (e.kflags ?? []).includes(OF_AFRAID))
+          ?? ((p.equipment ?? []) as any[]).find((e: any) => (e.tval === TVAL.RING || e.tval === TVAL.AMULET) && (e.kcurses ?? 0) > 0)
+        : undefined;
+      if (fearItem && !fearShunned.has(fearItem.name)) {
+        fearShunned.add(fearItem.name); fearPerm = false; fearOffs++;
+        addLesson(state.turn, state.depth, "恐怖", `怯えていないのに殴れない: ${fearItem.desc ?? fearItem.name} が恐怖の元。外して二度と着けない`);
+        state = await sendCommand({ type: CMD.UNEQUIP, itemIndex: fearItem.slot });
+        continue;
+      }
       if (adjAwake.length > 0) {
         const tgt = [...adjAwake].sort((a: any, b: any) => (a.hp ?? 99) - (b.hp ?? 99))[0];
         const potion = inv.find((i: any) => i.qty > 0 && (i.tval === TVAL.POTION || i.tval === TVAL.FOOD)
@@ -6214,6 +6308,8 @@ async function playGame() {
       spellsUsed,
       spellsLearned,
       ...(SPELLFX ? { spellRoles: fxCasts } : {}),
+      ...(CONFESC ? { confEsc } : {}),
+      ...(FEARFIX ? { fearActions, fearOffs, fearShunned: [...fearShunned] } : {}),
       race: fp.race,
       class: fp.class,
       dead: finalState.dead,
