@@ -1549,6 +1549,84 @@ function modelGuard(type: DecisionType, c: DecideCtx, choice: string): string | 
   return null;
 }
 
+// RULEFIX=lookahead (DECISION_LOG=1 と): 危険な判断 (LOOKAHEAD_TYPES、DL1+、run.ts の danger ≥ LOOKAHEAD_MIN_DANGER) では、
+// その場のスナップショットから各選択肢を K 回ずつルールで先読みし (tools/rollout/run.ts: C の新しいプロセスで再開、選択肢間で同じ
+// 乱数)、平均効用 (v2) が最大の選択肢を取る (同点ならルール)。判断を完全な先読みに替えたら死亡が減るかの上限の確認 (2026-10-31)。
+// 結果は ${DECISION_LOG_DIR}/lookahead.jsonl (学習用のラベル)。先読みに失敗したらルール
+const LOOKAHEAD = RULEFIX.has("lookahead");
+const LOOKAHEAD_TYPES = new Set((process.env.LOOKAHEAD_TYPES ?? "fight,tactic").split(",").filter(Boolean));
+const LOOKAHEAD_MIN_DANGER = Number(process.env.LOOKAHEAD_MIN_DANGER ?? "2");
+const LOOKAHEAD_PORTS = (process.env.LOOKAHEAD_PORTS ?? "").split(",").filter(Boolean); // この局の先読みサーバのポート
+const LOOKAHEAD_K = process.env.LOOKAHEAD_K ?? "8", LOOKAHEAD_K_MIN = process.env.LOOKAHEAD_K_MIN ?? "4";
+// ルールの選択を覆すのは、最良の平均効用がルールの選択より LOOKAHEAD_MARGIN 以上高い時だけ (8 本では 0.005 の差は雑音。
+// 死亡 1 本は平均を約 0.2 動かす)
+const LOOKAHEAD_MARGIN = Number(process.env.LOOKAHEAD_MARGIN ?? "0.05");
+const lookStats = { asked: 0, changed: 0, failed: 0, ms: 0, by: {} as Record<string, number> };
+let lookPlayerCmd: string | null = null;
+/** run.ts の danger() とほぼ同じ (状態の文から: HP の減り、対象/隣の敵の格上度、ユニーク、速さ、ブレス/呪文)。ただし今の状態の文は
+ *  呪文を "seen casting:" と書く (run.ts の BREATH:|SPELL: は古い形式で当たらず、ironfist priest が 1 未満だった) */
+function lookDanger(type: string, st: string, cl: number): number {
+  const hp = /\nHP:(\d+)\/(\d+)/.exec(st);
+  const hpFrac = hp && Number(hp[2]) > 0 ? Number(hp[1]) / Number(hp[2]) : 1;
+  let d = (1 - hpFrac) * 5;
+  const m = (type === "fight" ? /Target monster: [^\n]*/.exec(st) : /Adjacent enemies: [^\n]*/.exec(st))?.[0] ?? "";
+  for (const lv of m.matchAll(/Lv(\d+)/g)) d += Math.max(-3, Number(lv[1]) - cl);
+  if (m.includes("UNIQUE")) d += 5;
+  for (const sp of m.matchAll(/spd(\d+)/g)) if (Number(sp[1]) >= 120) d += 3;
+  if (/BREATH:|SPELL:|seen casting:/.test(m)) d += 2;
+  return d;
+}
+/** 先読みのプレイヤー: 1 局に 1 回 esbuild で束ねる (起動 0.3 s → 0.09 s)。失敗したら tsx */
+async function lookPlayer(): Promise<string> {
+  if (lookPlayerCmd) return lookPlayerCmd;
+  const { spawnSync } = await import("node:child_process");
+  const out = `${DECISION_LOG_DIR}/la-player.mjs`;
+  const r = spawnSync("node_modules/.bin/esbuild", ["tools/busho-player.ts", "--bundle", "--platform=node", "--format=esm",
+    `--outfile=${out}`, "--log-level=error", "--banner:js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);"]);
+  lookPlayerCmd = r.status === 0 ? `node ${out}` : "node_modules/.bin/tsx tools/busho-player.ts";
+  if (r.status !== 0) console.log(`  [LOOKAHEAD] esbuild failed, using tsx: ${String(r.stderr).slice(0, 200)}`);
+  return lookPlayerCmd;
+}
+async function lookahead(rec: any): Promise<string | null> {
+  if (!LOOKAHEAD_PORTS.length) return null;
+  const fs = await import("node:fs");
+  const { spawn } = await import("node:child_process");
+  const t0 = Date.now();
+  lookStats.asked++;
+  const dir = DECISION_LOG_DIR, tin = `${dir}/la-in.jsonl`, tout = `${dir}/la-out.jsonl`, tunl = `${dir}/la-out.unl.jsonl`;
+  for (const f of [tout, tunl, tout.replace(/\.jsonl$/, ".stats.json")]) fs.rmSync(f, { force: true });
+  fs.writeFileSync(tin, JSON.stringify(rec) + "\n");
+  const cmd = await lookPlayer();
+  const args = ["tools/rollout/run.ts", "--decisions", tin, "--dir", dir, "--out", tout, "--unlabelled", tunl,
+    "--servers", LOOKAHEAD_PORTS.map(pt => `http://127.0.0.1:${pt}`).join(","), "--k", LOOKAHEAD_K, "--k-min", LOOKAHEAD_K_MIN,
+    "--utility", "v2", "--player-cmd", cmd, "--c-tmp", `${dir}/la-c`, "--gamedata", "packages/@angband/core/gamedata"];
+  const code = await new Promise<number | null>((resolve) => {
+    const ch = spawn("node_modules/.bin/tsx", args, { env: { ...process.env, BUSHO_TMP: `${dir}/la-c` }, stdio: ["ignore", "ignore", "pipe"] });
+    let err = "";
+    ch.stderr!.on("data", (d) => { err = (err + d).slice(-2000); });
+    ch.on("close", (c) => { if (c !== 0) console.log(`  [LOOKAHEAD] run.ts exit ${c}: ${err.slice(-300)}`); resolve(c); });
+  });
+  lookStats.ms += Date.now() - t0;
+  const line = code === 0 && fs.existsSync(tout) ? fs.readFileSync(tout, "utf-8").split("\n").find(l => l.trim()) : undefined;
+  if (!line) { lookStats.failed++; return null; }
+  const lab = JSON.parse(line);
+  const u: Record<string, number> = lab.meta?.u_mean ?? {};
+  const top = Math.max(...Object.values(u));
+  const best = Object.keys(u).filter(o => u[o]! >= top - 1e-9);
+  const ruleU = u[rec.rules_choice] ?? -Infinity;
+  const choice = best.includes(rec.rules_choice) || top - ruleU < LOOKAHEAD_MARGIN ? rec.rules_choice : best[0] ?? null;
+  lab.meta.la_choice = choice;
+  fs.appendFileSync(`${dir}/lookahead.jsonl`, JSON.stringify(lab) + "\n");
+  if (choice && choice !== rec.rules_choice) {
+    lookStats.changed++;
+    const k = `${rec.decision_type}:${rec.rules_choice}>${choice}`;
+    lookStats.by[k] = (lookStats.by[k] ?? 0) + 1;
+    console.log(`  [LOOKAHEAD] ${rec.decision_type} DL${rec.depth}: ${rec.rules_choice} → ${choice} u=${JSON.stringify(u)} (${Date.now() - t0}ms)`);
+    return choice;
+  }
+  return null; // ルールと同じ: null を返す (fight の答えは個体の計画 fightPlan になり、その後の扱いが変わるため)
+}
+
 // 返り値はオプション名。null ならルールに任せる。
 async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> {
   if (ROLLOUT) {
@@ -1561,6 +1639,11 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
   }
   if (DECISION_LOG) {
     const req = buildRequest(type, c);
+    if (LOOKAHEAD && LOOKAHEAD_TYPES.has(type) && (c.state?.depth ?? 0) >= 1
+        && lookDanger(type, req.state, c.state?.player?.level ?? 1) >= LOOKAHEAD_MIN_DANGER) {
+      const rec = await logDecision(type, c, req, { acted: "lookahead" });
+      return rec?.snapshot ? lookahead(rec) : null;
+    }
     if (!POLICY_MODEL || (DECISION_MODEL_TYPES.size > 0 && !DECISION_MODEL_TYPES.has(type))) {
       await logDecision(type, c, req);
       return null;
@@ -1694,7 +1777,7 @@ async function takeSnapshot(gameId: string, turn: number, type: DecisionType): P
   }
 }
 
-async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionRequest, extra: Record<string, unknown> = {}) {
+async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionRequest, extra: Record<string, unknown> = {}): Promise<any | null> {
   try {
     const st = c.state;
     if (!decisionGameId) {
@@ -1723,8 +1806,10 @@ async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionReques
     fs.mkdirSync(DECISION_LOG_DIR, { recursive: true });
     fs.appendFileSync(`${DECISION_LOG_DIR}/decisions.jsonl`, JSON.stringify(rec) + "\n");
     decisionLogCounts[type] = (decisionLogCounts[type] ?? 0) + 1;
+    return rec;
   } catch (e) {
     console.log(`  [DECISION_LOG] error: ${(e as Error).message}`);
+    return null;
   }
 }
 const decisionLogCounts: Record<string, number> = {};
@@ -6291,6 +6376,7 @@ async function playGame() {
   if (CORRIDOR) console.log(`  回廊: 通路へ${corridorMoves}歩, 通路で待機${corridorWaits}回`);
   if (DEVICES2) console.log(`  光の魔法棒: ${lightWandUses}回, 列のオーク計${lightWandOrcs}体`);
   if (DEVICEFX) console.log(`  devicefx: ${JSON.stringify(devFxUses)}`);
+  if (LOOKAHEAD) console.log(`  lookahead: ${JSON.stringify({ ...lookStats, avg_ms: lookStats.asked ? Math.round(lookStats.ms / lookStats.asked) : 0 })}`);
 
   // 最終フレーム + 録画保存
   recordFrame(finalState, finalState.dead ? `死亡: ${deathCause}` : "生存");

@@ -140,11 +140,15 @@ def play_one(run, stage, s, arm, rulefix, slot, deadline):
     maxa, cap = (1500, 240) if run.smoke else (run.maxa, run.cap_s)
     env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rulefix,
            "DANGER_LOG": "1"}
+    if "lookahead" in rulefix.split(","):
+        # rollout servers for this slot's live lookahead (busho RULEFIX=lookahead): 7300+, W ports per slot
+        w = run.la_workers
+        env.update({"ANGBAND_C": D.C_BIN, "LOOKAHEAD_PORTS": ",".join(str(7300 + D.PORT_OFFSET + slot * w + i) for i in range(w))})
     out = run.d(stage, arm, s["id"])
     res = D.play_game(run, f"{stage}-{arm}", slot, s["seed"], s["cls"], env, out,
                       max(60, min(cap, deadline - time.time())), maxa, 4100, None, s["restore"])
     run.log(f"{stage}-{arm}: {s['id']}: {res}")
-    for f in ("busho-replay.jsonl", "snapshots"):
+    for f in ("busho-replay.jsonl", "snapshots", "la-c", "la-player.mjs", "la-in.jsonl", "la-out.jsonl", "la-out.unl.jsonl", "la-out.stats.json"):
         p = os.path.join(out, f)
         if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
         elif os.path.exists(p): os.remove(p)
@@ -189,6 +193,7 @@ def main():
     ap.add_argument("--min-gold", type=int, default=0, help="only starts with this much gold (bank/gold.jsonl)")
     ap.add_argument("--maxa", type=int, default=20000); ap.add_argument("--cap-s", type=int, default=900)
     ap.add_argument("--looks", default=",".join(map(str, H.LOOKS)))
+    ap.add_argument("--la-workers", type=int, default=2, help="rollout servers per slot for RULEFIX=lookahead arms")
     a = ap.parse_args()
     if free_gb(".") < D15.DISK_START_GB:
         sys.exit(f"only {free_gb('.'):.1f} GB free (Linux and host drive); need {D15.DISK_START_GB}")
@@ -198,6 +203,7 @@ def main():
     run.casters, run.caster_extra, run.class_extra = a.casters.split(",") if a.casters else [], a.caster_extra, a.class_extra
     run.k, run.s0, run.min_depth, run.max_depth, run.min_gold = a.k, a.start, a.min_depth, a.max_depth, a.min_gold
     run.maxa, run.cap_s, run.looks = a.maxa, a.cap_s, tuple(int(x) for x in a.looks.split(","))
+    run.la_workers = a.la_workers
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
     app = D.app_dir(run)
     cbin = D.freeze_c(run)

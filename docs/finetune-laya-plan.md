@@ -4361,6 +4361,50 @@ the variant; efficacy bound 1.67 at the final look):
   percent of them, and a 700-pair screen can't see an effect that small.
 - Runs archived to `/mnt/x/angband-jev/runs/deep-2026-10-31-{dfxall,conf,tele,teleconf}.tar`.
 
+### Is the model worth reopening? Lookahead headroom test (2026-10-31 evening)
+
+**Device use (devicefx games, before deciding).** In 306 devicefx games, 2,944 device uses: staffs mostly identify-by-use
+(328), arrival detection (319, 209 of them Detect Invisible) and Cure Light Wounds/Curing with a monster adjacent at HP
+< 50% (286 of 301); 0 emergency Teleportation (no game held the staff). Wands and rods: 773 of 1,620 were
+identify-by-use on monsters, 434 Slow/Confuse/Hold/Stun on monsters it was fleeing, about 400 attacks. No rule treats a
+charge as a cost. The base player carries no devices at all.
+
+**`RULEFIX=lookahead`** (off by default; `busho-player.ts`, `driver18.py --la-workers`): at a fight or tactic decision on
+DL1+ whose danger score (run.ts `danger()`, plus +2 for "seen casting:", which the old pattern missed) is ≥ 2, log the
+record with its snapshot, run `tools/rollout/run.ts` on it (K 4, 8 if the first 4 disagree; utility v2; horizons fight
+150, tactic 50; 2 rollout servers per slot at ports 7300+) and take the best option if it beats the rules' by
+`LOOKAHEAD_MARGIN` (0.05); otherwise return null (a non-null fight answer becomes a per-monster plan). Labels go to
+`lookahead.jsonl`.
+
+**Screen `runs/deep/2026-10-31-look`** (19:20, seed 7400000, 6 slots): look 1, 152 pairs, PH 1.71, z −1.93:
+**reject (futility)**. Deaths 150 → 150 of 153, levels gained 2.08 → 1.79, DL15+ 54 → 43. 2,266 lookaheads (15 s
+each), 697 overrides: melee → flee 233, flee → melee 136, melee → throw 72, tactic fight → heal/flee 104. In the
+overridden decisions the rollouts said the lookahead's choice halved deaths within the horizon (13% vs 28% of
+rollouts), but the games didn't die less: the short horizon rewards getting away now, and best-of-3 at K 4–8 is noisy
+(split halves agreed on the winner in 61% of overrides).
+
+**Where the danger score is wrong** (base arm of the main deep screen, 149,220 fight/tactic decisions, label "the game
+died within 100 actions"): by score <0 / 0–2 / 2–4 / 4–6 / 6+: 5.5% / 8.1% / 15.6% / 23.8% / 28.3%. Of 1,119 deaths,
+866 had a decision scored ≥ 2 in the last 100 actions, 196 only lower ones, 57 no fight/tactic decision at all (blind
+or confused in about half: those states ask no decision). Below 2 but dangerous: HP < 50% with a weak target (48%; each
+weaker monster subtracts up to 3), no Cure potion (22%), no Phase or Teleport (17%), 2+ casters within 7 (15%), 4+ awake
+monsters (14%). A LightGBM on the danger-log features at the decision (split by game): AUC 0.86 against the score's
+0.67; at the same number of lookaheads it catches 1,830 of 3,116 pre-death decisions against 862. The Phase Door count
+is its strongest feature. But "death is near" is not "the choice matters".
+
+**Long-horizon check** (64 fresh base games from deep starts, seed 7500000; 218 decisions with score ≥ 2, up to 4 per
+game; each option 8 paired seeds to 2,000 actions; u = levels gained − 3 if dead): by option, death by 150 / 500 /
+2,000 actions and levels gained: melee 32 / 43 / 62% +0.44, throw 31 / 43 / 61% +0.46, flee 31 / 44 / 62% +0.48;
+tactic heal 24 / 38 / 57% +0.66, fight 23 / 33 / 56% +0.69. The option explains 11% of the outcome variance within a
+decision (the seed the rest); in 44 decisions every option gave the same result in every seed. Choosing on seeds 1–4
+and scoring on 5–8: the long-horizon pick gains +0.085 ± 0.046 per decision over the rules (better 43, worse 26, same
+149); the short-horizon pick (fewest deaths by 150) +0.014 ± 0.023.
+
+**Conclusion:** at the dangerous fight and tactic moments the outcome is mostly already set by the position (supplies,
+level against depth, the level's monsters). Even a long-horizon oracle there gains little, and a model can only copy
+it, so the model track stays closed for these decisions. Next: the same check on the strategic decisions (descend /
+stay, recall / continue, explore / descend).
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
