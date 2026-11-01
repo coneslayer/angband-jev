@@ -795,6 +795,9 @@ const TRYUNKNOWN = RULEFIX.has("tryunknown");
 // (休むと殴られ続ける。session 22 の確認の新既定: 死亡 183 件中 14 件が盲目で休み続けて死に、うち 8 件は飲んだ直後で治す薬なし。
 // tryunknown の Blindness は 75+4d25 ターン)。tryunknown は治す薬を持っている時だけ未知の薬を飲む
 const BLINDSAFE = RULEFIX.has("blindsafe");
+const BLINDSAFE2 = RULEFIX.has("blindsafe2");
+const BLINDFIGHT = RULEFIX.has("blindfight");
+let blindAttacks = 0;
 // RULEFIX=teleshop: 4.2 の店は Teleportation の巻物を売らない (魔法店と闇市の Teleportation の杖だけ)。最深 DL5 以上で使える杖がなければ
 // 買い、売らず落とさず、Teleportation の巻物を探す所すべてで巻物がない (または読めない: 盲目・混乱) 時は杖を使う。杖は盲目でも混乱中でも使える
 const TELESHOP = RULEFIX.has("teleshop");
@@ -842,6 +845,10 @@ let corridorHold = 0, corridorSteps = 0, corridorOffUntil = -1, corridorMoves = 
 // RULEFIX=worwait: 町で Word of Recall が発動待ちの間は階段を降りずに待つ (4.2 ではダンジョンにいる時に発動すると町へ引き戻される。
 // session 22 の既定では町で読んだ 329 回のうち 269 回が DL1 へ降りて町へ戻され、巻物 (125G) が無駄になり DL1 から歩いていた)
 const WORWAIT = RULEFIX.has("worwait");
+const ESCRECALL = RULEFIX.has("escrecall");
+const ESCWALK = RULEFIX.has("escwalk");
+const ESCDIRE = RULEFIX.has("escdire");
+let escRecalls = 0, escWalks = 0;
 // RULEFIX=deepkit: DL5 以深から戻った町でも、装備と Cure Critical Wounds (200G) より先に Phase/CLW/油/CSW を買う
 // (buySupplies は CLW を買わず、CCW 30 個が先なので Phase が残りの金で決まっていた。CLW は 20G で 20 HP、CCW は 200G で 60 HP)
 const DEEPKIT = RULEFIX.has("deepkit");
@@ -1459,6 +1466,14 @@ const [ROLLOUT_TYPE, ROLLOUT_OPTION] = ROLLOUT_FORCE.split(":");
 const ROLLOUT_HORIZON = Number(process.env.ROLLOUT_HORIZON ?? "150");
 const ROLLOUT_MAX_WAIT = Number(process.env.ROLLOUT_MAX_WAIT ?? "5");
 let rolloutFired = false;
+// ROLLOUT_FULL_RULES=1: 長いロールアウト (戦略の判断) では、普段のプレイの規則 (worwait、restock、tryunknown、gearid、invfix、
+// 食料切れの帰還など) をロールアウト中も使う。既定ではロールアウト中は止める (短いロールアウトの副作用を避けるため)。
+// 記録・セーブポイント・開始直後の買い物は常に止める
+const RO_GATE = ROLLOUT && process.env.ROLLOUT_FULL_RULES !== "1";
+// ROLLOUT_FORCE=descend:stay を戦略として測る: 強制した「留まる」は、この行動数のあいだ降下しない (無ければ次の行動で
+// また聞かれて 1 手遅れるだけ。降下の見送りは 1 深度 2 回まで)。通常のプレイには関係しない
+const ROLLOUT_STAY_ACTIONS = Number(process.env.ROLLOUT_STAY_ACTIONS ?? "500");
+let descentHoldUntil = -1;
 // /state の player に exp-to-next は無いので 4.2 の player_exp 表 × 種族 expfact から推定 (クラスの expfact は 4.2 では 0)
 const PLAYER_EXP = [10, 25, 45, 70, 100, 140, 200, 280, 380, 500, 650, 850, 1100, 1400, 1800, 2300, 2900, 3600, 4400, 5400,
   6800, 8400, 10200, 12500, 17500, 25000, 35000, 50000, 75000, 100000, 150000, 200000, 275000, 350000, 450000, 550000, 700000, 850000, 1000000, 1250000,
@@ -2951,7 +2966,8 @@ async function buySupplies(state: any) {
     { name: "Ration" as string | null, tvals: [28], target: FOOD_KEEP, stores: [0] }, // food first: starvation
     { name: "Wooden Torch", tvals: [TVAL.LIGHT], target: torchTarget(3), stores: [0] }, // vanilla torches burn out
     // RULEFIX=wor: 帰還の巻物 1 枚を回復薬より先に。無いと食料切れのとき上り階段を歩いて餓死していた
-    ...(RULEFIX.has("wor") ? [{ name: "Word of Recall" as string | null, tvals: [25], target: 1, stores: [4, 5] }] : []),
+    // RULEFIX=wor2: 2 枚 (町から戻る 1 枚 + 次に補給に帰る 1 枚)。深層スタートの 45% は WoR を持っていなかった (2026-10-31 夜)
+    ...(RULEFIX.has("wor") || RULEFIX.has("wor2") ? [{ name: "Word of Recall" as string | null, tvals: [25], target: RULEFIX.has("wor2") ? 2 : 1, stores: [4, 5] }] : []),
     ...(RULEFIX.has("neutpois") ? [{ name: "Neutralize Poison" as string | null, tvals: [26], target: 2, stores: [4] }] : []), // 錬金術店 (闇市は 3 倍)
     ...(TELESHOP && (p.maxDepth ?? state.depth ?? 0) >= 5 ? [{ name: "Teleportation" as string | null, tvals: [TVAL.STAFF], target: 1, stores: [5, 6] }] : []),
     { name: "Cure Critical Wounds", tvals: [26], target: 30, stores: [4, 5] },
@@ -3220,7 +3236,7 @@ async function playGame() {
     const unseenThreat = unseenHits.length > 0;
     // RULEFIX=floorpick: 持っている品と同じ種類 (pickup_inven が歩くたびに拾っていた物: 撃った矢弾、薬、巻物、油…) は、目標を超えない
     // 限り戦闘中でも拾う (1 品 0.1 ターン、自動で拾うのと同じ)。初版は安全な時しか拾わず、矢弾と油が減って深層 PH 1.43 だった
-    if (FLOORPICK && !ROLLOUT && state.depth >= 1 && !packIsFull(p, inv)) {
+    if (FLOORPICK && !RO_GATE && state.depth >= 1 && !packIsFull(p, inv)) {
       const held = [...inv, ...((p.quiver ?? []) as any[])];
       const o = ((state.floorObjects ?? []) as any[]).find((o: any) => o.x === px && o.y === py && !o.unknown && !o.ignored
         && held.some((i: any) => i.tval === o.tval && i.sval === o.sval) && wantFloor(o, p, inv));
@@ -3339,7 +3355,7 @@ async function playGame() {
       if (savepointBank.enabled && !ROLLOUT) await savepointBank.onLevelEntry(state, gameIdOf(state), GAME_SEED === null ? null : Number(GAME_SEED), fetchSnapshotBody);
 
       // 序盤の町帰還 (逃走で DL1→町 など): 残金で油/Phase/CLW を補充
-      if (state.depth === 0 && maxDepthReached < 5 && !ROLLOUT) {
+      if (state.depth === 0 && maxDepthReached < 5 && !RO_GATE) {
         if (RULEFIX.has("restock") && actionCount > 0) { await sellJunk(state); state = await getState(); }
         await buyEarlyKit();
         state = await getState();
@@ -3513,7 +3529,7 @@ async function playGame() {
         state = await sendCommand({ type: CMD.EAT, itemIndex: f });
         continue;
       }
-      if (!ROLLOUT && state.depth >= 1) {
+      if (!RO_GATE && state.depth >= 1) {
         const r = findRecallScroll(inv);
         if (r !== null && actionCount - lastFoodRecallAt > 300) { // 300 行動空ける: 再読で取り消さない
           lastFoodRecallAt = actionCount;
@@ -4041,14 +4057,32 @@ async function playGame() {
         state = await sendCommand({ type: CMD.WALK, direction: rdir });
         continue;
       }
-      if (BLINDSAFE && isBlind && !isParalyzed && !isConfused && unseenThreat) {
+      // RULEFIX=blindsafe2 (blindsafe を含む): 見えない敵に打たれるのを待たず、盲目になった時に動く敵を近くで見たばかりなら
+      // (覚えている敵: 6 マス以内、100 ゲームターン以内) すぐ治す。盲目は深層の死亡の 43% に出ていて、その間の行動の 72% が休息だった
+      // (2026-11-01、blindsafe 採用前の基準)
+      const blindNearMem = BLINDSAFE2 && ((state.rememberedMonsters ?? []) as any[]).some((m: any) => m.distance <= 6
+        && (m.turnsAgo ?? 9999) <= 100 && m.neverMove !== true && !STATIONARY_RE.test(m.name ?? ""));
+      if ((BLINDSAFE || BLINDSAFE2) && isBlind && !isParalyzed && !isConfused && (unseenThreat || blindNearMem)) {
         const cure = findHealingPotion(inv);
         const here = tiles.find((t: any) => t.x === px && t.y === py);
         const onStair = here?.feat === FEAT.UP_STAIR || here?.feat === FEAT.DOWN_STAIR;
         if (cure !== null || onStair) {
-          addLesson(state.turn, state.depth, "状態異常", `盲目で見えない敵に${unseenHits.length}回攻撃された。${cure !== null ? "薬で盲目を治す" : "階段で離脱"}`);
+          addLesson(state.turn, state.depth, "状態異常", `盲目で${unseenThreat ? `見えない敵に${unseenHits.length}回攻撃された` : "近くに敵"}。${cure !== null ? "薬で盲目を治す" : "階段で離脱"}`);
           if (cure !== null) { healingsUsed++; state = await sendCommand({ type: CMD.QUAFF, itemIndex: cure }); }
           else { fleeAttempts++; state = await sendCommand({ type: here?.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP }); unseenHits = []; }
+          continue;
+        }
+      }
+      // RULEFIX=blindfight: 盲目で見えない敵に打たれていて、治す薬も足元の階段もない → 休まず、盲目になる前に隣で見た敵のマスを殴る
+      // (4.2 では見えなくても隣のマスは攻撃できる)。blindsafe の基準で盲目で休んで死んだ 92 局のうち 58 局は Cure を持たず、77 局は
+      // 休む間に HP が減っていた (2026-11-01)
+      if (BLINDFIGHT && isBlind && !isParalyzed && !isConfused && unseenThreat && findHealingPotion(inv) === null) {
+        const adj = ((state.rememberedMonsters ?? []) as any[]).filter((m: any) => m.distance <= 1 && (m.turnsAgo ?? 9999) <= 300)
+          .sort((a: any, b: any) => (a.turnsAgo ?? 0) - (b.turnsAgo ?? 0))[0];
+        if (adj) {
+          blindAttacks++;
+          if (blindAttacks <= 3 || blindAttacks % 20 === 0) addLesson(state.turn, state.depth, "状態異常", `盲目で打たれ、薬なし。隣で見た${adj.name}のマスを殴る (#${blindAttacks})`);
+          state = await sendCommand({ type: CMD.ATTACK, target: { x: adj.x, y: adj.y } });
           continue;
         }
       }
@@ -4221,7 +4255,7 @@ async function playGame() {
     }
 
     // === RULEFIX=devicefx: 到着した階で 1 回ずつ、地図・階段の感知と敵の感知の道具 (杖・ロッド) ===
-    if (DEVICEFX && !DFXNOARRIVE && !ROLLOUT && state.depth >= 1 && monsters.every((m: any) => m.distance > 3)) {
+    if (DEVICEFX && !DFXNOARRIVE && !RO_GATE && state.depth >= 1 && monsters.every((m: any) => m.distance > 3)) {
       const map = devMapLevel !== levelEntryTurn ? devFx(inv, "detect-stairs", undefined, 700) : null;
       const det = !map && devDetectLevel !== levelEntryTurn ? devFx(inv, "detect-monsters", e => e.sub !== "DETECT_INVISIBLE_MONSTERS", 700) : null; // 透明な敵だけの感知は到着時には使わない (209 回の無駄、2026-10-31)
       const d = map ?? det;
@@ -4251,13 +4285,26 @@ async function playGame() {
 
     // === 優先度1.8: 補給帰還 (回復薬が危険域ならWoRで町へ) ===
     // supplyWoRUsed: 同じ階で1回のみ (ループ防止)
-    if ((state.depth >= 10 || (WIDE && state.depth >= 5)) && !(p.wordRecall > 0) && !supplyWoRUsedThisLevel
+    if ((state.depth >= 10 || ((WIDE || ESCRECALL) && state.depth >= 5)) && !(p.wordRecall > 0) && !supplyWoRUsedThisLevel
         && monsters.filter((m: any) => m.distance <= 3).length === 0) {
       const cureQty2 = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0)
         .reduce((s: number, i: any) => s + i.qty, 0);
       const minCureForDepth = state.depth >= 35 ? 15 : state.depth >= 25 ? 10 : state.depth >= 20 ? 8 : state.depth >= 15 ? 5 : 3;
       // ルール基準 OR LLM判断で帰還
       let shouldRecall = state.depth >= 10 && cureQty2 < minCureForDepth;
+      let recallWhy = `回復薬${cureQty2}個 < 最低${minCureForDepth}`, escLow = false;
+      // RULEFIX=escrecall: 逃走手段が降下の基準 (Phase 3、DL15+ は 5。Teleportation は 2 枚分) を下回り、逃走の呪文も知らなければ
+      // WoR で補給 (2026-10-31 夜: DL5+ の recall/continue を 2,000 行動まで先読みすると、Phase 0-6 では今帰る方が +0.7〜0.8
+      // (死亡 -17pp、n 16)、Phase 7+ では -0.23。降下は止まるのに補給に帰らず、長居の期限まで Phase なしで戦っていた)
+      if (!shouldRecall && ESCRECALL && p.gold >= 150 && !(p.timed?.blind > 0) && !(p.timed?.confused > 0)) {
+        const ph = itemCount(inv, (i) => i.tval === TVAL.SCROLL && /Phase Door/.test(i.name ?? ""));
+        const te = itemCount(inv, (i) => i.tval === TVAL.SCROLL && /^Teleportation$/.test(i.name ?? ""))
+          + (TELESHOP ? inv.filter((i: any) => isTeleStaff(i) && deviceReady(i)).reduce((n: number, i: any) => n + Math.max(1, i.charges ?? 1), 0) : 0);
+        const minPh = state.depth >= 15 ? 5 : 3;
+        const escSpell = ((p.spells ?? []) as any[]).some((sp: any) => /Phase Door|Teleport|Blink|Portal/i.test(sp.name ?? "") && (sp.level ?? 99) <= p.level);
+        // RULEFIX=escdire: 回復薬も 2 個以下の時だけ (escwalk は死亡を 27% 減らしたが、帰る回数が多くて進みも 22% 遅れた)
+        if (ph + 2 * te < minPh && !escSpell && (!ESCDIRE || cureQty2 <= 2)) { shouldRecall = true; escLow = true; recallWhy = `逃走手段 Phase${ph} Teleport${te} < ${minPh}`; }
+      }
       const llmRecallCd = (globalThis as any).__llmRecallCd ?? 0;
       // ログモード: DL5+ でWoR所持時のみ、補給量に関係なく、1000ターンに1回
       const recallAsk = WIDE
@@ -4272,17 +4319,22 @@ async function playGame() {
         const recallSlot2 = findRecallScroll(inv);
         if (recallSlot2 !== null) {
           supplyWoRUsedThisLevel = true;
-          addLesson(state.turn, state.depth, "補給帰還",
-            `回復薬${cureQty2}個 < 最低${minCureForDepth}。WoRで補給帰還`);
+          if (escLow) escRecalls++;
+          addLesson(state.turn, state.depth, "補給帰還", `${recallWhy}。WoRで補給帰還`);
           state = await sendCommand({ type: CMD.READ, itemIndex: recallSlot2 });
           continue;
+        }
+        // RULEFIX=escwalk: WoR が無ければ上り階段で町へ (restock の補給帰還と同じ道)
+        if (escLow && ESCWALK && !restockTrip) {
+          restockTrip = true; supplyWoRUsedThisLevel = true; escWalks++;
+          addLesson(state.turn, state.depth, "補給帰還", `${recallWhy}、WoR なし。上り階段で町へ`);
         }
       }
     }
 
     // === 優先度1.9: 浅層の補給帰還 (回復薬切れ or Phase/油切れ → 上り階段で町へ) ===
     // RULEFIX=restock8: 補給帰還を DL8 まで (session 20: Phase なしの死亡 165 件のうち 113 件は DL5 以深か CL15 以上)
-    if (RULEFIX.has("restock") && !ROLLOUT && state.depth >= 1 && ((state.depth <= (RULEFIX.has("restock8") ? 8 : 4) && p.level < 15) || restockTrip)) {
+    if (RULEFIX.has("restock") && !RO_GATE && state.depth >= 1 && ((state.depth <= (RULEFIX.has("restock8") ? 8 : 4) && p.level < 15) || restockTrip)) {
       const cureN = inv.filter((i: any) => i.name?.includes("Cure") && i.qty > 0).reduce((s: number, i: any) => s + i.qty, 0);
       const escN = inv.filter((i: any) => (i.name?.includes("Phase Door") || /Flask~? of oil/i.test(i.name ?? "")) && i.qty > 0)
         .reduce((s: number, i: any) => s + i.qty, 0);
@@ -4333,7 +4385,7 @@ async function playGame() {
     if (state.depth === 0) { restockTrip = false; upRerolls = 0; upRerollDepth = -1; lightTripNoted = false; darkSteps = 0; darkFelt.clear(); }
 
     // === RULEFIX=devices: 回復の杖 (HP 半分未満)、Teleportation の杖 (HP 35% 未満で 3 マス以内に敵)、未知の杖 (安全な時) ===
-    if (DEVICES && !ROLLOUT && actionCount - lastDeviceAction >= 2) {
+    if (DEVICES && !RO_GATE && actionCount - lastDeviceAction >= 2) {
       const dev = (re: RegExp, tv: number) => inv.find((i: any) => i.tval === tv && i.aware !== false && re.test(i.name ?? "") && deviceReady(i));
       const near3 = monsters.some((m: any) => m.distance <= 3);
       let use: { it: any; why: string } | null = null;
@@ -4702,7 +4754,7 @@ async function playGame() {
     }
 
     // === RULEFIX=devices2: 起きているオーク (7 マス以内) がいれば Wand of Light。一番多くのオークを貫く向きへ ===
-    if (DEVICES2 && state.depth >= 1 && !ROLLOUT) {
+    if (DEVICES2 && state.depth >= 1 && !RO_GATE) {
       const wand = inv.find((i: any) => i.tval === TVAL.WAND && i.aware !== false && i.name === "Light" && deviceReady(i));
       const orcs = wand ? monsters.filter((m: any) => LIGHT_ORC_RE.test(m.name ?? "") && m.distance <= 10
         && hasLOS(tiles, px, py, m.x, m.y)) : [];
@@ -5546,14 +5598,14 @@ async function playGame() {
     }
 
     // === RULEFIX=worwait: 町で帰還の発動を待つ (戦闘・逃走の判断はこの前) ===
-    if (WORWAIT && !ROLLOUT && state.depth === 0 && (p.wordRecall ?? 0) > 0) {
+    if (WORWAIT && !RO_GATE && state.depth === 0 && (p.wordRecall ?? 0) > 0) {
       state = await sendCommand(monsters.length > 0 ? { type: CMD.SEARCH } : { type: CMD.REST, turns: 5 });
       continue;
     }
 
     // === RULEFIX=tryunknown: 未知の薬を安全な時に飲む ===
-    if (TRYUNKNOWN && !ROLLOUT && actionCount - lastTryAction >= 5 && (hpPct < 0.75 || state.depth === 0)
-        && monsters.every((m: any) => m.distance > 5) && (!BLINDSAFE || findHealingPotion(inv) !== null)) {
+    if (TRYUNKNOWN && !RO_GATE && actionCount - lastTryAction >= 5 && (hpPct < 0.75 || state.depth === 0)
+        && monsters.every((m: any) => m.distance > 5) && (!(BLINDSAFE || BLINDSAFE2) || findHealingPotion(inv) !== null)) {
       const pot = inv.find((i: any) => i.tval === TVAL.POTION && i.aware === false && i.qty > 0);
       if (pot) {
         lastTryAction = actionCount; potionsTried++;
@@ -5564,7 +5616,7 @@ async function playGame() {
     }
 
     // === RULEFIX=gearset: 装備や荷物の装備品が変わった時 (安全な時、20 行動に 1 回まで) に一式を見直す ===
-    if (GEARSET && !ROLLOUT && state.depth >= 1 && actionCount - gearsetAt >= 20 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
+    if (GEARSET && !RO_GATE && state.depth >= 1 && actionCount - gearsetAt >= 20 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
       const sig = [p.maxDepth, ...((p.equipment ?? []) as any[]).map((e: any) => `${e.slot}:${e.desc ?? e.name}`),
         ...(inv as any[]).filter((i: any) => gearSlotsOf(i.tval).length > 0).map((i: any) => i.desc ?? i.name)].join("|");
       if (sig !== gearsetSig) {
@@ -5574,7 +5626,7 @@ async function playGame() {
     }
 
     // === RULEFIX=invfix: 荷物が満杯、または重すぎて速度が落ちている時に、要らない物を落とす (shedRank の順。重すぎる時は重い物から) ===
-    if (INVFIX && !ROLLOUT && state.depth >= 1 && actionCount - lastShedAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
+    if (INVFIX && !RO_GATE && state.depth >= 1 && actionCount - lastShedAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
       const over = typeof p.burden === "number" && typeof p.burdenSlowAt === "number" ? p.burden - p.burdenSlowAt : 0;
       const full = typeof p.packFree === "number" && p.packFree <= 0;
       const chest = PACKLIGHT && inv.some((i: any) => i.tval === TVAL.CHEST);
@@ -5603,7 +5655,7 @@ async function playGame() {
     }
 
     // === RULEFIX=gearid: 安全な時 (5 マス以内に敵なし、HP 半分以上、10 行動に 1 回) に装備を見直す ===
-    if (GEARID && !ROLLOUT && actionCount - lastGearAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
+    if (GEARID && !RO_GATE && actionCount - lastGearAction >= 10 && hpPct >= 0.5 && monsters.every((m: any) => m.distance > 5)) {
       const equip = p.equipment ?? [];
       let pick: { item: any; why: string; rival?: any } | null = null;
       for (const it of inv) {
@@ -5986,7 +6038,7 @@ async function playGame() {
     const equipCheck = equipmentReady || veryLongOnLevel;
     // 耐性ソフトゲート: 不足分×3000ターン追加滞在で降下許可
     const resistCheck = resistOk || turnsOnLevel > resistPenaltyTurns;
-    const readyToDescend = !restockTrip && hpPct >= 0.7 && healingOk && escapeOk && resistCheck && equipCheck &&
+    const readyToDescend = !restockTrip && actionCount >= descentHoldUntil && hpPct >= 0.7 && healingOk && escapeOk && resistCheck && equipCheck &&
       ((clCheck && (enoughKills || explorationStalled || tooLongOnLevel || overleveled)) || (lowExplorationEarlyDescent && !casterGate && !deepGate));
     if (process.env.DESCENT_DEBUG && actionCount % 200 === 0) console.log(`  [DESCENT?] ready=${readyToDescend} restock=${restockTrip} hp=${hpPct.toFixed(2)} heal=${healingOk} escape=${escapeOk} resist=${resistCheck} equip=${equipCheck} cl=${clCheck} kills=${enoughKills} stalled=${explorationStalled} tooLong=${tooLongOnLevel} over=${overleveled} lowEarly=${lowExplorationEarlyDescent} stair=${!!findTile(tiles, FEAT.DOWN_STAIR)}`);
 
@@ -6000,6 +6052,7 @@ async function playGame() {
         const llmOk = await llmShouldDescend(state);
         if (LOGLIKE) await llmShouldExploreMore(state, killsThisLevel, turnsOnLevel); // ログのみ (ルールは降下)
         if (llmOk !== false) (globalThis as any)[approvedKey] = true;
+        if (llmOk === false && ROLLOUT) descentHoldUntil = actionCount + ROLLOUT_STAY_ACTIONS;
         if (llmOk === false) {
           const llmExplore = await llmShouldExploreMore(state, killsThisLevel, turnsOnLevel);
           if (llmExplore === true || llmExplore === null) {
@@ -6376,6 +6429,8 @@ async function playGame() {
   if (CORRIDOR) console.log(`  回廊: 通路へ${corridorMoves}歩, 通路で待機${corridorWaits}回`);
   if (DEVICES2) console.log(`  光の魔法棒: ${lightWandUses}回, 列のオーク計${lightWandOrcs}体`);
   if (DEVICEFX) console.log(`  devicefx: ${JSON.stringify(devFxUses)}`);
+  if (BLINDFIGHT) console.log(`  blindfight: ${blindAttacks}`);
+  if (ESCRECALL) console.log(`  escrecall: ${escRecalls} WoR, ${escWalks} walk`);
   if (LOOKAHEAD) console.log(`  lookahead: ${JSON.stringify({ ...lookStats, avg_ms: lookStats.asked ? Math.round(lookStats.ms / lookStats.asked) : 0 })}`);
 
   // 最終フレーム + 録画保存

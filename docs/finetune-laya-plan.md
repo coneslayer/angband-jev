@@ -4405,6 +4405,103 @@ level against depth, the level's monsters). Even a long-horizon oracle there gai
 it, so the model track stays closed for these decisions. Next: the same check on the strategic decisions (descend /
 stay, recall / continue, explore / descend).
 
+### Strategic decisions, escape supplies, blindsafe on deep starts (2026-10-31 night, autonomous)
+
+**Strategic long-horizon check** (same 64 games' snapshots; 206 labelled decisions, 8 paired seeds, 2,000 actions,
+u = levels gained − 3 if dead). Two rollout-only switches, neither changes normal play: `ROLLOUT_STAY_ACTIONS` (a
+forced "stay" holds descent for 500 actions; before, the rules asked again next action, at most 2 vetoes a depth) and
+`ROLLOUT_FULL_RULES=1` (long rollouts keep the play rules otherwise switched off in rollouts: worwait, restock,
+tryunknown, gearid, invfix...; without worwait a recall rollout walked down the town stairs to DL1). 81 descend
+records were unlabelled (a fresh player has lost its per-level counters, so the question isn't asked within 5 actions).
+
+| Option | Dead by 500 | Dead by 2,000 | Levels gained |
+|---|---|---|---|
+| descend now | 9.8% | 33.6% | +2.52 |
+| stay 500 actions | 7.2% | 31.1% | +2.35 |
+| recall now | 12.9% | 43.3% | +1.54 |
+| continue | 12.9% | 41.2% | +1.54 |
+
+Held-out gain of the long-horizon pick +0.073 ± 0.060; the option explains 9% of the outcome variance. Split by
+supplies, recall pays when Phase Door is low (Phase 0–2: +0.80 ± 0.34, deaths −17 points, n 11; 3–6: +0.70, n 5;
+7+: −0.23 ± 0.12, n 79). Staying never pays by CL − DL, Heals or Phase (as deepgate found).
+
+**Escape supplies.** At DL8+ the rules won't descend without escapes (Phase 3, DL15+ 5; Teleportation from DL10), but
+nothing sends the character to restock them; it fights on until the too-long timeout. And 182 of 400 deep starts hold
+no Word of Recall; 345 ran low on escapes at some point, 169 of them never holding WoR while low. New flags (off by
+default): **escrecall** (DL5+, Phase + 2 × Teleportation below that minimum, no escape spell, ≥ 150 gold: read WoR,
+once a level), **wor2** (buy 2 WoR before the Cure potions; `wor` buys 1), **escwalk** (escrecall without WoR: the
+restock trip up the stairs).
+
+**blindsafe** (from session 24, rejected then on fresh shallow games): blind and hit by something unseen, drink a Cure
+potion (they cure blindness in 4.2) or take the stairs when on them; tryunknown drinks unknown potions only while
+carrying a known Cure. The danger-score analysis put blindness in about half the deaths the score missed, and those
+states ask no decision.
+
+**Screen `runs/deep/2026-11-01-esc`** (23:39–01:10, seed 7600000, 13 slots, base as before):
+
+| Variant | Last look | Pairs | PH | z | Death ratio | Pace ratio | Decision |
+|---|---|---|---|---|---|---|---|
+| escrecall+wor2 | 2 | 303 | 1.02 | −0.17 | 0.92 | 0.94 | reject (futility) |
+| escrecall+wor2+escwalk | 1 | 151 | 1.08 | −0.25 | 0.73 | 0.78 | reject (futility) |
+| **blindsafe** | 3 | 701 | **0.68** | **3.20** | 0.85 | 1.00 | **adopt** |
+
+- Restocking escapes keeps characters alive (escwalk: death ratio 0.73) but the trip costs as much progress as it
+  saves (walking up from DL10+ especially).
+- blindsafe: deaths 683 → 676 of 702, levels gained 1.90 → 2.18, DL15+ 221 → 266, actions 3,642 → 4,335, deeper 153 /
+  shallower 99. By class (deeper / shallower): Warrior 37 / 12, Blackguard 26 / 12, Ranger 22 / 17, Paladin 19 / 15,
+  Rogue 18 / 14, Priest 12 / 13, Mage 11 / 9, Druid 8 / 7: the melee classes, which used to rest blind while unseen
+  monsters hit them. Blindness lessons 1,612 in 168 blindsafe games against 111 in base by look 1; unknown-potion
+  drinks about the same (75 / 67), so the blind cure is the active part.
+- **Confirmed** on fresh seeds (`runs/deep/2026-11-01-blind`, 01:11–02:13 EST, seed 7700000, same base): blindsafe
+  look 1 PH 0.53 (z 2.67), look 2 (303 pairs) PH 0.64, z 2.74 over the bound 2.55: **adopt** (death ratio 0.84, pace
+  1.02). blindsafe+confesc: look 1 PH 0.48, look 2 0.64, look 3 (701 pairs) PH 0.74, z 2.70: adopt, but no better
+  than blindsafe alone, so only **blindsafe joins the base**: `D24,leavelos,lightout,invfix,home,blindsafe`.
+- **blindsafe2** (off by default; includes blindsafe): also cure at once when blind with a moving monster remembered
+  within 6 squares in the last 100 game turns, not only after unseen hits. In the base arm of the main deep screen
+  blindness was present in the last 20 actions of 43% of deaths, and 72% of the actions taken blind were rests.
+  Smoke (14 starts): fires about twice as often as blindsafe; mixed outcomes.
+- **Screen `runs/deep/2026-11-01-blind2`** (02:13–02:49 EST, seed 7800000, base with blindsafe): blindsafe2 look 1 PH
+  1.17, death ratio 1.24: **reject (futility)** (curing on suspicion spends the potions needed later); confesc look 1
+  PH 1.03: **reject (futility)** (on the blindsafe base the confusion escape adds nothing).
+- **What still kills the blindsafe player** (confirmation arm, 291 deaths at 303 pairs): blindness still in 41% of the
+  last 20 actions before death, resting 70% of the time; of the 92 deaths that ended resting blind, 58 had no Cure
+  potion left and HP fell during the rests in 77. **blindfight** (off by default: blind, hit, no cure, not on stairs →
+  attack the square of the monster remembered adjacent) fired in 8 of 16 such replays (up to 29 attacks) and changed
+  no outcome beyond a few actions: dropped, not screened. Top killers: blacklock mage 23, ironfist priest 12, dark
+  hound 10, priest 9, drúadan mage 9; the rules flee the blacklock mage (speed +10) in 24% of fight decisions.
+
+**Class-specific screen `runs/deep/2026-11-01-cls`** (02:50–04:34 EST, seed 8000000, base with blindsafe, 375 starts a
+class, looks 120 / 240 / 360): **spellfx@Blackguard** look 1 PH 0.92, look 2 (243 pairs) PH 1.49, z −1.45: **reject
+(futility)**: deaths unchanged (ratio 0.98), pace 0.88 (smoke: mostly detection and buff casts), as session 25 found on
+fresh games. **devicefx (+ the three dfx flags) @Paladin** look 1 PH 0.92, look 2 0.95, look 3 (360 pairs) PH 0.94, z
+1.19 under the bound 1.71: **reject**.
+
+**escdire** (off by default, with escrecall): restock escapes only when Cure potions are also ≤ 2 (escwalk cut deaths
+27% but cost 22% pace; escapes ran low in 258 of 300 base games, low with ≤ 2 cures in 198). Screen
+`runs/deep/2026-11-01-dire` (from 04:34 EST, seed 8100000, base with blindsafe): escrecall+wor2+escdire,
+escrecall+wor2+escwalk+escdire.
+
+| Variant | Look | Pairs | PH | z | Death ratio | Pace ratio | Deaths | Levels gained | Deeper / shallower | Decision |
+|---|---|---|---|---|---|---|---|---|---|---|
+| escrecall+wor2+escdire | 3 | 700 | 0.89 | 2.68 | 1.00 | 1.04 | 668 → 670 of 702 | 1.94 → 2.01 | 35 / 15 | adopt |
+| escrecall+wor2+escwalk+escdire | 3 | 706 | 0.90 | 2.46 | 0.99 | 1.03 | 673 → 674 of 707 | 1.93 → 1.99 | 36 / 15 | adopt |
+
+But the escape recall itself fired in only 2 of 702 games (walk-up: 16 times in 15 games): with ≤ 2 Cure potions at
+DL10+ the existing supply recall (Cure < 3) fires first, so escdire only adds DL5–9. About 50 games changed, and the
+gain came from progress, not deaths. The active part is almost certainly **wor2** (2 Word of Recall bought before the
+Cure potions, so the existing Cure-based recall, the light and the food recall have a scroll to read). Without escdire,
+escrecall fired often and cost pace (escrecall+wor2 rejected above). Confirmation of **wor2 alone** on fresh seeds
+(`runs/deep/2026-11-01-wor2`, 07:02–07:19 EST, seed 8200000, base with blindsafe): look 1 (164 pairs) PH 1.00, z −0.08:
+**reject (futility)**. So the escdire screen's edge was most likely noise (as teleshop+confesc's was), unless the two
+DL5–9 escape recalls mattered. The exact arm on fresh seeds (`runs/deep/2026-11-01-dire2`, 07:20–08:33 EST, seed
+8300000): look 1 PH 0.93, look 2 0.91, look 3 (702 pairs) PH 0.96, z 0.86: **reject**. Neither escdire nor wor2 is
+adopted; the screen's z 2.68 was the second screen winner tonight to fail its confirmation (after teleshop+confesc),
+against blindsafe, which repeated (z 3.20, then 2.74 at look 2). Lesson: confirm on fresh seeds before adopting.
+
+**Night's outcome:** base is now `D24,leavelos,lightout,invfix,home,blindsafe` (casters +spellfx,spellfight;
+Paladin/Ranger/Rogue +spellfx). Rejected: lookahead, escrecall(+wor2, +escwalk), blindsafe2, confesc (on the new base),
+spellfx@Blackguard, devicefx@Paladin, escdire, wor2. Dropped without a screen: blindfight.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
