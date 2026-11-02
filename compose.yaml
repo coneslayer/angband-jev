@@ -1,0 +1,78 @@
+# Local stack: Kev decision model + Angband game server + busho AI player.
+#   docker compose up -d --build              # kev + game
+#   docker compose --profile play run --rm busho
+name: angband-jev
+
+services:
+  kev:
+    build: docker/kev
+    environment:
+      KEV_RUN: ${KEV_RUN:-jaredpalmer/kev-0.8b}
+      KEV_DEVICE: ${KEV_DEVICE:-cuda}
+      KEV_DTYPE: ${KEV_DTYPE:-bf16}
+      KEV_API_KEY: ${KEV_API_KEY:-}
+    volumes:
+      - kev-models:/models
+    ports:
+      - "127.0.0.1:8009:8009"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import os, urllib.request
+          k = os.environ.get("KEV_API_KEY")
+          r = urllib.request.Request("http://localhost:8009/v1/models", headers={"Authorization": f"Bearer {k}"} if k else {})
+          urllib.request.urlopen(r, timeout=5)
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 600s  # first start downloads the weights
+    restart: unless-stopped
+
+  game:
+    build:
+      context: .
+      dockerfile: docker/angband/Dockerfile
+    command: ["npx", "tsx", "packages/@angband/core/src/borg/ai-server.ts", "--port", "3000", "--seed", "${SEED:-42}"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/state').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  busho:
+    build:
+      context: .
+      dockerfile: docker/angband/Dockerfile
+    profiles: [play]
+    command: ["npx", "tsx", "tools/busho-player.ts"]
+    environment:
+      API: http://game:3000
+      LLM_BACKEND: ${LLM_BACKEND:-systemone}
+      SYSTEMONE_URL: ${SYSTEMONE_URL:-http://kev:8009}
+      SYSTEMONE_API_KEY: ${SYSTEMONE_API_KEY:-${KEV_API_KEY:-}}
+      SYSTEMONE_MODEL: ${SYSTEMONE_MODEL:-kev-latest}
+      DECISION_MIN_CONFIDENCE: ${DECISION_MIN_CONFIDENCE:-0.3}
+    volumes:
+      - ./runs:/tmp  # busho-replay.jsonl, busho-wisdom.jsonl, busho-play-report.json
+    depends_on:
+      kev:
+        condition: service_healthy
+      game:
+        condition: service_healthy
+
+volumes:
+  kev-models:

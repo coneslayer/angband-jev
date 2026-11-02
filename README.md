@@ -49,6 +49,20 @@ npx tsx tools/busho-player.ts
 open tools/replay-viewer.html  # drag /tmp/busho-replay.jsonl
 ```
 
+### Docker + Kev decision model
+
+Instead of free-text LLM answers, the player can ask a System One decision model typed questions (yes/no, choice) and act on calibrated probabilities. [Kev](https://github.com/jaredpalmer/kev) runs locally and serves TypeSafe's `/v1/systemone` API. Decisions below `DECISION_MIN_CONFIDENCE` fall back to the rules.
+
+```bash
+cp .env.example .env                          # optional; defaults work as-is
+docker compose up -d --build                  # kev (GPU, :8009) + game server (:3000)
+docker compose --profile play run --rm busho  # play one game; output in ./runs
+```
+
+- Model: `KEV_RUN` (default `jaredpalmer/kev-0.8b`, fits a 4 GB GPU). `jaredpalmer/kev-4b` is more accurate but needs ~16 GB of free GPU memory. Weights are cached in the `kev-models` volume.
+- Hosted Jev: set `SYSTEMONE_URL=https://api.typesafe.ai`, `SYSTEMONE_MODEL=jev-latest` and `SYSTEMONE_API_KEY`.
+- Without Docker: `SYSTEMONE_URL=http://localhost:8009 npx tsx tools/busho-player.ts`.
+
 ### LLM Hybrid Architecture
 
 ```
