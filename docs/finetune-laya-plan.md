@@ -4502,6 +4502,15 @@ against blindsafe, which repeated (z 3.20, then 2.74 at look 2). Lesson: confirm
 Paladin/Ranger/Rogue +spellfx). Rejected: lookahead, escrecall(+wor2, +escwalk), blindsafe2, confesc (on the new base),
 spellfx@Blackguard, devicefx@Paladin, escdire, wor2. Dropped without a screen: blindfight.
 
+## Headroom first (plan from 2026-11-09)
+
+The working plan from here on is `docs/plan-2026-11-09.md`. The project's question (user, 2026-11-09) is what value
+a decision model brings to an automated player; a stronger player is the instrument. The plan replaces one-rule
+screens on deep starts with: rule knockouts (does a decision model win back a hand rule's known gain?), a
+whole-life scoreboard, a headroom map made with test-only cheats, a Borg reference run, factorial screens, and then
+the model on the decisions that pass a headroom gate, measured rung by rung against fixed settings, hand rules and
+trees.
+
 ## C Angband engine: spike (2026-10-15)
 
 The question: should games run on C Angband 4.2.6 instead of the TS port? This spike ran
