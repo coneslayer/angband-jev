@@ -138,8 +138,10 @@ class DeepScreen(D17.Screen):
 
 def play_one(run, stage, s, arm, rulefix, slot, deadline):
     maxa, cap = (1500, 240) if run.smoke else (run.maxa, run.cap_s)
+    cheat = [f[len("cheat:"):].replace("+", ",") for f in rulefix.split(",") if f.startswith("cheat:")]
+    rulefix = ",".join(f for f in rulefix.split(",") if not f.startswith("cheat:"))
     env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rulefix,
-           "DANGER_LOG": "1"}
+           "DANGER_LOG": "1", **({"CHEAT": ",".join(cheat)} if cheat else {})}
     if "lookahead" in rulefix.split(","):
         # rollout servers for this slot's live lookahead (busho RULEFIX=lookahead): 7300+, W ports per slot
         w = run.la_workers
@@ -172,7 +174,10 @@ def stage_deep(run, name, deadline):
     for v in run.variants:  # "name" or "name@Class1/Class2": the variant only on those classes' starts
         arm, _, cls = v.partition("@")
         only = set(cls.split("/")) if cls else None
-        variants[arm] = (arm.replace("+", ","), (lambda s, only=only: only is None or s["cls"] in only))  # a+b: both flags
+        # a+b: both flags; cheat:a+b (phase 1, docs/plan-2026-11-09.md): the test-only grants a and b (CHEAT, server
+        # --cheats) on the base's flags, kept whole here and split off in play_one
+        flags = arm if arm.startswith("cheat:") else arm.replace("+", ",")
+        variants[arm] = (flags, (lambda s, only=only: only is None or s["cls"] in only))
     res = DeepScreen(run, name, ss, base_of, variants, SMOKE_LOOKS if run.smoke else run.looks).run_until(deadline)
     res["adopted"] = [v for v in variants if (res["closed"].get(v) or {}).get("decision") == "adopt"]
     return res

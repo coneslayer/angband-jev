@@ -28,6 +28,10 @@ game becomes a list of stage segments, each ending in an advance, a death or the
 
 Usage: hazard.py table DIR...                     rates and C for the games in the DIRs (one arm)
        hazard.py compare BASE_DIR VAR_DIR [--ref DIR...]  paired comparison of two arms on their common starts
+       hazard.py reach RUN [--ref RUN] [--k 15]       whole-life scoreboard of a harvest run's fresh games (phase 0,
+                                                       docs/plan-2026-11-09.md): per class, the share reaching DL5/10/
+                                                       15/20, death per level in DL1-9 and DL10-14, C(k), and PH(k)
+                                                       against the reference run's fresh games; 80% bootstrap intervals
        hazard.py screen BASE_DIR VAR_DIR [--look K]   the sequential decision on their common complete starts
                                                        (default: the last look the pair count has reached)
 """
@@ -452,6 +456,59 @@ def simulate(n, death_rr=1.0, pace_rr=1.0, seed=0, table=BASELINE_14, bank_share
     return base, var
 
 
+# ── Whole-life scoreboard (phase 0) ──
+
+REACH = (5, 10, 15, 20)
+
+
+def reach_stats(games, ref=None, k=15):
+    """Shares reaching DL5/10/15/20 (deepest stage >= d), death per level 1 - (s_hi / s_lo)^(1 / levels) for DL1-9
+    (from reaching DL1 to reaching DL10) and DL10-14 (DL10 to DL15), C(k) from a fresh start, and, with a reference
+    list of games, PH(k): the stage-stratified death and advance ratios against the reference applied to its table."""
+    n = len(games)
+    out = {"games": n}
+    if not n: return out
+    share = lambda d: sum(g["end"] >= d for g in games) / n  # noqa: E731
+    for d in REACH: out[f"DL{d}"] = share(d)
+    s1, s10, s15 = share(1), share(10), share(15)
+    # undefined (nan) when no game reaches the deeper level: the rate is then only bounded, not measured
+    out["death_lvl_1_9"] = 1 - (s10 / s1) ** (1 / 9) if s1 > 0 and s10 > 0 else float("nan")
+    out["death_lvl_10_14"] = 1 - (s15 / s10) ** (1 / 5) if s10 > 0 and s15 > 0 else float("nan")
+    t = rates(games)
+    out[f"C{k}"] = ctable(t)[k]
+    if ref:
+        tr = rates(ref)
+        dr, pr = mh_ratio(tr, t, 1), mh_ratio(tr, t, 2)
+        out["death_rr"], out["pace_rr"] = dr, pr
+        out[f"PH{k}"] = ctable(scaled(tr, dr, pr))[k] / ctable(tr)[k] if dr > 0 and pr > 0 else float("nan")
+    return out
+
+
+def reach(games, ref=None, k=15, n_boot=400, seed=0):
+    """reach_stats with an 80% bootstrap interval for each number (games resampled; the reference too)."""
+    point, rng, boots = reach_stats(games, ref, k), random.Random(seed), []
+    for _ in range(n_boot):
+        gb = [rng.choice(games) for _ in games]
+        rb = [rng.choice(ref) for _ in ref] if ref else None
+        boots.append(reach_stats(gb, rb, k))
+    res = {"games": point["games"]}
+    for key, v in point.items():
+        if key == "games": continue
+        b = sorted(x[key] for x in boots if isinstance(x.get(key), float) and math.isfinite(x[key]))
+        res[key] = {"v": v, "ci80": (b[int(0.1 * len(b))], b[int(0.9 * len(b)) - 1]) if b else None}
+    return res
+
+
+def fresh_games(run):
+    """Fresh games of a harvest run (RUN/games/<seed>-<Class>, not branches), each with its class."""
+    d, out = os.path.join(run, "games"), []
+    for name in sorted(os.listdir(d)):
+        if name.endswith("-branch"): continue
+        g = parse_game(os.path.join(d, name))
+        if g: g["cls"] = name.split("-", 1)[1]; out.append(g)
+    return out
+
+
 def run_screen(base, var, looks=LOOKS, sd="delta", **kw):
     """Play the sequential design on starts in id order (the order they were simulated): the result of the first
     look that stops, with the pairs it used."""
@@ -475,7 +532,17 @@ def show_table(t, C, upto=15):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ("table", "compare", "screen"): sys.exit(__doc__)
+    if not a or a[0] not in ("table", "compare", "screen", "reach"): sys.exit(__doc__)
+    if a[0] == "reach":
+        k = int(a[a.index("--k") + 1]) if "--k" in a else 15
+        games = fresh_games(a[1])
+        ref = fresh_games(a[a.index("--ref") + 1]) if "--ref" in a else None
+        classes = sorted({g["cls"] for g in games})
+        res = {c: reach([g for g in games if g["cls"] == c], [g for g in ref if g["cls"] == c] if ref else None, k)
+               for c in classes}
+        res["all"] = reach(games, ref, k)
+        print(json.dumps(res, indent=1))
+        return
     if a[0] == "screen":
         if len(a) < 3: sys.exit(__doc__)
         look = int(a[a.index("--look") + 1]) if "--look" in a else None

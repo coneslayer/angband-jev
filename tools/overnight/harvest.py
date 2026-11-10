@@ -123,6 +123,7 @@ class Harvest:
                     self.running_branches += 1
                     self.run.save()
                     return seed, m.get("class") or "Warrior", f, root
+            if self.a.fresh_cap and self.h["rot"] >= self.a.fresh_cap * len(self.classes): return None  # --fresh-cap reached
             cls = self.fresh_class(lin)
             self.h["rot"] += 1
             self.running_fresh[cls] += 1
@@ -136,7 +137,9 @@ class Harvest:
                                       class_extras(self.a.class_extra).get(cls, "")]))
 
     def play(self, slot, deadline):
-        seed, cls, restore, root = self.next_job()
+        job = self.next_job()
+        if job is None: return False
+        seed, cls, restore, root = job
         env = {**D8.arm_env({"name": "harvest", "ckpt": None, "guard": "", "caution": 1.0}, {}),
                "RULEFIX": self.rulefix(cls), "SAVEPOINT_DIR": "/bank", "SAVEPOINT_MIN_DEPTH": str(self.a.min_depth)}
         out = self.run.d("games", f"{seed}-{cls}" + ("-branch" if restore else ""))
@@ -148,7 +151,7 @@ class Harvest:
                 if restore: self.running_branches -= 1
                 else:
                     self.running_fresh[cls] -= 1
-                    self.h.setdefault("fresh_done", {})[cls] = self.h["fresh_done"].get(cls, 0) + 1
+                    fd = self.h.setdefault("fresh_done", {}); fd[cls] = fd.get(cls, 0) + 1
         for f in ("busho-replay.jsonl", "snapshots", "decisions.jsonl"):
             p = os.path.join(out, f)
             if os.path.isdir(p): shutil.rmtree(p, ignore_errors=True)
@@ -209,6 +212,7 @@ def main():
     ap.add_argument("--branches", type=int, default=3); ap.add_argument("--lineage-cap", type=int, default=12)
     ap.add_argument("--quota10", type=int, default=40); ap.add_argument("--quota15", type=int, default=15)
     ap.add_argument("--rotate", action="store_true", help="fresh classes in rotation and branches deepest first (the pilot)")
+    ap.add_argument("--fresh-cap", type=int, default=0, help="with --rotate: stop after this many fresh games a class (0: until the deadline)")
     a = ap.parse_args()
     if a.smoke: a.maxa, a.cap_s, a.min_depth, a.branch_depth = 3000, 240, 1, 2
     if free_gb(".") < D15.DISK_START_GB:
@@ -230,7 +234,7 @@ def main():
         while not run.stopped() and time.time() < deadline - 5 * 60 and not disk_low(run):
             if slot >= D.THROTTLED_SLOTS and os.path.exists(os.path.join(run.path, "THROTTLE")):
                 time.sleep(30); continue
-            hv.play(slot, deadline)
+            if hv.play(slot, deadline) is False: return
 
     try:
         with cf.ThreadPoolExecutor(run.slots) as ex:

@@ -17,7 +17,7 @@ export const DECISION_FORMAT_VERSION_ROLES = 4;
 
 import { resourceLines } from "../spell-roles.js";
 
-export type DecisionType = "fight" | "tactic" | "recall" | "descend" | "explore" | "equip";
+export type DecisionType = "fight" | "tactic" | "recall" | "descend" | "explore" | "equip" | "blind";
 export const DECISION_TYPES: DecisionType[] = ["fight", "tactic", "recall", "descend", "explore", "equip"];
 
 export type ChoiceQuestion = { type: "choice"; instructions: string; criteria: Record<string, string> };
@@ -52,6 +52,18 @@ export const QUESTIONS: Record<DecisionType, ChoiceQuestion> = {
     criteria: {
       recall: "read Word of Recall and return to town to restock",
       continue: "stay in the dungeon and keep going",
+    },
+  },
+  // M1 (docs/plan-2026-11-09.md): blind with a threat. Options are offered only when they can be carried out (cure: a
+  // potion that cures blindness is carried; stairs: standing on them), so blindDecision filters this list
+  blind: {
+    type: "choice",
+    instructions: "My character is blind, so it can't see monsters, read scrolls or cast spells, and something may be attacking it. Decide what to do this turn.",
+    criteria: {
+      rest: "wait it out: rest until the blindness passes",
+      cure: "drink a potion that cures blindness (Cure Light, Serious or Critical Wounds)",
+      stairs: "take the stairs I am standing on to leave the level",
+      walk: "step away from where the threat was last seen",
     },
   },
   descend: {
@@ -259,4 +271,31 @@ export function equipDecision(state: any, current: any, candidate: any): Decisio
     `Current: ${describeItem(current)}`,
     `Candidate: ${describeItem(candidate)}`,
   ]);
+}
+
+export interface BlindCtx {
+  hits: number;           // HP drops since the blindness began
+  hpLost: number;         // HP lost since then
+  turnsBlind: number;     // player turns blind so far
+  cures: Record<string, number>;  // potions that cure blindness, by kind
+  onStairs: boolean;
+  canWalk: boolean;
+  messages: string[];     // the last messages, as the message line shows them
+  near: string[];         // remembered monsters within 7 (name, distance, turns ago)
+}
+
+/** M1: blind with a threat. Only the options that can be carried out are offered. */
+export function blindDecision(state: any, b: BlindCtx): DecisionRequest {
+  const req = build("blind", state, [
+    `Blind for ${b.turnsBlind} turns; hit ${b.hits} times since, losing ${b.hpLost} HP`,
+    `Potions that cure blindness: ${Object.entries(b.cures).map(([k, n]) => `${k} x${n}`).join(", ") || "none"}`,
+    `Standing on stairs: ${b.onStairs ? "yes" : "no"}`,
+    `Remembered monsters within 7: ${b.near.join(", ") || "none"}`,
+    `Recent messages: ${b.messages.join(" | ") || "none"}`,
+  ]);
+  const all = req.questions.decision.criteria;
+  const keep = Object.keys(all).filter(o => o === "rest" || (o === "cure" && Object.keys(b.cures).length > 0)
+    || (o === "stairs" && b.onStairs) || (o === "walk" && b.canWalk));
+  req.questions.decision = { ...req.questions.decision, criteria: Object.fromEntries(keep.map(o => [o, all[o]!])) };
+  return req;
 }

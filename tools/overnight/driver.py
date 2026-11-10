@@ -147,6 +147,7 @@ def start_c_server(run, name, port, env, seed, restore=None):
     own = [] if restore else [f"-dsave={udir}", f"-dscores={udir}", f"-dpanic={udir}", "-n"]
     args = [C_BIN, "-mhttp", f"-duser={udir}"] + own + ["--", "--port", str(port), "--seed", str(seed)]
     if restore: args += ["--load", c_savepoint_files(udir, restore)]
+    if env.get("CHEATS"): args += ["--cheats"]  # phase 1 headroom map only: the game accepts POST /cheat
     else:
         for k, flag in (("RACE", "--race"), ("CLASS", "--class")):
             if env.get(k) and env[k] != "random": args += [flag, env[k]]
@@ -295,7 +296,7 @@ def play_game(run, tag, slot, seed, cls, env, out_dir, wall_cap, max_actions, po
     srv, ply = f"ovn-{tag}-s{slot}", f"ovn-{tag}-p{slot}"
     out_dir = os.path.abspath(out_dir)
     os.makedirs(out_dir, exist_ok=True)
-    senv = {"VANILLA": "1", "STAT_FLOOR": "0", "RACE": "random", "CLASS": cls}
+    senv = {"VANILLA": "1", "STAT_FLOOR": "0", "RACE": "random", "CLASS": cls, **({"CHEATS": "1"} if env.get("CHEAT") else {})}
     if not start_server(run, srv, port, senv, seed, restore if ENGINE == "c" else None):
         stop_server(srv); return {"seed": seed, "class": cls, "error": "server failed to start", "restore": restore}
     if restore and ENGINE != "c":

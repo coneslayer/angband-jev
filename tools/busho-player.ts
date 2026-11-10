@@ -7,9 +7,9 @@
  */
 
 import {
-  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, DECISION_FORMAT_VERSION_ROLES, DECISION_ROLES, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision,
+  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, DECISION_FORMAT_VERSION_ROLES, DECISION_ROLES, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision, blindDecision,
 } from "./decision/index.js";
-import type { DecisionType, DecisionRequest } from "./decision/index.js";
+import type { DecisionType, DecisionRequest, BlindCtx } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
 import { adaptPlayerView, estimatedMaxHp } from "./honest-view.js";
 import { DangerLogger, DANGER_RECORD_VERSION } from "./danger/record.js";
@@ -798,6 +798,30 @@ const BLINDSAFE = RULEFIX.has("blindsafe");
 const BLINDSAFE2 = RULEFIX.has("blindsafe2");
 const BLINDFIGHT = RULEFIX.has("blindfight");
 let blindAttacks = 0;
+const BLINDASK = RULEFIX.has("blindask");
+const CHEAT = process.env.ROLLOUT_FORCE ? "" : (process.env.CHEAT ?? "").trim(); // rollouts never cheat
+let blindEp: { start: number; hp0: number; lastHp: number; hits: number; asks: number; askedAtHits: number } | null = null;
+let blindAsks = 0;
+const blindActs: Record<string, number> = {};
+const BLIND_CURE_ORDER = ["Cure Light Wounds", "Cure Serious Wounds", "Cure Critical Wounds", "Healing", "*Healing*", "Life"];
+/** Potions known to cure blindness, weakest first (4.2: all the Cure potions and the Healing ones) */
+function blindCures(inv: any[]): any[] {
+  return inv.filter((i: any) => i.tval === TVAL.POTION && i.aware !== false && (i.qty ?? 1) > 0 && BLIND_CURE_ORDER.includes(i.name ?? ""))
+    .sort((a: any, b: any) => BLIND_CURE_ORDER.indexOf(a.name) - BLIND_CURE_ORDER.indexOf(b.name));
+}
+/** M1 "walk": the passable neighbour farthest from the remembered monsters within 7 (any one if none), or null */
+function blindWalkDir(tiles: any[], px: number, py: number, mem: any[]): number | null {
+  const off: Record<number, [number, number]> = { 1: [-1, 1], 2: [0, 1], 3: [1, 1], 4: [-1, 0], 6: [1, 0], 7: [-1, -1], 8: [0, -1], 9: [1, -1] };
+  let best: number | null = null, bestD = -1;
+  for (const d of ALL_DIRS) {
+    const [dx, dy] = off[d]!;
+    const nx = px + dx, ny = py + dy;
+    if (!isPassable(tiles, nx, ny) || mem.some((m: any) => m.x === nx && m.y === ny)) continue;
+    const md = mem.length ? Math.min(...mem.map((m: any) => Math.max(Math.abs(m.x - nx), Math.abs(m.y - ny)))) : 0;
+    if (md > bestD) { bestD = md; best = d; }
+  }
+  return best;
+}
 // RULEFIX=teleshop: 4.2 の店は Teleportation の巻物を売らない (魔法店と闇市の Teleportation の杖だけ)。最深 DL5 以上で使える杖がなければ
 // 買い、売らず落とさず、Teleportation の巻物を探す所すべてで巻物がない (または読めない: 盲目・混乱) 時は杖を使う。杖は盲目でも混乱中でも使える
 const TELESHOP = RULEFIX.has("teleshop");
@@ -1466,6 +1490,8 @@ const [ROLLOUT_TYPE, ROLLOUT_OPTION] = ROLLOUT_FORCE.split(":");
 const ROLLOUT_HORIZON = Number(process.env.ROLLOUT_HORIZON ?? "150");
 const ROLLOUT_MAX_WAIT = Number(process.env.ROLLOUT_MAX_WAIT ?? "5");
 let rolloutFired = false;
+const ROLLOUT_STICKY = process.env.ROLLOUT_STICKY === "1";
+const DECISION_LOG_TYPES = new Set((process.env.DECISION_LOG_TYPES ?? "").split(",").map((t) => t.trim()).filter(Boolean));
 // ROLLOUT_FULL_RULES=1: 長いロールアウト (戦略の判断) では、普段のプレイの規則 (worwait、restock、tryunknown、gearid、invfix、
 // 食料切れの帰還など) をロールアウト中も使う。既定ではロールアウト中は止める (短いロールアウトの副作用を避けるため)。
 // 記録・セーブポイント・開始直後の買い物は常に止める
@@ -1521,6 +1547,7 @@ interface DecideCtx {
   rules: string | null;      // ルールが実際に取る選択 (ログ用)
   monster?: any; enemies?: any[]; hpPct?: number;
   kills?: number; turns?: number; current?: any; candidate?: any;
+  blind?: BlindCtx;
 }
 
 function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
@@ -1531,6 +1558,7 @@ function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
     case "descend": return descendDecision(c.state);
     case "explore": return exploreDecision(c.state, c.kills ?? 0, c.turns ?? 0);
     case "equip": return equipDecision(c.state, c.current, c.candidate);
+    case "blind": return blindDecision(c.state, c.blind!);
   }
 }
 
@@ -1650,8 +1678,13 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
       console.log(`  [ROLLOUT] ${type} 強制: ${ROLLOUT_OPTION} (rules=${c.rules})`);
       return ROLLOUT_OPTION!;
     }
+    // ROLLOUT_STICKY=1: 強制した選択肢を、その後の同じ型の判断でも毎回選ぶ (方策としての価値。1 回だけ覆す値は
+    // ルールが次にまた元の選択をするので小さく出る: session 13 の罠、docs/plan-2026-11-09.md の M1)
+    if (ROLLOUT_STICKY && rolloutFired && type === ROLLOUT_TYPE) return ROLLOUT_OPTION!;
     return null;
   }
+  // DECISION_LOG_TYPES=blind: この型だけ記録する (スナップショットの量を抑える。他の型はルールのまま、記録なし)
+  if (DECISION_LOG && DECISION_LOG_TYPES.size > 0 && !DECISION_LOG_TYPES.has(type)) return null;
   if (DECISION_LOG) {
     const req = buildRequest(type, c);
     if (LOOKAHEAD && LOOKAHEAD_TYPES.has(type) && (c.state?.depth ?? 0) >= 1
@@ -1763,7 +1796,7 @@ let snapshotMissing = false; // 404 → 以後呼ばない
 let decisionGameId: string | null = null;
 
 async function takeSnapshot(gameId: string, turn: number, type: DecisionType): Promise<string | null> {
-  if (snapshotMissing) return null;
+  if (snapshotMissing || process.env.DECISION_SNAPSHOT === "0") return null; // DECISION_SNAPSHOT=0: log without snapshots (determinism tests)
   const warn = (msg: string) => {
     if (!snapshotWarned) { snapshotWarned = true; console.log(`  [DECISION_LOG] snapshot unavailable (${msg}); storing null`); }
   };
@@ -3150,6 +3183,15 @@ async function playGame() {
     }
   }
 
+  // CHEAT=a,b (phase 1 headroom map, test only): the grant once, before the first action (the server needs --cheats).
+  // A restore starts a new server process, so the grant is sent again by this new player. Cheat games never feed
+  // training or pooled tables (their danger-log header records the grant)
+  if (CHEAT) {
+    const r = await fetch(`${API}/cheat`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ grant: CHEAT }) }).catch((e) => ({ ok: false, status: String(e) } as any));
+    console.log(`  [CHEAT] ${CHEAT}: ${r.ok ? "granted" : `refused (${r.status})`}`);
+    if (!r.ok) process.exit(3);
+  }
   let state = await getState();
   if (FLOORPICK) await fetch(`${API}/option`, { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "pickup_inven", value: 0 }) }).catch(() => null);
@@ -3189,7 +3231,7 @@ async function playGame() {
     dangerLogger = new DangerLogger(DANGER_LOG_PATH, {
       h: 1, v: DANGER_RECORD_VERSION, engine: state.engine ?? "ts", view: state.view ?? "omniscient",
       class: state.player?.class ?? "?", race: state.player?.race ?? "?", seed: String(GAME_SEED ?? ""),
-      rulefix: [...RULEFIX].join(","), roles: ROLE_ORDER,
+      rulefix: [...RULEFIX].join(","), roles: ROLE_ORDER, ...(CHEAT ? { cheat: CHEAT } : {}),
       ...(DANGER_MODELS.length ? { model: process.env.DANGER_MODEL } : {}),
     });
   }
@@ -3978,6 +4020,10 @@ async function playGame() {
     const isConfused = p.timed.confused > 0;
     const isBlind = p.timed.blind > 0;
     const isParalyzed = p.timed.paralyzed > 0;
+    // M1: the current blind spell (start, HP then, hits since: HP drops between actions while blind)
+    if (!isBlind) blindEp = null;
+    else if (!blindEp) blindEp = { start: actionCount, hp0: p.hp, lastHp: p.hp, hits: 0, asks: 0, askedAtHits: 0 };
+    else { if (p.hp < blindEp.lastHp) blindEp.hits++; blindEp.lastHp = p.hp; }
     if (isConfused || isBlind || isParalyzed) {
       const status = isConfused ? "混乱" : isBlind ? "盲目" : "麻痺";
       const nearbyEnemies = monsters.filter((m: any) => m.distance <= 2);
@@ -4060,6 +4106,44 @@ async function playGame() {
       // RULEFIX=blindsafe2 (blindsafe を含む): 見えない敵に打たれるのを待たず、盲目になった時に動く敵を近くで見たばかりなら
       // (覚えている敵: 6 マス以内、100 ゲームターン以内) すぐ治す。盲目は深層の死亡の 43% に出ていて、その間の行動の 72% が休息だった
       // (2026-11-01、blindsafe 採用前の基準)
+      // RULEFIX=blindask (M1, docs/plan-2026-11-09.md): blind with a threat → ask the "blind" question. Asked at the first
+      // such action of a blind spell, then after each new hit, at most 6 times a spell. "rest" carries on as the rules
+      // would (null); the other answers are carried out here. With the rules policy and no model the play is unchanged.
+      if (BLINDASK && isBlind && !isParalyzed && !isConfused && DECISION_ON && blindEp) {
+        const mem = ((state.rememberedMonsters ?? []) as any[]).filter((m: any) => m.distance <= 7);
+        const threatMem = mem.some((m: any) => m.distance <= 1 || ((m.turnsAgo ?? 9999) <= 100 && m.neverMove !== true
+          && !STATIONARY_RE.test(m.name ?? "")));
+        // a rollout's first ask: the record was in the class when saved, but a restored game has lost the bridge's
+        // monster memory (in-process, not in the savefile) and the hits counted so far, so it asks whenever blind
+        const inClass = (ROLLOUT && !rolloutFired) || blindEp.hits > 0 || unseenThreat || threatMem || monsters.some((m: any) => m.distance <= 1);
+        if (inClass && blindEp.asks < 6 && (blindEp.asks === 0 || blindEp.hits > blindEp.askedAtHits)) {
+          blindEp.asks++; blindEp.askedAtHits = blindEp.hits; blindAsks++;
+          const here = tiles.find((t: any) => t.x === px && t.y === py);
+          const onStairs = here?.feat === FEAT.UP_STAIR || here?.feat === FEAT.DOWN_STAIR;
+          const cures: Record<string, number> = {};
+          for (const it of blindCures(inv)) cures[it.name] = (cures[it.name] ?? 0) + (it.qty ?? 1);
+          const walkDir = blindWalkDir(tiles, px, py, mem);
+          const ctx: BlindCtx = { hits: blindEp.hits, hpLost: Math.max(0, blindEp.hp0 - p.hp), turnsBlind: actionCount - blindEp.start,
+            cures, onStairs, canWalk: walkDir !== null,
+            messages: ((state.messages ?? []) as any[]).slice(-3).map((m: any) => String(m)),
+            near: mem.slice(0, 5).map((m: any) => `${m.name}(dist${m.distance}, ${Math.round((m.turnsAgo ?? 0) / 10)} turns ago)`) };
+          const ans = await decide("blind", { state, rules: "rest", blind: ctx });
+          if (ans && ans !== "rest") {
+            const cure = blindCures(inv)[0];
+            const cmd = ans === "cure" && cure ? { type: CMD.QUAFF, itemIndex: cure.slot }
+              : ans === "stairs" && onStairs ? { type: here?.feat === FEAT.DOWN_STAIR ? CMD.GO_DOWN : CMD.GO_UP }
+              : ans === "walk" && walkDir !== null ? { type: CMD.WALK, direction: walkDir } : null;
+            if (cmd) {
+              blindActs[ans] = (blindActs[ans] ?? 0) + 1;
+              addLesson(state.turn, state.depth, "盲目の判断", `盲目 (被弾${ctx.hits}回)。${ans}`);
+              if (ans === "cure") healingsUsed++;
+              if (ans === "stairs") { fleeAttempts++; unseenHits = []; }
+              state = await sendCommand(cmd);
+              continue;
+            }
+          }
+        }
+      }
       const blindNearMem = BLINDSAFE2 && ((state.rememberedMonsters ?? []) as any[]).some((m: any) => m.distance <= 6
         && (m.turnsAgo ?? 9999) <= 100 && m.neverMove !== true && !STATIONARY_RE.test(m.name ?? ""));
       if ((BLINDSAFE || BLINDSAFE2) && isBlind && !isParalyzed && !isConfused && (unseenThreat || blindNearMem)) {
@@ -6430,6 +6514,7 @@ async function playGame() {
   if (DEVICES2) console.log(`  光の魔法棒: ${lightWandUses}回, 列のオーク計${lightWandOrcs}体`);
   if (DEVICEFX) console.log(`  devicefx: ${JSON.stringify(devFxUses)}`);
   if (BLINDFIGHT) console.log(`  blindfight: ${blindAttacks}`);
+  if (BLINDASK) console.log(`  blindask: ${blindAsks} asked, acted ${JSON.stringify(blindActs)}`);
   if (ESCRECALL) console.log(`  escrecall: ${escRecalls} WoR, ${escWalks} walk`);
   if (LOOKAHEAD) console.log(`  lookahead: ${JSON.stringify({ ...lookStats, avg_ms: lookStats.asked ? Math.round(lookStats.ms / lookStats.asked) : 0 })}`);
 

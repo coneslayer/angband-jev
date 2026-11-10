@@ -53,7 +53,9 @@ const GAMEDATA = opt("gamedata", "GAMEDATA", "packages/@angband/core/gamedata")!
 // C Angband engine: records whose snapshot is a C savefile ("c-savefile-1") are restored by starting a fresh
 // C game process per run on the worker's port (--load <savefile> --seed k; ~80 ms), instead of POST /restore.
 const C_BIN = opt("c-bin", "ANGBAND_C", "/home/mph/src/angband-c/build-rd/game/angband")!;
-const C_TMP = opt("c-tmp", "ROLLOUT_C_TMP", path.join(path.dirname(path.resolve(OUT)), "c-rollout-tmp"))!;
+// absolute: each C game runs with its cwd in the binary's folder, so a relative --load path would miss the savefile
+// and the engine would silently start a new character instead (2026-11-10: a whole label chain came back unlabelled)
+const C_TMP = path.resolve(opt("c-tmp", "ROLLOUT_C_TMP", path.join(path.dirname(path.resolve(OUT)), "c-rollout-tmp"))!);
 const HORIZON: Record<string, number> = { ...DEFAULT_HORIZON };
 for (const kv of (opt("horizon", "HORIZON", "") ?? "").split(",").filter(Boolean)) { const [t, h] = kv.split("="); HORIZON[t] = Number(h); }
 
@@ -211,11 +213,12 @@ async function http(url: string, method: string, body?: string): Promise<any> {
   return JSON.parse(t);
 }
 
-function runPlayer(api: string, type: string, option: string, horizon: number, k: number): Promise<{ result: any | null; ms: number; err?: string }> {
+function runPlayer(api: string, type: string, option: string, horizon: number, k: number, rulefix?: string): Promise<{ result: any | null; ms: number; err?: string }> {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const child = spawn(PLAYER_CMD[0], PLAYER_CMD.slice(1), {
-      env: { ...process.env, API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic", ROLLOUT_CHECKPOINTS: CHECKPOINTS,
+      // a record's own "rulefix" (its game's flags, e.g. the class extras) wins over the environment's
+      env: { ...process.env, ...(rulefix ? { RULEFIX: rulefix } : {}), API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic", ROLLOUT_CHECKPOINTS: CHECKPOINTS,
         PLAYER_RNG_SEED: String(k) }, // the player's own random moves share seed k across options too
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -268,7 +271,7 @@ async function oneRun(server: string, rec: Rec, option: string, k: number): Prom
       catch { await new Promise((r) => setTimeout(r, 500)); s0 = await http(`${server}/restore`, "POST", body); }
     }
     const restoreMs = Date.now() - t0;
-    const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150, k);
+    const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150, k, rec.raw.rulefix);
     if (!result) return { ...base, error: err, restore_ms: restoreMs, player_ms: ms, total_ms: Date.now() - t0 };
     let s1: any = null;
     try { s1 = await http(`${server}/state`, "GET"); } catch { /* dead/closed game: end inventory unknown */ }

@@ -263,5 +263,36 @@ class Power(unittest.TestCase):
         self.assertGreater(results["fire+lowheal (0.74, 0.965)"]["adopt"], 0.8)
 
 
+class TestReach(unittest.TestCase):
+    """hazard.reach_stats on simulated fresh games (phase 0's scoreboard)."""
+
+    def test_shares_and_death_per_level(self):
+        base, _ = H.simulate(4000, bank_share=0.0, seed=11, caps=(10**9, 10**9))
+        g = list(base.values())
+        r = H.reach_stats(g)
+        hz = H.hazard_rates()
+        p = [hz[d][1] / (hz[d][0] + hz[d][1]) for d in range(25)]  # advance chance per stage, no cap
+        want10 = math.prod(p[:10])
+        self.assertAlmostEqual(r["DL10"], want10, delta=0.03)
+        self.assertGreaterEqual(r["DL5"], r["DL10"]); self.assertGreaterEqual(r["DL10"], r["DL15"])
+        # death per level DL10-14 from the shares, against the per-stage advance chances
+        want = 1 - math.prod(p[10:15]) ** (1 / 5)
+        self.assertAlmostEqual(r["death_lvl_10_14"], want, delta=0.06)
+
+    def test_ph_against_reference(self):
+        base, var = H.simulate(3000, death_rr=0.7, bank_share=0.0, seed=12)
+        same = H.reach_stats(list(base.values()), list(base.values()))
+        self.assertAlmostEqual(same["PH15"], 1.0, places=6)
+        better = H.reach_stats(list(var.values()), list(base.values()))
+        self.assertLess(better["PH15"], 0.9)
+        self.assertAlmostEqual(better["death_rr"], 0.7, delta=0.07)
+
+    def test_interval(self):
+        base, _ = H.simulate(500, bank_share=0.0, seed=13)
+        r = H.reach(list(base.values()), n_boot=100)
+        lo, hi = r["DL5"]["ci80"]
+        self.assertLessEqual(lo, r["DL5"]["v"]); self.assertGreaterEqual(hi, r["DL5"]["v"])
+
+
 if __name__ == "__main__":
     unittest.main()
