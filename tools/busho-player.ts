@@ -1261,7 +1261,7 @@ const LLM_ENABLED = LLM_BACKEND === "anthropic" ? LLM_API_KEY.length > 0
   : true;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "phi3.5";
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
-let llmCallCount = 0;
+let llmCallCount = 0, llmFallbacks = 0;
 let llmCacheHits = 0;
 let llmTotalMs = 0;
 
@@ -1433,10 +1433,21 @@ async function askSystemOne(questions: Record<string, SystemOneQuestion>, contex
     const ms = Date.now() - start;
     llmTotalMs += ms;
     if (!res.ok) {
+      llmFallbacks++;
       console.log(`  [LLM systemone] HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
       return null;
     }
-    const answers = ((await res.json()) as any)?.answers ?? null;
+    const data = (await res.json()) as any;
+    const answers = data?.answers ?? null;
+    // JEV_LEDGER=<path> (hosted Jev): every call's tokens and estimated cost, for the phase's spend cap
+    if (process.env.JEV_LEDGER) {
+      const tok = Number(data?.usage?.input_tokens ?? 0) || Math.ceil(context.length / 3);
+      try {
+        (await import("node:fs")).appendFileSync(process.env.JEV_LEDGER, JSON.stringify({ ts: Date.now() / 1000, model: SYSTEMONE_MODEL,
+          served: data?.model ?? null, input_tokens: tok, usd: tok * 0.042e-6, src: "busho", seed: GAME_SEED }) + "\n");
+      } catch { /* the ledger is best effort; the driver also caps by count */ }
+    }
+    if (!answers) llmFallbacks++;
     for (const [id, a] of Object.entries<any>(answers ?? {})) {
       const summary = a.type === "noul" ? `p(yes)=${a.noul}` : `${a.choice} conf=${a.confidence}`;
       console.log(`  [LLM systemone] Q: ${questions[id]?.instructions.slice(0, 55)} → ${summary} (${ms}ms)`);
@@ -1444,6 +1455,7 @@ async function askSystemOne(questions: Record<string, SystemOneQuestion>, contex
     return answers;
   } catch (e) {
     llmTotalMs += Date.now() - start;
+    llmFallbacks++;
     console.log(`  [LLM systemone] error: ${(e as Error).message}`);
     return null;
   }
@@ -6482,7 +6494,7 @@ async function playGame() {
   console.log(`  行動回数: ${actionCount}`);
   if (LLM_ENABLED) {
     if (RULES_CAUTION) console.log(`  RULES_CAUTION: ${RULES_CAUTION}`);
-    console.log(`  LLM: ${LLM_BACKEND} 呼出${llmCallCount}回 (平均${llmCallCount > 0 ? Math.round(llmTotalMs / llmCallCount) : 0}ms)`);
+    console.log(`  LLM: ${LLM_BACKEND} 呼出${llmCallCount}回 (平均${llmCallCount > 0 ? Math.round(llmTotalMs / llmCallCount) : 0}ms, fallbacks ${llmFallbacks})`);
   }
 
   if (finalState.dead && !ROLLOUT) savepointBank.onDeath(deathCause);

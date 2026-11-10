@@ -136,12 +136,58 @@ class DeepScreen(D17.Screen):
                 self.run.save()
 
 
+# M1 play arms (docs/plan-2026-11-09.md): "model:<name>" asks that decision model the blind question (RULEFIX
+# blindask; every other decision stays with the rules), acting on its argmax. Hosted Jev calls go to the spend ledger
+# and stop at JEV_PHASE_CAP dollars for this run; Laya expects laya-serve on LAYA_URL (one server on the GPU).
+JEV_LEDGER = os.path.join(D.REPO, "runs", "jev", "spend.jsonl")
+JEV_PHASE_CAP = float(os.environ.get("JEV_PHASE_CAP", "1.0"))
+MODEL_ARMS = {
+    "jev": {"SYSTEMONE_URL": "https://api.typesafe.ai", "SYSTEMONE_MODEL": "jev-1.13.0"},
+    "jev114": {"SYSTEMONE_URL": "https://api.typesafe.ai", "SYSTEMONE_MODEL": "jev-1.14.0"},
+    "laya": {"SYSTEMONE_URL": os.environ.get("LAYA_URL", "http://127.0.0.1:8010"), "SYSTEMONE_MODEL": os.environ.get("LAYA_MODEL", "english")},
+}
+
+
+def _typesafe_key():
+    for l in open(os.path.join(D.REPO, ".env")):
+        if l.startswith("TYPESAFE_API_KEY="): return l.split("=", 1)[1].strip().strip("'\"")
+    return ""
+
+
+def _jev_spent_since(t0):
+    if not os.path.exists(JEV_LEDGER): return 0.0
+    tot = 0.0
+    for l in open(JEV_LEDGER):
+        try: r = json.loads(l)
+        except ValueError: continue
+        if r.get("ts", 0) >= t0: tot += float(r.get("usd") or 0)
+    return tot
+
+
+def model_env(name, run):
+    if name not in MODEL_ARMS: raise ValueError(f"unknown model arm {name}")
+    e = {**MODEL_ARMS[name], "LLM_BACKEND": "systemone", "DECISION_POLICY": "model", "DECISION_MODEL_TYPES": "blind",
+         "DECISION_LOG_TYPES": "blind", "DECISION_MIN_CONFIDENCE": "0", "DECISION_SNAPSHOT": "0"}
+    if e["SYSTEMONE_URL"].startswith("https://api.typesafe.ai"):
+        if e["SYSTEMONE_MODEL"].endswith("latest"): raise ValueError("pin a Jev version")
+        e.update({"SYSTEMONE_API_KEY": _typesafe_key(), "JEV_LEDGER": JEV_LEDGER})
+    return e
+
+
 def play_one(run, stage, s, arm, rulefix, slot, deadline):
     maxa, cap = (1500, 240) if run.smoke else (run.maxa, run.cap_s)
     cheat = [f[len("cheat:"):].replace("+", ",") for f in rulefix.split(",") if f.startswith("cheat:")]
-    rulefix = ",".join(f for f in rulefix.split(",") if not f.startswith("cheat:"))
+    model = [f[len("model:"):] for f in rulefix.split(",") if f.startswith("model:")]
+    rulefix = ",".join(f for f in rulefix.split(",") if not f.startswith("cheat:") and not f.startswith("model:"))
+    menv = {}
+    if model:
+        menv = model_env(model[0], run)
+        rulefix += ",blindask"
+        if "JEV_LEDGER" in menv and _jev_spent_since(run.state["started"]) >= JEV_PHASE_CAP:
+            run.log(f"{stage}-{arm}: {s['id']}: skipped, Jev spend cap ${JEV_PHASE_CAP} reached")
+            return {"seed": s["seed"], "class": s["cls"], "error": "jev spend cap", "restore": s["restore"]}
     env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rulefix,
-           "DANGER_LOG": "1", **({"CHEAT": ",".join(cheat)} if cheat else {})}
+           "DANGER_LOG": "1", **({"CHEAT": ",".join(cheat)} if cheat else {}), **menv}
     if "lookahead" in rulefix.split(","):
         # rollout servers for this slot's live lookahead (busho RULEFIX=lookahead): 7300+, W ports per slot
         w = run.la_workers
@@ -176,7 +222,7 @@ def stage_deep(run, name, deadline):
         only = set(cls.split("/")) if cls else None
         # a+b: both flags; cheat:a+b (phase 1, docs/plan-2026-11-09.md): the test-only grants a and b (CHEAT, server
         # --cheats) on the base's flags, kept whole here and split off in play_one
-        flags = arm if arm.startswith("cheat:") else arm.replace("+", ",")
+        flags = arm if arm.startswith(("cheat:", "model:")) else arm.replace("+", ",")
         variants[arm] = (flags, (lambda s, only=only: only is None or s["cls"] in only))
     res = DeepScreen(run, name, ss, base_of, variants, SMOKE_LOOKS if run.smoke else run.looks).run_until(deadline)
     res["adopted"] = [v for v in variants if (res["closed"].get(v) or {}).get("decision") == "adopt"]
