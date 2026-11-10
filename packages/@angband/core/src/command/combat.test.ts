@@ -5,8 +5,8 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { loc } from "../z/index.js";
 import { RNG } from "../z/index.js";
 import { BitFlag } from "../z/index.js";
-import { createChunk, chunkGetSquare, setFeatureInfo } from "../cave/index.js";
-import { Feat, TerrainFlag, TVal, EquipSlot } from "../types/index.js";
+import { createChunk, chunkGetSquare, setFeatureInfo, setViewFeatureTable } from "../cave/index.js";
+import { Feat, TerrainFlag, TVal, EquipSlot, ObjectFlag } from "../types/index.js";
 import type { FeatureType, FeatureId, MonsterId, Player, Monster, MonsterRace, ObjectType } from "../types/index.js";
 import { equipItem, addToInventory } from "../object/gear.js";
 import {
@@ -17,6 +17,10 @@ import {
   cmdAttack,
   cmdFire,
   cmdThrow,
+  throwDamage,
+  throwRange,
+  throwBreakageChance,
+  chanceOfThrowHit,
   playerAttackMonster,
 } from "./combat.js";
 
@@ -139,6 +143,7 @@ function makeTestMonster(ac: number, hp: number): Monster {
 
 beforeAll(() => {
   setFeatureInfo(buildTestFeatureInfo());
+  setViewFeatureTable(buildTestFeatureInfo());
 });
 
 // ── Tests ──
@@ -425,34 +430,49 @@ describe("cmdFire", () => {
   });
 });
 
+function floorRow(chunk: ReturnType<typeof createChunk>, y: number, x0: number, x1: number): void {
+  for (let x = x0; x <= x1; x++) chunkGetSquare(chunk, loc(x, y)).feat = Feat.FLOOR as FeatureId;
+}
+
+/** A thrown object with a kind, as the store/object code would build it. */
+function makeThrown(
+  name: string, weight: number, dd: number, ds: number,
+  flagList: ObjectFlag[], breakPerc: number, tval: number = TVal.FLASK,
+): ObjectType {
+  const kflags = new BitFlag(ObjectFlag.MAX);
+  for (const f of flagList) kflags.on(f);
+  const kind = {
+    name, weight, tval, flags: kflags,
+    base: { breakPerc, maxStack: 40, flags: new BitFlag(ObjectFlag.MAX) },
+  };
+  const o = makeTestObject(tval, 1, { dd, ds, number: 3 }) as unknown as Record<string, unknown>;
+  o.kind = kind;
+  o.weight = weight;
+  o.flags = new BitFlag(ObjectFlag.MAX);
+  return o as unknown as ObjectType;
+}
+
 describe("cmdThrow", () => {
   it("throws at a monster", () => {
-    const chunk = createChunk(10, 10, 1);
-    chunkGetSquare(chunk, loc(4, 2)).feat = Feat.FLOOR as FeatureId;
+    const chunk = createChunk(10, 20, 1);
+    floorRow(chunk, 2, 0, 12);
     chunkGetSquare(chunk, loc(4, 2)).mon = 1 as MonsterId;
     chunk.monsters[1] = makeTestMonster(10, 100);
     (chunk.monsters[1] as Monster).grid = loc(4, 2);
     const player = makeTestPlayer(2, 2);
     addToInventory(player, makeTestObject(TVal.SWORD, 1, { dd: 2, ds: 5, number: 1 }));
-    const rng = makeRng();
-
-    const result = cmdThrow(player, chunk, loc(4, 2), rng, 0);
+    const result = cmdThrow(player, chunk, loc(4, 2), makeRng(), 0);
     expect(result.success).toBe(true);
     expect(result.energyCost).toBe(100);
-    const hasThrowMsg = result.messages.some(
-      m => m.includes("thrown item hits") || m.includes("thrown item misses") || m.includes("thrown item kills"),
-    );
-    expect(hasThrowMsg).toBe(true);
+    expect(result.messages.some(m => /hits|misses|kills/.test(m))).toBe(true);
   });
 
   it("throws at empty square (lands on ground)", () => {
-    const chunk = createChunk(10, 10, 1);
-    chunkGetSquare(chunk, loc(4, 2)).feat = Feat.FLOOR as FeatureId;
+    const chunk = createChunk(10, 20, 1);
+    floorRow(chunk, 2, 0, 12);
     const player = makeTestPlayer(2, 2);
     addToInventory(player, makeTestObject(TVal.SHOT, 1, { number: 5 }));
-    const rng = makeRng();
-
-    const result = cmdThrow(player, chunk, loc(4, 2), rng, 0);
+    const result = cmdThrow(player, chunk, loc(4, 2), makeRng(), 0);
     expect(result.success).toBe(true);
     expect(result.energyCost).toBe(100);
     expect(result.messages[0]).toContain("lands on the ground");
@@ -461,9 +481,7 @@ describe("cmdThrow", () => {
   it("fails when nothing to throw", () => {
     const chunk = createChunk(5, 5, 1);
     const player = makeTestPlayer(2, 2);
-    const rng = makeRng();
-
-    const result = cmdThrow(player, chunk, loc(3, 3), rng, 0);
+    const result = cmdThrow(player, chunk, loc(3, 3), makeRng(), 0);
     expect(result.success).toBe(false);
     expect(result.messages[0]).toContain("nothing to throw");
   });
@@ -472,9 +490,116 @@ describe("cmdThrow", () => {
     const chunk = createChunk(5, 5, 1);
     const player = makeTestPlayer(2, 2);
     addToInventory(player, makeTestObject(TVal.SHOT, 1));
-    const rng = makeRng();
+    expect(cmdThrow(player, chunk, loc(10, 10), makeRng(), 0).success).toBe(false);
+  });
 
-    const result = cmdThrow(player, chunk, loc(10, 10), rng, 0);
-    expect(result.success).toBe(false);
+  it("rejects targets beyond the throwing range without using the item", () => {
+    const chunk = createChunk(10, 40, 1);
+    floorRow(chunk, 2, 0, 39);
+    const player = makeTestPlayer(2, 2);
+    const flask = makeThrown("& Flask~ of oil", 20, 1, 4, [ObjectFlag.THROWING, ObjectFlag.EXPLODE], 100);
+    addToInventory(player, flask);
+    expect(throwRange(player, flask)).toBe(10); // (3+20)*10/20 = 11 -> capped at 10
+    const r = cmdThrow(player, chunk, loc(14, 2), makeRng(), 0);
+    expect(r.success).toBe(false);
+    expect(r.messages[0]).toContain("out of range");
+    expect(flask.number).toBe(3);
+  });
+
+  it("rejects targets without line of sight", () => {
+    const chunk = createChunk(10, 20, 1);
+    floorRow(chunk, 2, 0, 12);
+    // wall (no LOS) at x=4 between the player and the target at x=6
+    chunkGetSquare(chunk, loc(4, 2)).feat = Feat.NONE as FeatureId;
+    const player = makeTestPlayer(2, 2);
+    addToInventory(player, makeThrown("& Flask~ of oil", 20, 1, 4, [ObjectFlag.THROWING, ObjectFlag.EXPLODE], 100));
+    const r = cmdThrow(player, chunk, loc(6, 2), makeRng(), 0);
+    expect(r.success).toBe(false);
+    expect(r.messages[0]).toContain("line of sight");
+  });
+
+  it("hits the first monster on the path and consumes one flask", () => {
+    const chunk = createChunk(10, 20, 1);
+    floorRow(chunk, 2, 0, 12);
+    chunkGetSquare(chunk, loc(4, 2)).mon = 1 as MonsterId;
+    chunk.monsters[1] = makeTestMonster(0, 1000);
+    (chunk.monsters[1] as Monster).grid = loc(4, 2);
+    const player = makeTestPlayer(2, 2);
+    const flask = makeThrown("& Flask~ of oil", 20, 1, 4, [ObjectFlag.THROWING, ObjectFlag.EXPLODE], 100);
+    addToInventory(player, flask);
+    const rng = makeRng(100);
+    const hp0 = chunk.monsters[1]!.hp;
+    cmdThrow(player, chunk, loc(8, 2), rng, 0);
+    cmdThrow(player, chunk, loc(8, 2), rng, 0);
+    cmdThrow(player, chunk, loc(8, 2), rng, 0);
+    expect((player as any).inventory.filter((o: unknown) => o).length).toBe(0);
+    // the monster at x=4 is on the path to x=8 and is the one struck
+    expect(chunk.monsters[1]!.hp).toBeLessThan(hp0);
+  });
+});
+
+describe("throw damage (4.2.6 make_ranged_throw)", () => {
+  it("flask of oil: 1d4 x (2 + 20/12) x EXPLODE 3 = 9..36 in steps of 9 without a critical", () => {
+    const player = makeTestPlayer(2, 2);
+    const mon = makeTestMonster(0, 1000);
+    const flask = makeThrown("& Flask~ of oil", 20, 1, 4, [ObjectFlag.THROWING, ObjectFlag.EXPLODE], 100);
+    const seen = new Set<number>();
+    const rng = makeRng(7);
+    for (let i = 0; i < 400; i++) {
+      const r = throwDamage(player, mon, flask, rng);
+      if (r.critMsg) continue;
+      expect(r.damage % 9).toBe(0);
+      expect(r.damage).toBeGreaterThanOrEqual(9);
+      expect(r.damage).toBeLessThanOrEqual(36);
+      seen.add(r.damage);
+    }
+    expect(seen.size).toBe(4);
+  });
+
+  it("throwing spear gets 2 + 50/12 = 6x; to-dam is added before the multiplier", () => {
+    const player = makeTestPlayer(2, 2);
+    const mon = makeTestMonster(0, 1000);
+    const spear = makeThrown("& Spear~", 50, 1, 6, [ObjectFlag.THROWING], 1, TVal.POLEARM);
+    (spear as { toD: number }).toD = 2;
+    const rng = makeRng(7);
+    for (let i = 0; i < 200; i++) {
+      const r = throwDamage(player, mon, spear, rng);
+      if (r.critMsg) continue;
+      expect(r.damage % 6).toBe(0);
+      expect(r.damage).toBeGreaterThanOrEqual(18); // (1+2)*6
+      expect(r.damage).toBeLessThanOrEqual(48); // (6+2)*6
+    }
+  });
+
+  it("non-throwing objects get no weight multiplier and no player to-dam", () => {
+    const player = makeTestPlayer(2, 2);
+    const mon = makeTestMonster(0, 1000);
+    const sword = makeThrown("& Dagger~", 12, 1, 4, [], 25, TVal.SWORD);
+    const rng = makeRng(7);
+    for (let i = 0; i < 100; i++) {
+      const r = throwDamage(player, mon, sword, rng);
+      if (r.critMsg) continue;
+      expect(r.damage).toBeGreaterThanOrEqual(1);
+      expect(r.damage).toBeLessThanOrEqual(4);
+    }
+  });
+
+  it("to-hit: throwing weapons use full skill + player to-hit, others 3/2 skill; distance subtracts", () => {
+    const player = makeTestPlayer(2, 2); // skill 30, toH 10
+    const spear = makeThrown("& Spear~", 50, 1, 6, [ObjectFlag.THROWING], 1, TVal.POLEARM);
+    const dagger = makeThrown("& Dagger~", 12, 1, 4, [], 25, TVal.SWORD);
+    expect(chanceOfThrowHit(player, spear, 4)).toBe(30 + 10 * 3 - 4);
+    expect(chanceOfThrowHit(player, dagger, 4)).toBe(45 - 4);
+  });
+
+  it("breakage: throwing weapons 1%, flasks base 100%, misses square the chance", () => {
+    const spear = makeThrown("& Spear~", 50, 1, 6, [ObjectFlag.THROWING], 25, TVal.POLEARM);
+    const flask = makeThrown("& Flask~ of oil", 20, 1, 4, [ObjectFlag.THROWING, ObjectFlag.EXPLODE], 100);
+    const dagger = makeThrown("& Dagger~", 12, 1, 4, [], 50, TVal.SWORD);
+    expect(throwBreakageChance(spear, true)).toBe(1);
+    expect(throwBreakageChance(flask, true)).toBe(100);
+    expect(throwBreakageChance(flask, false)).toBe(100);
+    expect(throwBreakageChance(dagger, true)).toBe(50);
+    expect(throwBreakageChance(dagger, false)).toBe(25);
   });
 });

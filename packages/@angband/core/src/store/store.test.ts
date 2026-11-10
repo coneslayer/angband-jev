@@ -306,52 +306,47 @@ describe("storeGetPrice", () => {
     expect(storeGetPrice(home, obj, true)).toBe(0);
   });
 
-  it("should apply buy markup for general store (130%)", () => {
+  it("should apply 4.2.6 buy price for general store (no markup)", () => {
     const store = createStore(StoreType.GENERAL);
     const obj = makeObj(TVal.FOOD, 100);
     const price = storeGetPrice(store, obj, false);
-    // 100 * 130 / 100 = 130
-    expect(price).toBe(130);
+    expect(price).toBe(100);
   });
 
-  it("should apply buy markup for specialist store (110%)", () => {
+  it("should apply 4.2.6 buy price for specialist store (no markup)", () => {
     const store = createStore(StoreType.WEAPON);
     const obj = makeObj(TVal.SWORD, 100);
     const price = storeGetPrice(store, obj, false);
-    // 100 * 110 / 100 = 110
-    expect(price).toBe(110);
+    expect(price).toBe(100);
   });
 
-  it("should apply buy markup for black market (150%)", () => {
+  it("should apply 4.2.6 buy price for black market (x2 x1.5)", () => {
     const store = createStore(StoreType.BLACKMARKET);
     const obj = makeObj(TVal.SWORD, 100);
     const price = storeGetPrice(store, obj, false);
-    // 100 * 150 / 100 = 150
-    expect(price).toBe(150);
+    expect(price).toBe(300);
   });
 
-  it("should apply sell markdown for general store (50%)", () => {
+  it("should apply 4.2.6 sell price for general store (2/3)", () => {
     const store = createStore(StoreType.GENERAL);
     const obj = makeObj(TVal.FOOD, 100);
     const price = storeGetPrice(store, obj, true);
-    // 100 * 50 / 100 = 50
-    expect(price).toBe(50);
+    expect(price).toBe(66);
   });
 
-  it("should apply sell markdown for specialist store (75%)", () => {
+  it("should apply 4.2.6 sell price for specialist store (2/3)", () => {
     const store = createStore(StoreType.WEAPON);
     const obj = makeObj(TVal.SWORD, 100);
     const price = storeGetPrice(store, obj, true);
-    // 100 * 75 / 100 = 75
-    expect(price).toBe(75);
+    expect(price).toBe(66);
   });
 
-  it("should apply sell markdown for black market (50%)", () => {
+  it("should apply 4.2.6 sell price for black market", () => {
     const store = createStore(StoreType.BLACKMARKET);
     const obj = makeObj(TVal.SWORD, 100);
     const price = storeGetPrice(store, obj, true);
-    // 100 * 50 / 100 = 50
-    expect(price).toBe(50);
+    // 100 * 2/3 = 66; /2 = 33; shopkeeper adjust 50% => 17
+    expect(price).toBe(17);
   });
 
   it("should never return 0 for non-worthless items when buying", () => {
@@ -998,5 +993,112 @@ describe("edge cases", () => {
     const kinds = [makeKind({ tval: TVal.POTION, name: "Potion", cost: 50, allocProb: 10 })];
     initStoreStock(store, 10, kinds, rng);
     expect(store.stock.length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4.2.6 always/normal stocking
+// ---------------------------------------------------------------------------
+
+function vanillaKinds(): ObjectKind[] {
+  const k = (tval: TVal, name: string, cost: number, sval: number) =>
+    makeKind({ tval, name, cost, sval: sval as any, allocProb: 10, level: 1 });
+  return [
+    k(TVal.FLASK, "& Flask~ of oil", 3, 1),
+    k(TVal.FOOD, "& Ration~ of Food", 3, 2),
+    k(TVal.LIGHT, "& Wooden Torch~", 1, 3),
+    k(TVal.CLOAK, "& Cloak~", 3, 4),
+    k(TVal.DIGGING, "& Shovel~", 10, 5),
+    k(TVal.DIGGING, "& Pick~", 300, 6),
+    k(TVal.SHOT, "Iron Shot~", 1, 7),
+    k(TVal.ARROW, "Arrow~", 1, 8),
+    k(TVal.BOLT, "Bolt~", 1, 9),
+    k(TVal.FOOD, "& Hard Biscuit~", 1, 10),
+    k(TVal.SCROLL, "Word of Recall", 125, 11),
+    k(TVal.SCROLL, "Phase Door", 15, 12),
+    k(TVal.POTION, "Cure Light Wounds", 20, 13),
+    k(TVal.POTION, "Cure Serious Wounds", 40, 14),
+    k(TVal.SCROLL, "Magic Mapping", 75, 15),
+  ];
+}
+
+function stockQty(store: ReturnType<typeof createStore>, name: string): number {
+  return store.stock
+    .filter((o) => o.kind!.name.includes(name))
+    .reduce((a, o) => a + o.number, 0);
+}
+
+describe("4.2.6 always stock", () => {
+  it("general store always has oil, rations, torches, diggers and ammo in full stacks", () => {
+    const kinds = vanillaKinds();
+    for (let seed = 1; seed <= 20; seed++) {
+      const store = createStore(StoreType.GENERAL);
+      initStoreStock(store, 0, kinds, new RNG(seed));
+      for (const n of ["Flask~ of oil", "Ration~", "Wooden Torch", "Cloak", "Shovel", "Pick", "Iron Shot", "Arrow", "Bolt"]) {
+        expect(stockQty(store, n), `seed ${seed} ${n}`).toBe(40);
+      }
+    }
+  });
+
+  it("alchemist always has Phase Door, Word of Recall and Cure Light Wounds", () => {
+    const kinds = vanillaKinds();
+    for (let seed = 1; seed <= 20; seed++) {
+      const store = createStore(StoreType.ALCHEMY);
+      initStoreStock(store, 0, kinds, new RNG(seed));
+      for (const n of ["Phase Door", "Word of Recall", "Cure Light Wounds"]) {
+        expect(stockQty(store, n), `seed ${seed} ${n}`).toBe(40);
+      }
+    }
+  });
+
+  it("buying staples never depletes them and stacks in the pack", () => {
+    const kinds = vanillaKinds();
+    const store = createStore(StoreType.GENERAL);
+    const rng = new RNG(5);
+    initStoreStock(store, 0, kinds, rng);
+    const player = makePlayer(100000);
+    const idx = () => store.stock.findIndex((o) => o.kind!.name.includes("Flask"));
+    const r = storeBuy(store, player, idx(), 15);
+    expect(r.success).toBe(true);
+    expect(r.price).toBe(3 * 15);
+    expect(stockQty(store, "Flask")).toBe(40);
+    // second purchase merges into the same inventory stack
+    expect(storeBuy(store, player, idx(), 10).success).toBe(true);
+    const inv = (player as any).inventory.filter((o: any) => o && o.kind.name.includes("Flask"));
+    expect(inv.length).toBe(1);
+    expect(inv[0].number).toBe(25);
+    expect(stockQty(store, "Flask")).toBe(40);
+    // cannot buy more than a stack
+    expect(storeBuy(store, player, idx(), 41).success).toBe(false);
+  });
+
+  it("maintenance keeps staples and respects normal slot limits", () => {
+    const kinds = vanillaKinds();
+    const store = createStore(StoreType.GENERAL);
+    const rng = new RNG(9);
+    initStoreStock(store, 0, kinds, rng);
+    for (let i = 0; i < 100; i++) {
+      storeMaintenance(store, 0, kinds, rng);
+      expect(stockQty(store, "Flask")).toBe(40);
+      expect(stockQty(store, "Phase")).toBe(0);
+      // 9 always + at most 4 normal slots
+      expect(store.stock.length).toBeLessThanOrEqual(9 + 4);
+    }
+  });
+
+  it("non-staple stock is depleted by purchases", () => {
+    const kinds = vanillaKinds();
+    const store = createStore(StoreType.ALCHEMY);
+    const rng = new RNG(3);
+    initStoreStock(store, 0, kinds, rng);
+    const player = makePlayer(100000);
+    // find a normal item
+    const idx = store.stock.findIndex((o) => o.kind!.name === "Magic Mapping");
+    if (idx >= 0) {
+      const before = store.stock[idx]!.number;
+      storeBuy(store, player, idx, 1);
+      const after = store.stock.find((o) => o.kind!.name === "Magic Mapping");
+      expect(after ? after.number : 0).toBe(before - 1);
+    }
   });
 });

@@ -475,8 +475,9 @@ function determineSeen(
     const g = loc(gx, gy);
     const dist = distance(origin, g);
 
-    // Within torch radius — always seen + close
-    if (dist < torchRadius) {
+    // Within torch radius — always seen + close. Light radius r lights distance <= r, as in
+    // vanilla's calc_lighting (this was dist < r: a torch showed only the 3x3 around the player)
+    if (dist <= torchRadius) {
       setFlag(c, g, SquareFlag.SEEN);
       setFlag(c, g, SquareFlag.CLOSE_PLAYER);
       continue;
