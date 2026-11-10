@@ -54,8 +54,10 @@ export const QUESTIONS: Record<DecisionType, ChoiceQuestion> = {
       continue: "stay in the dungeon and keep going",
     },
   },
-  // M1 (docs/plan-2026-11-09.md): blind with a threat. Options are offered only when they can be carried out (cure: a
-  // potion that cures blindness is carried; stairs: standing on them), so blindDecision filters this list
+  // M1 (docs/plan-2026-11-09.md): blind with a threat. All four options are always offered (one schema for every
+  // row: laya-train keeps the first option set it sees, and a filtered list broke the first fine-tune); one that
+  // can't be carried out (cure without a potion, stairs off the stairs) falls back to "rest". The Situation lines say
+  // which are possible. BLIND_FILTER_OPTIONS=1 restores the filtered list (the 11-09 check set)
   blind: {
     type: "choice",
     instructions: "My character is blind, so it can't see monsters, read scrolls or cast spells, and something may be attacking it. Decide what to do this turn.",
@@ -293,6 +295,7 @@ export function blindDecision(state: any, b: BlindCtx): DecisionRequest {
     `Remembered monsters within 7: ${b.near.join(", ") || "none"}`,
     `Recent messages: ${b.messages.join(" | ") || "none"}`,
   ]);
+  if (process.env.BLIND_FILTER_OPTIONS !== "1") return req;
   const all = req.questions.decision.criteria;
   const keep = Object.keys(all).filter(o => o === "rest" || (o === "cure" && Object.keys(b.cures).length > 0)
     || (o === "stairs" && b.onStairs) || (o === "walk" && b.canWalk));

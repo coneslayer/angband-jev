@@ -147,10 +147,12 @@ def start_c_server(run, name, port, env, seed, restore=None):
     own = [] if restore else [f"-dsave={udir}", f"-dscores={udir}", f"-dpanic={udir}", "-n"]
     args = [C_BIN, "-mhttp", f"-duser={udir}"] + own + ["--", "--port", str(port), "--seed", str(seed)]
     if restore: args += ["--load", c_savepoint_files(udir, restore)]
-    if env.get("CHEATS"): args += ["--cheats"]  # phase 1 headroom map only: the game accepts POST /cheat
     else:
         for k, flag in (("RACE", "--race"), ("CLASS", "--class")):
             if env.get(k) and env[k] != "random": args += [flag, env[k]]
+    # phase 1 headroom map only: the game accepts POST /cheat. (2026-11-10: this line once sat between the `if restore`
+    # and its `else`, so fresh cheat games were born without --race/--class: a random class, not the pair's)
+    if env.get("CHEATS"): args += ["--cheats"]
     log = open(run.d("procs", name + ".log"), "w")
     p = subprocess.Popen(["nice", "-n", "10", *args], cwd=os.path.dirname(C_BIN), stdout=log, stderr=subprocess.STDOUT,
                          stdin=subprocess.DEVNULL, start_new_session=True)

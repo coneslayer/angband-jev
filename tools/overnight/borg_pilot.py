@@ -72,6 +72,9 @@ def main():
     ap.add_argument("--lives", type=int, default=10); ap.add_argument("--slots", type=int, default=6)
     ap.add_argument("--cap-s", type=int, default=1800); ap.add_argument("--c-bin", default=DEFAULT_BIN)
     a = ap.parse_args()
+    # absolute: the game runs with its cwd in the binary's folder, so relative -d dirs failed or fell back to the
+    # shared defaults (2026-11-10 pilot: no life's log landed in its own archive)
+    a.run, a.c_bin = os.path.abspath(a.run), os.path.abspath(a.c_bin)
     os.makedirs(a.run, exist_ok=True)
     out = os.path.join(a.run, "lives.jsonl")
     done = {(r["class"], r["life"]) for r in map(json.loads, open(out))} if os.path.exists(out) else set()
