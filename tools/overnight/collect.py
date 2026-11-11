@@ -7,7 +7,7 @@ DECISION_LOG=1 limited to --types (DECISION_LOG_TYPES), and keeps each game's de
 rollout labeller (tools/rollout/run.ts). Replays are deleted. RUN/collect.jsonl has one line per game.
 
 Usage: collect.py --run runs/m1/<name> --bank runs/harvest/<run>[,...] --rulefix FLAGS --types blind [--n 1200]
-                  [--seed 9100000] [--slots 13] [--maxa 20000] [--cap-s 900] [--hours 3]
+                  [--seed 9100000] [--slots 13] [--maxa 20000] [--cap-s 900] [--hours 3] [--exclude-clusters JSON]
 """
 import argparse, json, os, shutil, sys, threading, time  # noqa: E401
 import concurrent.futures as cf
@@ -34,10 +34,17 @@ def main():
     ap.add_argument("--casters", default="Mage,Priest,Druid"); ap.add_argument("--caster-extra", default="spellfx,spellfight")
     ap.add_argument("--class-extra", default="Paladin/Ranger/Rogue:spellfx")
     ap.add_argument("--extra-env", default="", help="NAME=value;... added to every game's environment")
+    ap.add_argument("--exclude-clusters", help="JSON list of bank lineages (bank_starts' cluster) to leave out, e.g. "
+                    "the check sets' characters, so training games share no character with them")
     a = ap.parse_args()
     run = D.Run(a.run, a.hours, False, a.slots)
     D.app_dir(run); D.freeze_c(run)
-    starts = D18.bank_starts(a.bank.split(","), a.min_depth, a.max_depth, a.seed, a.n)
+    if a.exclude_clusters:
+        ex = set(json.load(open(a.exclude_clusters)))
+        starts = [s for s in D18.bank_starts(a.bank.split(","), a.min_depth, a.max_depth, a.seed, 10 ** 6)
+                  if s["cluster"] not in ex][:a.n]
+    else:
+        starts = D18.bank_starts(a.bank.split(","), a.min_depth, a.max_depth, a.seed, a.n)
     extra = D18.class_extras(a.class_extra)
     casters = set(a.casters.split(","))
     env_extra = dict(kv.split("=", 1) for kv in a.extra_env.split(";") if kv)

@@ -213,12 +213,21 @@ async function http(url: string, method: string, body?: string): Promise<any> {
   return JSON.parse(t);
 }
 
-function runPlayer(api: string, type: string, option: string, horizon: number, k: number, rulefix?: string): Promise<{ result: any | null; ms: number; err?: string }> {
+// the record's per-level counters (busho keeps them in-process, so a restored game starts without them): the
+// record's level_ctx, or the explore question's own line "Killed N monsters and spent T turns on DLx"
+function levelEnv(raw: any): Record<string, string> {
+  let c = raw?.level_ctx;
+  const m = !c && typeof raw?.state === "string" ? raw.state.match(/Killed (\d+) monsters and spent (\d+) turns on DL/) : null;
+  if (m) c = { kills: Number(m[1]), turns: Number(m[2]) };
+  return c ? { ROLLOUT_LEVEL_KILLS: String(c.kills), ROLLOUT_LEVEL_TURNS: String(c.turns) } : {};
+}
+
+function runPlayer(api: string, type: string, option: string, horizon: number, k: number, rulefix?: string, level: Record<string, string> = {}): Promise<{ result: any | null; ms: number; err?: string }> {
   const t0 = Date.now();
   return new Promise((resolve) => {
     const child = spawn(PLAYER_CMD[0], PLAYER_CMD.slice(1), {
       // a record's own "rulefix" (its game's flags, e.g. the class extras) wins over the environment's
-      env: { ...process.env, ...(rulefix ? { RULEFIX: rulefix } : {}), API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic", ROLLOUT_CHECKPOINTS: CHECKPOINTS,
+      env: { ...process.env, ...(rulefix ? { RULEFIX: rulefix } : {}), ...level, API: api, ROLLOUT_FORCE: `${type}:${option}`, ROLLOUT_HORIZON: String(horizon), ROLLOUT_MAX_WAIT: MAX_WAIT, LLM_BACKEND: "anthropic", ROLLOUT_CHECKPOINTS: CHECKPOINTS,
         PLAYER_RNG_SEED: String(k) }, // the player's own random moves share seed k across options too
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -271,7 +280,7 @@ async function oneRun(server: string, rec: Rec, option: string, k: number): Prom
       catch { await new Promise((r) => setTimeout(r, 500)); s0 = await http(`${server}/restore`, "POST", body); }
     }
     const restoreMs = Date.now() - t0;
-    const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150, k, rec.raw.rulefix);
+    const { result, ms, err } = await runPlayer(server, rec.type, option, HORIZON[rec.type] ?? 150, k, rec.raw.rulefix, levelEnv(rec.raw));
     if (!result) return { ...base, error: err, restore_ms: restoreMs, player_ms: ms, total_ms: Date.now() - t0 };
     let s1: any = null;
     try { s1 = await http(`${server}/state`, "GET"); } catch { /* dead/closed game: end inventory unknown */ }

@@ -1146,6 +1146,8 @@ function isEscapeCommand(cmd: Record<string, unknown>): boolean {
 
 async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
   sendSeq++;
+  // CMD_TRACE=1: each command with its caller (bundle line), to see which branch acts (e.g. in a restored rollout)
+  if (process.env.CMD_TRACE) console.log(`  [CMD] ${JSON.stringify(cmd)} @ ${(new Error().stack ?? "").split("\n")[2]?.trim()}`);
   if (noTimeStreak >= 30) {
     console.log(`  [CMD-GUARD] ${noTimeStreak} commands passed no time: holding a turn instead of ${JSON.stringify(cmd)} | msgs: ${((lastKnownState?.messages ?? []) as any[]).slice(-3).map(String).join(" | ")}`);
     cmd = { type: CMD.SEARCH };
@@ -1837,6 +1839,7 @@ async function takeSnapshot(gameId: string, turn: number, type: DecisionType): P
   }
 }
 
+const levelCtx = { kills: 0, turns: 0 }; // the main loop's per-level counters, for logDecision's level_ctx
 async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionRequest, extra: Record<string, unknown> = {}): Promise<any | null> {
   try {
     const st = c.state;
@@ -1860,6 +1863,8 @@ async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionReques
       questions: req.questions,
       snapshot,
       rules_choice: c.rules,
+      // the per-level counters a rollout needs to restart from this point (busho keeps them in-process)
+      ...(type === "descend" || type === "explore" ? { level_ctx: { kills: levelCtx.kills, turns: levelCtx.turns } } : {}),
       ...extra,
     };
     const fs = await import("node:fs");
@@ -3222,6 +3227,17 @@ async function playGame() {
   let killsThisLevel = 0;
   let turnsOnLevel = 0;
   let levelEntryTurn = 0;
+  // ロールアウト: 復元したゲームには busho のプロセス内カウンタがない (この階の撃破数・滞在ターン)。記録の値で始める
+  // (run.ts が ROLLOUT_LEVEL_KILLS/TURNS で渡す)。ないと滞在ターンが state.turn 全体になり、降下ゲートが緩む
+  if (ROLLOUT && process.env.ROLLOUT_LEVEL_TURNS) {
+    killsThisLevel = Number(process.env.ROLLOUT_LEVEL_KILLS ?? 0);
+    levelEntryTurn = state.turn - Number(process.env.ROLLOUT_LEVEL_TURNS);
+  }
+  // descend/explore are asked at the descent gate, which the item branch comes before: the original game reached
+  // the gate with the items in view already passed on (dropped, unreachable or unwanted), and those in-process sets
+  // are empty after a restore. Mark the visible items as passed on so the restored game reaches the gate too
+  if (ROLLOUT && (ROLLOUT_TYPE === "descend" || ROLLOUT_TYPE === "explore"))
+    for (const t of state.map?.tiles ?? []) if (t.hasObj) unreachableItems.add(`${t.x},${t.y}`);
   const MAX_TURNS_PER_LEVEL = 3000; // 最大ターン数超えたら降下OK (5000→3000で速度UP)
 
   // 深度別の最低撃破数（浅層でしっかりレベリング、深層は探索・降下重視）
@@ -6030,6 +6046,7 @@ async function playGame() {
 
     // === 優先度7: 階段降下 ===
     turnsOnLevel = state.turn - levelEntryTurn;
+    levelCtx.kills = killsThisLevel; levelCtx.turns = turnsOnLevel;
     const healingPotions = inv.filter((item: any) => item.tval === TVAL.POTION && item.name.includes("Cure") && item.qty > 0);
     const totalHealingQty = healingPotions.reduce((sum: number, item: any) => sum + item.qty, 0);
     const hasHealing = totalHealingQty > 0;
@@ -6140,7 +6157,15 @@ async function playGame() {
 
     // LLM降下判断: DL15+でLLMに確認（深度ごとに最大2回まで）
     let llmDescentVeto = false;
-    if (readyToDescend && DECISION_ON && (state.depth >= 15 || (WIDE && state.depth >= 1))) {
+    // ロールアウト: 記録は降下条件が揃った地点で取られている。復元後はカウンタ等が違うので、最初の 1 回はその地点として扱う
+    const rolloutAtPoint = ROLLOUT && !rolloutFired && (ROLLOUT_TYPE === "descend" || ROLLOUT_TYPE === "explore");
+    const descendNow = readyToDescend || rolloutAtPoint;
+    if (descendNow && ROLLOUT && ROLLOUT_TYPE === "explore" && state.depth >= 1) {
+      // explore の質問は収集時、降下地点ごとに (ログモードで) 聞かれた。ルールの答えは「降下」。ロールアウトでは
+      // ここで聞いて従う: explore なら ROLLOUT_STAY_ACTIONS だけ留まる (sticky なら降下地点のたびに)
+      const ex = await llmShouldExploreMore(state, killsThisLevel, turnsOnLevel);
+      if (ex === true) { llmDescentVeto = true; descentHoldUntil = actionCount + ROLLOUT_STAY_ACTIONS; }
+    } else if (descendNow && DECISION_ON && (state.depth >= 15 || (WIDE && state.depth >= 1))) {
       const vetoCountKey = `descent_veto_count_${state.depth}`;
       const approvedKey = `descent_approved_${state.depth}`; // 承認済みなら階段まで毎ターン聞き直さない
       const vetoCount = (globalThis as any)[vetoCountKey] ?? 0;
@@ -6160,7 +6185,7 @@ async function playGame() {
       }
     }
 
-    if (readyToDescend && !llmDescentVeto) {
+    if (descendNow && !llmDescentVeto) {
       const downStair = findTile(tiles, FEAT.DOWN_STAIR);
       if (downStair) {
         const onStair = tiles.find((t: any) => t.x === px && t.y === py && t.feat === FEAT.DOWN_STAIR);

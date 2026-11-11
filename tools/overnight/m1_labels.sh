@@ -8,7 +8,8 @@
 #     check-short   check.jsonl, 4 seeds, 500 actions (to compare with the long labels)
 #     train-short   train.jsonl, 4 seeds, 500 actions, single override
 #     train-sticky  train.jsonl, 4 seeds, 500 actions, sticky (the labels to train on: single labels proved blunt)
-# Env: SERVERS (default 12 on 7800-7811), C_BIN (default angband-c build-rd), NODE_BIN (a dir with node >= 20).
+# Env: SERVERS (default 12 on 7800-7811), C_BIN (default angband-c build-rd), NODE_BIN (a dir with node >= 20);
+# LONG_K / LONG_H (default 8 / 2000) for check-long and check-sticky, STICKY_N (default 200) records for check-sticky.
 # Every step runs with full play rules in rollouts (ROLLOUT_FULL_RULES=1) and utility "game" (levels gained − 3 if
 # dead). A 3-record preflight runs first and stops everything if any record comes back unlabelled (a relative path or
 # a restore that doesn't take shows up there, not after hours of empty labels).
@@ -33,15 +34,17 @@ lab() {  # name decisions K horizon sticky
   tail -1 "$L/$name.log" | cut -c1-200; rm -rf "$L/c-$name" "$L/tmp-$name"
 }
 
-head -3 "$L/check.jsonl" > "$L/preflight-in.jsonl"
+PF="$L/check.jsonl"; [ -s "$PF" ] || PF="$L/train.jsonl"   # a training-only selection has no check set
+head -3 "$PF" > "$L/preflight-in.jsonl"
 rm -f "$L/preflight.jsonl" "$L/preflight.unlabelled.jsonl"
 lab preflight "$L/preflight-in.jsonl" 2 300 0
 if [ -s "$L/preflight.unlabelled.jsonl" ] || [ ! -s "$L/preflight.jsonl" ]; then echo "PREFLIGHT FAILED"; exit 1; fi
-head -200 "$L/check.jsonl" > "$L/check200.jsonl"
+LK=${LONG_K:-8}; LH=${LONG_H:-2000}
+head -"${STICKY_N:-200}" "$L/check.jsonl" > "$L/check200.jsonl"
 for s in $STEPS; do
   case $s in
-    check-long)   lab check-long   "$L/check.jsonl"    8 2000 0 ;;
-    check-sticky) lab check-sticky "$L/check200.jsonl" 8 2000 1 ;;
+    check-long)   lab check-long   "$L/check.jsonl"    "$LK" "$LH" 0 ;;
+    check-sticky) lab check-sticky "$L/check200.jsonl" "$LK" "$LH" 1 ;;
     check-short)  lab check-short  "$L/check.jsonl"    4 500 0 ;;
     train-short)  lab train-short  "$L/train.jsonl"    4 500 0 ;;
     train-sticky) lab train-sticky "$L/train.jsonl"    4 500 1 ;;

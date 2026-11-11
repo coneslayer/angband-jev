@@ -13,7 +13,7 @@
             m1_select.py's check.jsonl and train.jsonl (they map a record's game_id to its collection game). Run in
             the pipenv that has lightgbm (tools/overnight/native).
 
-Usage: m1_offline.py headroom LABELS.jsonl | agree SHORT LONG | score LONG ANSWERS... | trees TRAIN LONG RUN SELDIR OUT
+Usage: m1_offline.py headroom LABELS.jsonl | agree SHORT LONG | score LONG ANSWERS... | trees TRAIN LONG RUN SELDIR OUT [LONG_RUN LONG_SELDIR]
 """
 import bisect, gzip, json, os, statistics as st, sys  # noqa: E401
 
@@ -45,7 +45,7 @@ def pick(u, rules):
 
 
 def headroom(recs):
-    gains, var_opt, var_tot, by = [], [], [], {}
+    gains, var_opt, var_tot, by, rows = [], [], [], {}, []
     for x in recs:
         m = x["meta"]; R = per_seed(m)
         opts = [o for o in m["options"] if o in R]
@@ -56,6 +56,7 @@ def headroom(recs):
         mean = lambda o, kk, i=0: st.mean(R[o][k][i] for k in kk)  # noqa: E731
         best = pick({o: mean(o, A) for o in opts}, m["rules_choice"])
         gains.append(mean(best, B) - mean(m["rules_choice"], B))
+        rows.append(({o: mean(o, A) for o in opts}, {o: mean(o, B) for o in opts}, m["rules_choice"], best))
         allu = [R[o][k][0] for o in opts for k in ks]
         var_tot.append(st.pvariance(allu)); var_opt.append(st.pvariance([mean(o, ks) for o in opts]))
         for o in opts:
@@ -64,7 +65,18 @@ def headroom(recs):
     n = len(gains)
     if not n: return {"decisions": 0}
     sd = st.pstdev(gains) / n ** 0.5
-    return {"decisions": n, "heldout_gain": round(st.mean(gains), 4), "se": round(sd, 4),
+    # the best constant answer (one option for every decision, chosen on seeds A pooled over decisions, scored on B;
+    # the rules' choice where it isn't offered): headroom a rule could take without reading the state. The pick's
+    # gain over it is the state-dependent part, which is what a decision model can add over a rule.
+    allo = {o for a, _, _, _ in rows for o in a}
+    tot = {o: sum(a.get(o, a[rc]) for a, _, rc, _ in rows) for o in allo}  # not offered: falls back to the rules' choice
+    const = max(tot, key=lambda o: (round(tot[o], 9), o == rows[0][2]))
+    cg = [b.get(const, b[rc]) - b[rc] for _, b, rc, _ in rows]
+    sg = [b[bst] - b.get(const, b[rc]) for _, b, rc, bst in rows]
+    se = lambda v: round(st.pstdev(v) / len(v) ** 0.5, 4)  # noqa: E731
+    return {"best_constant": const, "constant_gain": round(st.mean(cg), 4), "constant_se": se(cg),
+            "pick_over_constant": round(st.mean(sg), 4), "pick_over_constant_se": se(sg),
+            "decisions": n, "heldout_gain": round(st.mean(gains), 4), "se": round(sd, 4),
             "better": sum(g > 0 for g in gains), "worse": sum(g < 0 for g in gains), "same": sum(g == 0 for g in gains),
             "option_variance_share": round(st.mean(var_opt) / max(1e-9, st.mean(var_tot)), 3),
             "by_option": {o: {"n": b[0], "dead": round(b[1] / b[0], 3), "levels": round(b[2] / b[0], 3)} for o, b in by.items()}}
@@ -122,11 +134,13 @@ def features(run, game, turn, cache={}):
             x.get("os", 0), *x["tm"], *x["inv"]]
 
 
-def trees(train, long_, run, seldir, out):
+def trees(train, long_, run, seldir, out, long_run=None, long_seldir=None):
     import lightgbm as lgb, numpy as np  # noqa: E401
-    src = {}
+    long_run, long_seldir = long_run or run, long_seldir or seldir  # LONG from another collection (M2: train ≠ check)
+    src, lsrc = {}, {}
     for f in ("check.jsonl", "train.jsonl"):
         for r in load(os.path.join(seldir, f)): src[r["game_id"]] = r["src_game"]
+        for r in load(os.path.join(long_seldir, f)): lsrc[r["game_id"]] = r["src_game"]
     opts = sorted({o for r in train for o in r["meta"].get("u_mean", {})})
     X, Y = {o: [] for o in opts}, {o: [] for o in opts}
     for r in train:
@@ -141,7 +155,7 @@ def trees(train, long_, run, seldir, out):
         if len(Y[o]) >= 50: models[o] = lgb.train(P, lgb.Dataset(np.array(X[o], float), np.array(Y[o], float)), 200)
     with open(out, "w") as fh:
         for r in long_:
-            m = r["meta"]; g = src.get(m["game_id"]); f = g and features(run, g, m["turn"])
+            m = r["meta"]; g = lsrc.get(m["game_id"]); f = g and features(long_run, g, m["turn"])
             avail = [o for o in m["options"] if o in models]
             if not f or not avail: continue
             pred = {o: float(models[o].predict(np.array([f], float))[0]) for o in avail}
@@ -155,7 +169,7 @@ def main():
     if a[0] == "headroom": print(json.dumps(headroom(load(a[1])), indent=1))
     elif a[0] == "agree": print(json.dumps(agree(load(a[1]), load(a[2])), indent=1))
     elif a[0] == "score": print(json.dumps(score(load(a[1]), a[2:]), indent=1))
-    elif a[0] == "trees": print(json.dumps(trees(load(a[1]), load(a[2]), a[3], a[4], a[5]), indent=1))
+    elif a[0] == "trees": print(json.dumps(trees(load(a[1]), load(a[2]), a[3], a[4], a[5], *a[6:8]), indent=1))
     else: sys.exit(__doc__)
 
 
