@@ -141,6 +141,8 @@ class DeepScreen(D17.Screen):
 # and stop at JEV_PHASE_CAP dollars for this run; Laya expects laya-serve on LAYA_URL (one server on the GPU).
 JEV_LEDGER = os.path.join(D.REPO, "runs", "jev", "spend.jsonl")
 JEV_PHASE_CAP = float(os.environ.get("JEV_PHASE_CAP", "1.0"))
+MODEL_Q = os.environ.get("MODEL_Q", "blind")
+ASK_FLAGS = {"blind": "blindask", "leave": "leaveask"}  # the RULEFIX that makes busho ask that question
 MODEL_ARMS = {
     "jev": {"SYSTEMONE_URL": "https://api.typesafe.ai", "SYSTEMONE_MODEL": "jev-1.13.0"},
     "jev114": {"SYSTEMONE_URL": "https://api.typesafe.ai", "SYSTEMONE_MODEL": "jev-1.14.0"},
@@ -166,8 +168,9 @@ def _jev_spent_since(t0):
 
 def model_env(name, run):
     if name not in MODEL_ARMS: raise ValueError(f"unknown model arm {name}")
-    e = {**MODEL_ARMS[name], "LLM_BACKEND": "systemone", "DECISION_POLICY": "model", "DECISION_MODEL_TYPES": "blind",
-         "DECISION_LOG_TYPES": "blind", "DECISION_MIN_CONFIDENCE": "0", "DECISION_SNAPSHOT": "0"}
+    q = MODEL_Q  # the question the model answers (default blind; leave for the M1 leave knockout)
+    e = {**MODEL_ARMS[name], "LLM_BACKEND": "systemone", "DECISION_POLICY": "model", "DECISION_MODEL_TYPES": q,
+         "DECISION_LOG_TYPES": q, "DECISION_MIN_CONFIDENCE": "0", "DECISION_SNAPSHOT": "0"}
     if e["SYSTEMONE_URL"].startswith("https://api.typesafe.ai"):
         if e["SYSTEMONE_MODEL"].endswith("latest"): raise ValueError("pin a Jev version")
         e.update({"SYSTEMONE_API_KEY": _typesafe_key(), "JEV_LEDGER": JEV_LEDGER})
@@ -200,9 +203,10 @@ def play_one(run, stage, s, arm, rulefix, slot, deadline):
     feat = [f[len("feat:"):] for f in rulefix.split(",") if f.startswith("feat:")]
     rulefix = ",".join(f for f in rulefix.split(",") if not f.startswith(("cheat:", "model:", "feat:")))
     menv = feat_env(feat[0]) if feat else {}
+    if feat: rulefix += "".join("," + ASK_FLAGS[t] for t in FEAT_TYPES.split(",") if t in ASK_FLAGS)
     if model:
         menv = model_env(model[0], run)
-        rulefix += ",blindask"
+        rulefix += "," + ASK_FLAGS.get(MODEL_Q, "blindask")
         if "JEV_LEDGER" in menv and _jev_spent_since(run.state["started"]) >= JEV_PHASE_CAP:
             run.log(f"{stage}-{arm}: {s['id']}: skipped, Jev spend cap ${JEV_PHASE_CAP} reached")
             return {"seed": s["seed"], "class": s["cls"], "error": "jev spend cap", "restore": s["restore"]}

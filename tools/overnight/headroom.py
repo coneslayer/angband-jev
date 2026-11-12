@@ -10,6 +10,9 @@ advance-rate ratios with 80% bootstrap intervals (hazard.policy), PH(10) (fresh)
 hazard.screen), and the death ratio by class. The reading rule is in the plan (live <= 0.67, dead >= 0.85).
 Cheat games are measurements: their danger logs are never pooled or trained on.
 
+Arms may also be decision or rule arms: "rule:<flags>", "feat:<policy>", "model:<name>" (driver18's; FEAT_TYPES and
+MODEL_Q pick the question), for a paired screen on fresh starts (the M1 leave knockout).
+
 Usage: headroom.py --run runs/headroom/<name> --kind bank|fresh --arms cl10,hp2,... --base FLAGS [--n 150]
                    [--seed 9200000] [--slots 13] [--maxa 20000] [--cap-s 900] [--hours 4] [--report-only]
 """
@@ -100,12 +103,22 @@ def main():
             if job is None: return
             s, arm = job
             rf = ",".join(filter(None, [a.base, "spellfx,spellfight" if s["cls"] in casters else "", extra.get(s["cls"], "")]))
-            env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rf, "DANGER_LOG": "1",
-                   **({"CHEAT": arm.replace("+", ",")} if arm != "base" else {})}
+            # arm kinds: "rule:<flags>" adds rule flags (+-separated); "feat:<policy>" and "model:<name>" are driver18's
+            # decision arms (FEAT_TYPES / MODEL_Q pick the question); anything else is a test-only cheat grant
+            aenv = {}
+            if arm.startswith("rule:"): rf += "," + arm[5:].replace("+", ",")
+            elif arm.startswith("feat:"):
+                aenv = D18.feat_env(arm[5:]); rf += "".join("," + D18.ASK_FLAGS[t] for t in D18.FEAT_TYPES.split(",") if t in D18.ASK_FLAGS)
+            elif arm.startswith("model:"):
+                aenv = D18.model_env(arm[6:], run); rf += "," + D18.ASK_FLAGS.get(D18.MODEL_Q, "blindask")
+                if "JEV_LEDGER" in aenv and D18._jev_spent_since(run.state["started"]) >= D18.JEV_PHASE_CAP:
+                    run.log(f"{arm}: {s['id']}: skipped, Jev spend cap ${D18.JEV_PHASE_CAP} reached"); continue
+            elif arm != "base": aenv = {"CHEAT": arm.replace("+", ",")}
+            env = {**D8.arm_env({"name": arm, "ckpt": None, "guard": "", "caution": 1.0}, {}), "RULEFIX": rf, "DANGER_LOG": "1", **aenv}
             gdir = run.d("games", arm, s["id"])
             res = D.play_game(run, f"hr-{arm}", slot, s["seed"], s["cls"], env, gdir,
                               max(60, min(a.cap_s, deadline - time.time())), a.maxa, 4100, None, s["restore"])
-            for f in ("busho-replay.jsonl", "snapshots", "decisions.jsonl"):
+            for f in ("busho-replay.jsonl", "snapshots") + (() if arm.startswith(("feat:", "model:")) else ("decisions.jsonl",)):
                 p = os.path.join(gdir, f)
                 if os.path.isdir(p): __import__("shutil").rmtree(p, ignore_errors=True)
                 elif os.path.exists(p): os.remove(p)

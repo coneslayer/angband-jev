@@ -17,7 +17,7 @@ export const DECISION_FORMAT_VERSION_ROLES = 4;
 
 import { resourceLines } from "../spell-roles.js";
 
-export type DecisionType = "fight" | "tactic" | "recall" | "descend" | "explore" | "equip" | "blind";
+export type DecisionType = "fight" | "tactic" | "recall" | "descend" | "explore" | "equip" | "blind" | "leave";
 export const DECISION_TYPES: DecisionType[] = ["fight", "tactic", "recall", "descend", "explore", "equip"];
 
 export type ChoiceQuestion = { type: "choice"; instructions: string; criteria: Record<string, string> };
@@ -58,6 +58,14 @@ export const QUESTIONS: Record<DecisionType, ChoiceQuestion> = {
   // row: laya-train keeps the first option set it sees, and a filtered list broke the first fine-tune); one that
   // can't be carried out (cure without a potion, stairs off the stairs) falls back to "rest". The Situation lines say
   // which are possible. BLIND_FILTER_OPTIONS=1 restores the filtered list (the 11-09 check set)
+  leave: {
+    type: "choice",
+    instructions: "Decide whether to stay on this level, or to head for the nearest known staircase and leave the level by it.",
+    criteria: {
+      stay: "stay on this level and carry on as usual",
+      stairs: "walk to the nearest known staircase and take it, up or down, to leave this level",
+    },
+  },
   blind: {
     type: "choice",
     instructions: "My character is blind, so it can't see monsters, read scrolls or cast spells, and something may be attacking it. Decide what to do this turn.",
@@ -287,6 +295,23 @@ export interface BlindCtx {
 }
 
 /** M1: blind with a threat. Only the options that can be carried out are offered. */
+/** The leave question (the M1 leave knockout, Fable's 11-12 plan): what the UI shows, no wording that leans. */
+export interface LeaveCtx {
+  /** what prompted the question: "arrived", "escaped", "poisoned or bleeding", "new monster in view: <name>" */
+  event: string;
+  escapes: number;
+  turnsOnLevel: number;
+  stairsKnown: boolean;
+}
+
+export function leaveDecision(state: any, c: LeaveCtx): DecisionRequest {
+  return build("leave", state, [
+    `Just now: ${c.event}`,
+    `Escapes used on this level (Phase Door, Teleportation, running away): ${c.escapes}`,
+    `Turns on this level: ${c.turnsOnLevel}; a staircase is known: ${c.stairsKnown ? "yes" : "no"}`,
+  ]);
+}
+
 export function blindDecision(state: any, b: BlindCtx): DecisionRequest {
   const req = build("blind", state, [
     `Blind for ${b.turnsBlind} turns; hit ${b.hits} times since, losing ${b.hpLost} HP`,

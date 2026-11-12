@@ -7,9 +7,9 @@
  */
 
 import {
-  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, DECISION_FORMAT_VERSION_ROLES, DECISION_ROLES, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision, blindDecision,
+  DECISION_FORMAT_VERSION, DECISION_FORMAT_VERSION_PLAYER, DECISION_FORMAT_VERSION_ROLES, DECISION_ROLES, fightDecision, tacticDecision, recallDecision, descendDecision, exploreDecision, equipDecision, blindDecision, leaveDecision,
 } from "./decision/index.js";
-import type { DecisionType, DecisionRequest, BlindCtx } from "./decision/index.js";
+import type { DecisionType, DecisionRequest, BlindCtx, LeaveCtx } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
 import { adaptPlayerView, estimatedMaxHp } from "./honest-view.js";
 import { DangerLogger, DANGER_RECORD_VERSION, dangerRecord } from "./danger/record.js";
@@ -364,6 +364,13 @@ function stairsWalkMax(threats: any[], pspeed: number | undefined): number {
 // RULEFIX=leave: 序盤の危険な敵 (4.2 の名前) が見えた、この階で 3 回逃げた (Phase Door/Teleport/逃走)、毒か出血で HP 半分未満
 // → 最寄りの既知の階段 (上下どちらでも) から階を去る。逃げ続けた後の強制戦闘 (forceFight) への切り替えも、階を去るに置き換える
 const LEAVE = RULEFIX.has("leave");
+// RULEFIX=leaveask (with leave knocked out): the leave question is asked (decide("leave"); rules: stay) on arrival at
+// a level, after each escape, when poisoned or bleeding starts, and when a monster kind not yet seen on this level
+// comes into view; "stairs" uses the leave rule's executor (nearest known stairs, at most 300 steps). The M1 leave
+// knockout's model arms (Fable's 11-12 plan)
+const LEAVEASK = RULEFIX.has("leaveask") && !LEAVE;
+let leaveAskLevel = "", leaveAskEscapes = 0, leaveAskAfflicted = false;
+const leaveAskSeen = new Set<string>();
 // RULEFIX=leavelos: 名前で去る敵は視線の通る敵だけ (検知・テレパシーで知っただけの敵は数えない)。ゲームのモンスター一覧の
 // 「見える」と「気づいている」の区別 (mon-list.c は projectable)。session 25: 到着時の Seek Battle で 27 マス先の Fang を見て去っていた
 const LEAVELOS = RULEFIX.has("leavelos");
@@ -1169,7 +1176,7 @@ async function sendCommand(cmd: Record<string, unknown>): Promise<any> {
     const dig = t && DIG_SPELL_FEATS.has(t.feat) ? fxDigSpell() : null;
     if (dig) { spellsUsed++; fxNote("dig"); cmd = { type: CMD.CAST, spellIndex: dig.index, direction: cmd.direction }; }
   }
-  const escapeCmd = LEAVE && isEscapeCommand(cmd); // RULEFIX=leave: この階の逃走回数に数える (時間が進んだら)
+  const escapeCmd = (LEAVE || LEAVEASK) && isEscapeCommand(cmd); // RULEFIX=leave: この階の逃走回数に数える (時間が進んだら)
   const digAt = DIGSKILL && cmd.type === CMD.TUNNEL ? tunnelTarget(lastKnownState, cmd.direction as number) : null;
   if (cmdDebug || ++commandsSent >= CMD_DEBUG_AFTER) console.log(`    >> CMD: ${JSON.stringify(cmd)}`);
   dangerLogger?.noteCommand(cmd.type as number, actionRole(cmd));
@@ -1573,6 +1580,7 @@ interface DecideCtx {
   monster?: any; enemies?: any[]; hpPct?: number;
   kills?: number; turns?: number; current?: any; candidate?: any;
   blind?: BlindCtx;
+  leave?: LeaveCtx;
 }
 
 function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
@@ -1584,6 +1592,7 @@ function buildRequest(type: DecisionType, c: DecideCtx): DecisionRequest {
     case "explore": return exploreDecision(c.state, c.kills ?? 0, c.turns ?? 0);
     case "equip": return equipDecision(c.state, c.current, c.candidate);
     case "blind": return blindDecision(c.state, c.blind!);
+    case "leave": return leaveDecision(c.state, c.leave!);
   }
 }
 
@@ -1738,7 +1747,8 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
         try {
           const res = await fetch(FEATURES_URL, { method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ type, options: Object.keys(req.questions.decision.criteria),
-              record: dangerRecord(c.state, rolloutActions, levelCtx.turns) }), signal: AbortSignal.timeout(10000) });
+              record: dangerRecord(c.state, rolloutActions, levelCtx.turns), max_depth: c.state?.player?.maxDepth ?? null,
+              turn: c.state?.turn ?? 0, ctx: c.leave ?? null }), signal: AbortSignal.timeout(10000) });
           const a = res.ok ? await res.json() as any : null;
           if (a && typeof a.choice === "string" && a.choice in req.questions.decision.criteria) modelChoice = a.choice;
         } catch (e) { console.log(`  [FEATURES] error: ${(e as Error).message}`); }
@@ -3733,10 +3743,26 @@ async function playGame() {
     }
 
     // === RULEFIX=leave: 序盤の危険な敵が見えた / この階で 3 回逃げた / 毒か出血で HP 半分未満 → 最寄りの既知の階段から階を去る ===
-    if (LEAVE && state.depth >= 1) {
+    if ((LEAVE || LEAVEASK) && state.depth >= 1) {
       const afflicted = p.timed.poisoned > 0 || (p.timed.cut ?? 0) > 0;
       if (!afflicted) leaveHurtDone = false;
-      if (!leaving) {
+      if (LEAVEASK && !leaving) {
+        const key = `${state.depth}:${levelEntryTurn}`;
+        let event = "";
+        if (key !== leaveAskLevel) { leaveAskLevel = key; leaveAskSeen.clear(); leaveAskEscapes = levelEscapes; leaveAskAfflicted = afflicted; event = "arrived on this level"; }
+        const fresh = monsters.filter((m: any) => m.los !== false && !leaveAskSeen.has(m.name));
+        for (const m of monsters) if (m.los !== false) leaveAskSeen.add(m.name);
+        if (!event && levelEscapes > leaveAskEscapes) event = "escaped from a monster";
+        if (!event && afflicted && !leaveAskAfflicted) event = p.timed.poisoned > 0 ? "became poisoned" : "started bleeding";
+        if (!event && fresh.length) event = `a new kind of monster came into view: ${fresh.map((m: any) => m.name).join(", ")}`;
+        leaveAskEscapes = levelEscapes; leaveAskAfflicted = afflicted;
+        if (event) {
+          const ans = await decide("leave", { state, rules: "stay", leave: { event, escapes: levelEscapes,
+            turnsOnLevel: state.turn - levelEntryTurn, stairsKnown: !!nearestStair(tiles, px, py) } });
+          if (ans === "stairs") { leaving = `model: ${event}`; leaveWalk = 0; addLesson(state.turn, state.depth, "階離脱", `${leaving}。最寄りの階段から階を去る`); }
+        }
+      }
+      if (LEAVE && !leaving) {
         const named = monsters.find((m: any) => leaveListed(m, p.level) && (!LEAVELOS || m.los !== false));
         const hurt = afflicted && hpPct < 0.5 && !leaveHurtDone;
         leaving = named ? `${named.name}(Lv${named.level},dist${named.distance})が見えた`
@@ -5018,7 +5044,7 @@ async function playGame() {
         const fl = earlyFleeCommand(tiles, px, py, inv, adj, actionCount, { plevel: p.level, pspeed: p.speed, monsters, turn: state.turn, depth: state.depth });
         if (fl) {
           earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
-          if (LEAVE && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: 歩いて逃げ始めた (Phase/Teleport は sendCommand で数える)
+          if ((LEAVE || LEAVEASK) && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: 歩いて逃げ始めた (Phase/Teleport は sendCommand で数える)
           addLesson(state.turn, state.depth, "序盤離脱", `${adj.name}(Lv${adj.level})に1手でHP${drop}/${p.maxHp}。${fl.kind}`);
           state = await sendCommand(fl.cmd);
           earlyLastHp = state.player.hp;
@@ -5134,7 +5160,7 @@ async function playGame() {
           const fl = fleeN > 60 ? null : earlyFleeCommand(tiles, px, py, inv, m, actionCount, { plevel: p.level, pspeed: p.speed, monsters, turn: state.turn, depth: state.depth }); // 同一個体から60手逃げても振り切れない → 諦めて殴る
           if (fl) {
             earlyFleeActions++; fleeAttempts++; retreatMode = true; retreatStartTurn = state.turn;
-            if (LEAVE && fleeN === 1 && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: この個体から歩いて逃げ始めた
+            if ((LEAVE || LEAVEASK) && fleeN === 1 && fl.kind === "walk") levelEscapes++; // RULEFIX=leave: この個体から歩いて逃げ始めた
             if (fl.kind === "stairs") earlyFleeStairs++;
             if (fl.kind === "phase") phasesRead++;
             if (earlyFleeActions <= 3 || fl.kind !== "walk") addLesson(state.turn, state.depth, "序盤逃走", `${m.name}(Lv${m.level},spd${m.speed},dist${m.distance})から${fl.kind}`);

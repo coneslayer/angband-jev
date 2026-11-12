@@ -324,19 +324,56 @@ def trees(train, long_, run, seldir, out, long_run=None, long_seldir=None):
     import lightgbm as lgb, numpy as np  # noqa: E401
     long_run, long_seldir = long_run or run, long_seldir or seldir  # LONG from another collection (M2: train ≠ check)
     src, lsrc = {}, {}
-    for f in ("check.jsonl", "train.jsonl"):
-        for r in load(os.path.join(seldir, f)): src[r["game_id"]] = r["src_game"]
-        for r in load(os.path.join(long_seldir, f)): lsrc[r["game_id"]] = r["src_game"]
+    for f in ("check.jsonl", "train.jsonl"):  # a training-only or check-only selection lacks one of them
+        if os.path.exists(os.path.join(seldir, f)):
+            for r in load(os.path.join(seldir, f)): src[r["game_id"]] = r["src_game"]
+        if os.path.exists(os.path.join(long_seldir, f)):
+            for r in load(os.path.join(long_seldir, f)): lsrc[r["game_id"]] = r["src_game"]
     opts = sorted({o for r in train for o in r["meta"].get("u_mean", {})})
     X, Y = {o: [] for o in opts}, {o: [] for o in opts}
     target = os.environ.get("TREES_TARGET", "u")  # "share": Laya's targets (the gold win shares) in place of u_mean
     train = sorted(train, key=lambda r: (src.get(r["meta"]["game_id"]) or "", r["meta"]["turn"]))  # cache by game
     long_ = sorted(long_, key=lambda r: (lsrc.get(r["meta"]["game_id"]) or "", r["meta"]["turn"]))
+    gapf = os.environ.get("TREES_MAXDEPTH") == "1"   # add meta.max_depth − depth (the gap to the deepest level)
+    ntrain = int(os.environ.get("TREES_N", "0"))     # learning curves: whole games, shuffled, until N decisions
+    if ntrain:
+        import random as _r
+        games = sorted({src.get(r["meta"]["game_id"]) or "" for r in train}); _r.Random(0).shuffle(games)
+        keep, n = set(), 0
+        for g in games:
+            if n >= ntrain: break
+            n += sum(1 for r in train if (src.get(r["meta"]["game_id"]) or "") == g); keep.add(g)
+        train = [r for r in train if (src.get(r["meta"]["game_id"]) or "") in keep]
+
+    def feats(r, run_, g):
+        f = features(run_, g, r["meta"]["turn"])
+        if f and gapf: f = f + [max(0, (r["meta"].get("max_depth") or r["meta"]["depth"]) - r["meta"]["depth"])]
+        return f
+    if target == "diff":  # one regressor on u[o1] − u[o0] (two-option questions; Fable: train on the u difference)
+        o0, o1 = sorted(train[0]["meta"]["options"])[:2]
+        Xd, Yd = [], []
+        for r in train:
+            u = r["meta"].get("u_mean"); g = src.get(r["meta"]["game_id"])
+            f = u and g and o0 in u and o1 in u and feats(r, run, g)
+            if f: Xd.append(f); Yd.append(u[o1] - u[o0])
+        P = dict(objective="regression", learning_rate=0.05, num_leaves=15, min_data_in_leaf=40, verbose=-1, seed=0)
+        mdl = lgb.train(P, lgb.Dataset(np.array(Xd, float), np.array(Yd, float)), 200)
+        with open(out, "w") as fh:
+            for r in long_:
+                m = r["meta"]; g = lsrc.get(m["game_id"]); f = g and feats(r, long_run, g)
+                if not f: continue
+                d = float(mdl.predict(np.array([f], float))[0])
+                fh.write(json.dumps({"game_id": m["game_id"], "turn": m["turn"], "choice": o1 if d > 0 else o0,
+                                     "pred": {o0: 0.0, o1: d}}) + "\n")
+        names = FEATURES + (["gap_to_deepest"] if gapf else [])
+        imp = dict(zip(names, mdl.feature_importance("gain"))); tot = sum(imp.values()) or 1.0
+        return {"trained_on": len(Yd), "target": "diff", "options": [o0, o1],
+                "importance_top10": {k: round(float(v) / tot, 3) for k, v in sorted(imp.items(), key=lambda kv: -kv[1])[:10]}}
     for r in train:
         u = r["meta"].get("u_mean")
         if target == "share" and u: u = {o: r["gold"]["decision"]["probabilities"].get(o, 0.0) for o in u}
         g = src.get(r["meta"]["game_id"])
-        f = u and g and features(run, g, r["meta"]["turn"])
+        f = u and g and feats(r, run, g)
         if not f: continue
         for o, v in u.items(): X[o].append(f); Y[o].append(v)
     models = {}
@@ -345,7 +382,7 @@ def trees(train, long_, run, seldir, out, long_run=None, long_seldir=None):
         if len(Y[o]) >= 50: models[o] = lgb.train(P, lgb.Dataset(np.array(X[o], float), np.array(Y[o], float)), 200)
     with open(out, "w") as fh:
         for r in long_:
-            m = r["meta"]; g = lsrc.get(m["game_id"]); f = g and features(long_run, g, m["turn"])
+            m = r["meta"]; g = lsrc.get(m["game_id"]); f = g and feats(r, long_run, g)
             avail = [o for o in m["options"] if o in models]
             if not f or not avail: continue
             pred = {o: float(models[o].predict(np.array([f], float))[0]) for o in avail}

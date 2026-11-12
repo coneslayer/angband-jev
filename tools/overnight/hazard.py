@@ -57,6 +57,18 @@ def parse_game(path):
         if m: ev.append(("s", int(m[1]), int(m[2]))); continue
         m = CHANGE.search(ln)
         if m: ev.append(("c", int(m[1]), int(m[2])))
+    # exact times when the game has a danger log (one row per action: a, d). Fable's 11-12 finding: placing changes
+    # evenly between status lines 200 actions apart shrank the town stage of arms that change level often early
+    # (90 actions base, 13 for the Laya leave arm, against 2 in truth) and inflated their pace ratio
+    dl = os.path.join(path, "danger.jsonl.gz")
+    if os.environ.get("HAZARD_LOG_TIMES", "1") == "1" and os.path.exists(dl):
+        try:
+            import gzip
+            rows = [(r["a"], r["d"]) for r in (json.loads(l) for l in gzip.open(dl, "rt")) if "a" in r and "d" in r]
+        except (OSError, ValueError, EOFError):
+            rows = []
+        if rows:
+            ev = [("s", a, d) for a, d in rows]
     # place each depth change between the status lines around it, spread evenly
     timed, i, prev_a = [], 0, 0
     while i < len(ev):
