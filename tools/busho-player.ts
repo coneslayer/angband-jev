@@ -12,7 +12,7 @@ import {
 import type { DecisionType, DecisionRequest, BlindCtx } from "./decision/index.js";
 import { SavepointBank } from "./savepoint/bank.js";
 import { adaptPlayerView, estimatedMaxHp } from "./honest-view.js";
-import { DangerLogger, DANGER_RECORD_VERSION } from "./danger/record.js";
+import { DangerLogger, DANGER_RECORD_VERSION, dangerRecord } from "./danger/record.js";
 import { DangerModel } from "./danger/model.js";
 import { rolesOf, itemRoles, itemHarmful, spellsFor, resourceLines, reachOf, ROLE_ORDER, CURE_STATUS, type Role, type RoleEntry } from "./spell-roles.js";
 
@@ -1258,8 +1258,12 @@ const SYSTEMONE_API_KEY = process.env.SYSTEMONE_API_KEY || process.env.TYPESAFE_
 const SYSTEMONE_MODEL = process.env.SYSTEMONE_MODEL ?? "kev-latest";
 const DECISION_MIN_CONFIDENCE = Number(process.env.DECISION_MIN_CONFIDENCE ?? "0.3"); // これ未満の確信度はルールに任せる
 const LLM_BACKEND = process.env.LLM_BACKEND ?? (SYSTEMONE_URL ? "systemone" : LLM_API_KEY ? "anthropic" : "ollama"); // "systemone", "anthropic" or "ollama"
+// LLM_BACKEND=features: a feature policy (tools/overnight/feature_serve.py) answers from the danger record at the
+// decision, the features the offline trees were trained on (docs/plan-2026-11-09.md, M2 play arm)
+const FEATURES_URL = process.env.FEATURES_URL ?? "";
 const LLM_ENABLED = LLM_BACKEND === "anthropic" ? LLM_API_KEY.length > 0
   : LLM_BACKEND === "systemone" ? SYSTEMONE_URL.length > 0
+  : LLM_BACKEND === "features" ? FEATURES_URL.length > 0
   : true;
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? "phi3.5";
 const OLLAMA_URL = process.env.OLLAMA_URL ?? "http://localhost:11434";
@@ -1504,7 +1508,14 @@ const [ROLLOUT_TYPE, ROLLOUT_OPTION] = ROLLOUT_FORCE.split(":");
 const ROLLOUT_HORIZON = Number(process.env.ROLLOUT_HORIZON ?? "150");
 const ROLLOUT_MAX_WAIT = Number(process.env.ROLLOUT_MAX_WAIT ?? "5");
 let rolloutFired = false;
-const ROLLOUT_STICKY = process.env.ROLLOUT_STICKY === "1";
+const ROLLOUT_STICKY = process.env.ROLLOUT_STICKY === "1" || process.env.ROLLOUT_STICKY === "episode";
+// ROLLOUT_STICKY=episode (Fable's 11-11 review): the forced option holds for the episode, not the whole rollout —
+// fight: the same target monster (by name), while fight asks about it keep coming (gaps under STICKY_GAP actions);
+// other types: the single override (sticky over a whole rollout values "always X from here", a trait of the character)
+const STICKY_EPISODE = process.env.ROLLOUT_STICKY === "episode";
+const STICKY_GAP = Number(process.env.STICKY_GAP ?? "30");
+let stickyMonster: string | null = null;
+let stickyLastAction = -1;
 const DECISION_LOG_TYPES = new Set((process.env.DECISION_LOG_TYPES ?? "").split(",").map((t) => t.trim()).filter(Boolean));
 // ROLLOUT_FULL_RULES=1: 長いロールアウト (戦略の判断) では、普段のプレイの規則 (worwait、restock、tryunknown、gearid、invfix、
 // 食料切れの帰還など) をロールアウト中も使う。既定ではロールアウト中は止める (短いロールアウトの副作用を避けるため)。
@@ -1689,12 +1700,21 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
   if (ROLLOUT) {
     if (!rolloutFired && type === ROLLOUT_TYPE && rolloutActions <= ROLLOUT_MAX_WAIT) {
       rolloutFired = true;
+      stickyMonster = c.monster?.name ?? null; stickyLastAction = rolloutActions;
       console.log(`  [ROLLOUT] ${type} 強制: ${ROLLOUT_OPTION} (rules=${c.rules})`);
       return ROLLOUT_OPTION!;
     }
     // ROLLOUT_STICKY=1: 強制した選択肢を、その後の同じ型の判断でも毎回選ぶ (方策としての価値。1 回だけ覆す値は
     // ルールが次にまた元の選択をするので小さく出る: session 13 の罠、docs/plan-2026-11-09.md の M1)
-    if (ROLLOUT_STICKY && rolloutFired && type === ROLLOUT_TYPE) return ROLLOUT_OPTION!;
+    if (ROLLOUT_STICKY && rolloutFired && type === ROLLOUT_TYPE) {
+      if (!STICKY_EPISODE) return ROLLOUT_OPTION!;
+      if (type === "fight" && stickyMonster !== null && c.monster?.name === stickyMonster
+          && rolloutActions - stickyLastAction <= STICKY_GAP) {
+        stickyLastAction = rolloutActions;
+        return ROLLOUT_OPTION!;
+      }
+      if (type === "fight") stickyMonster = null; // the episode is over: a later ask about this monster is new
+    }
     return null;
   }
   // DECISION_LOG_TYPES=blind: この型だけ記録する (スナップショットの量を抑える。他の型はルールのまま、記録なし)
@@ -1714,7 +1734,15 @@ async function decide(type: DecisionType, c: DecideCtx): Promise<string | null> 
     let modelChoice: string | null = null;
     let modelConfidence: number | null = null;
     if (LLM_ENABLED) {
-      if (LLM_BACKEND === "systemone") {
+      if (LLM_BACKEND === "features") {
+        try {
+          const res = await fetch(FEATURES_URL, { method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type, options: Object.keys(req.questions.decision.criteria),
+              record: dangerRecord(c.state, rolloutActions, levelCtx.turns) }), signal: AbortSignal.timeout(10000) });
+          const a = res.ok ? await res.json() as any : null;
+          if (a && typeof a.choice === "string" && a.choice in req.questions.decision.criteria) modelChoice = a.choice;
+        } catch (e) { console.log(`  [FEATURES] error: ${(e as Error).message}`); }
+      } else if (LLM_BACKEND === "systemone") {
         const answers = await askSystemOne(req.questions, req.state);
         const a = answers?.decision;
         if (a && typeof a.choice === "string" && a.choice in req.questions.decision.criteria) {
@@ -1859,6 +1887,7 @@ async function logDecision(type: DecisionType, c: DecideCtx, req: DecisionReques
       turn: st.turn,
       depth: st.depth,
       player_level: st.player.level,
+      max_depth: st.player.maxDepth ?? null, // the deepest level so far: labels count progress from it (PH's clock)
       state: req.state,
       questions: req.questions,
       snapshot,

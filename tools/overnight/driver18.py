@@ -174,12 +174,32 @@ def model_env(name, run):
     return e
 
 
+# M2 play arms (Fable's 11-11 review): "feat:<policy>" answers FEAT_TYPES (default recall) from a feature policy
+# (tools/overnight/feature_serve.py on FEAT_URL: trees, stump, const-<option>), with busho's decision log in wide
+# triggers so the question is asked where it was collected. Every arm gets the same cooldown after acting against the
+# rules (FEAT_COOLDOWN actions, default 2000); a "-nocd" suffix drops it.
+FEAT_URL = os.environ.get("FEAT_URL", "http://127.0.0.1:8020")
+FEAT_TYPES = os.environ.get("FEAT_TYPES", "recall")
+FEAT_COOLDOWN = os.environ.get("FEAT_COOLDOWN", "2000")
+
+
+def feat_env(policy):
+    nocd = policy.endswith("-nocd")
+    path = policy[:-len("-nocd")] if nocd else policy
+    t = FEAT_TYPES.split(",")
+    return {"LLM_BACKEND": "features", "FEATURES_URL": f"{FEAT_URL}/{path}", "DECISION_LOG": "1",
+            "DECISION_TRIGGERS": "wide", "DECISION_POLICY": "model", "DECISION_MODEL_TYPES": FEAT_TYPES,
+            "DECISION_LOG_TYPES": FEAT_TYPES, "DECISION_MIN_CONFIDENCE": "0", "DECISION_SNAPSHOT": "0",
+            **({} if nocd else {"MODEL_COOLDOWN": ",".join(f"{x}={FEAT_COOLDOWN}" for x in t)})}
+
+
 def play_one(run, stage, s, arm, rulefix, slot, deadline):
     maxa, cap = (1500, 240) if run.smoke else (run.maxa, run.cap_s)
     cheat = [f[len("cheat:"):].replace("+", ",") for f in rulefix.split(",") if f.startswith("cheat:")]
     model = [f[len("model:"):] for f in rulefix.split(",") if f.startswith("model:")]
-    rulefix = ",".join(f for f in rulefix.split(",") if not f.startswith("cheat:") and not f.startswith("model:"))
-    menv = {}
+    feat = [f[len("feat:"):] for f in rulefix.split(",") if f.startswith("feat:")]
+    rulefix = ",".join(f for f in rulefix.split(",") if not f.startswith(("cheat:", "model:", "feat:")))
+    menv = feat_env(feat[0]) if feat else {}
     if model:
         menv = model_env(model[0], run)
         rulefix += ",blindask"
@@ -207,7 +227,9 @@ D17.play_one = play_one  # D17.pool calls play_one by module global
 
 
 def stage_deep(run, name, deadline):
-    ss = bank_starts(run.banks, run.min_depth, run.max_depth, run.seed, 40 if run.smoke else 3000, run.min_gold)
+    ex = getattr(run, "exclude", set())  # --exclude-clusters: lineages to leave out (e.g. a decider's training games)
+    ss = [s for s in bank_starts(run.banks, run.min_depth, run.max_depth, run.seed, 10 ** 6 if ex else (40 if run.smoke else 3000),
+                                 run.min_gold) if s["cluster"] not in ex][:40 if run.smoke else 3000]
     if not ss: return {"failed": "no savepoints in range"}
     by = {}
     for s in ss: by[s["cls"]] = by.get(s["cls"], 0) + 1
@@ -222,7 +244,7 @@ def stage_deep(run, name, deadline):
         only = set(cls.split("/")) if cls else None
         # a+b: both flags; cheat:a+b (phase 1, docs/plan-2026-11-09.md): the test-only grants a and b (CHEAT, server
         # --cheats) on the base's flags, kept whole here and split off in play_one
-        flags = arm if arm.startswith(("cheat:", "model:")) else arm.replace("+", ",")
+        flags = arm if arm.startswith(("cheat:", "model:", "feat:")) else arm.replace("+", ",")
         variants[arm] = (flags, (lambda s, only=only: only is None or s["cls"] in only))
     res = DeepScreen(run, name, ss, base_of, variants, SMOKE_LOOKS if run.smoke else run.looks).run_until(deadline)
     res["adopted"] = [v for v in variants if (res["closed"].get(v) or {}).get("decision") == "adopt"]
@@ -244,6 +266,7 @@ def main():
     ap.add_argument("--min-gold", type=int, default=0, help="only starts with this much gold (bank/gold.jsonl)")
     ap.add_argument("--maxa", type=int, default=20000); ap.add_argument("--cap-s", type=int, default=900)
     ap.add_argument("--looks", default=",".join(map(str, H.LOOKS)))
+    ap.add_argument("--exclude-clusters", help="JSON list of bank lineages to leave out (a decider's training games)")
     ap.add_argument("--la-workers", type=int, default=2, help="rollout servers per slot for RULEFIX=lookahead arms")
     a = ap.parse_args()
     if free_gb(".") < D15.DISK_START_GB:
@@ -255,6 +278,7 @@ def main():
     run.k, run.s0, run.min_depth, run.max_depth, run.min_gold = a.k, a.start, a.min_depth, a.max_depth, a.min_gold
     run.maxa, run.cap_s, run.looks = a.maxa, a.cap_s, tuple(int(x) for x in a.looks.split(","))
     run.la_workers = a.la_workers
+    run.exclude = set(json.load(open(a.exclude_clusters))) if a.exclude_clusters else set()
     signal.signal(signal.SIGTERM, lambda *_: D.STOP.set())
     app = D.app_dir(run)
     cbin = D.freeze_c(run)

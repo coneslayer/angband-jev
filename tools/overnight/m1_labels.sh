@@ -8,7 +8,7 @@
 #     check-short   check.jsonl, 4 seeds, 500 actions (to compare with the long labels)
 #     train-short   train.jsonl, 4 seeds, 500 actions, single override
 #     train-sticky  train.jsonl, 4 seeds, 500 actions, sticky (the labels to train on: single labels proved blunt)
-# Env: SERVERS (default 12 on 7800-7811), C_BIN (default angband-c build-rd), NODE_BIN (a dir with node >= 20);
+# Env: CHECKPOINTS (default 150,500), STICKY (1 or episode, for the sticky steps), SERVERS (default 12 on 7800-7811), C_BIN (default angband-c build-rd), NODE_BIN (a dir with node >= 20);
 # LONG_K / LONG_H (default 8 / 2000) for check-long and check-sticky, STICKY_N (default 200) records for check-sticky.
 # Every step runs with full play rules in rollouts (ROLLOUT_FULL_RULES=1) and utility "game" (levels gained − 3 if
 # dead). A 3-record preflight runs first and stops everything if any record comes back unlabelled (a relative path or
@@ -29,7 +29,7 @@ lab() {  # name decisions K horizon sticky
   echo "== $name $(date)"
   ROLLOUT_FULL_RULES=1 ROLLOUT_STICKY=$st BUSHO_TMP="$L/tmp-$name" DECISION_LOG= DANGER_LOG= nice node_modules/.bin/tsx tools/rollout/run.ts \
     --decisions "$dec" --dir "$L" --out "$L/$name.jsonl" --servers "$SV" --k "$k" --k-min "$k" --utility game \
-    --horizon "blind=$h,fight=$h,tactic=$h,recall=$h,descend=$h,explore=$h" --checkpoints 150,500 \
+    --horizon "blind=$h,fight=$h,tactic=$h,recall=$h,descend=$h,explore=$h" --checkpoints "${CHECKPOINTS:-150,500}" \
     --player-cmd "node $L/p.mjs" --c-tmp "$L/c-$name" --c-bin "$CB" > "$L/$name.log" 2>&1
   tail -1 "$L/$name.log" | cut -c1-200; rm -rf "$L/c-$name" "$L/tmp-$name"
 }
@@ -44,10 +44,10 @@ head -"${STICKY_N:-200}" "$L/check.jsonl" > "$L/check200.jsonl"
 for s in $STEPS; do
   case $s in
     check-long)   lab check-long   "$L/check.jsonl"    "$LK" "$LH" 0 ;;
-    check-sticky) lab check-sticky "$L/check200.jsonl" "$LK" "$LH" 1 ;;
+    check-sticky) lab check-sticky "$L/check200.jsonl" "$LK" "$LH" "${STICKY:-1}" ;;
     check-short)  lab check-short  "$L/check.jsonl"    4 500 0 ;;
     train-short)  lab train-short  "$L/train.jsonl"    4 500 0 ;;
-    train-sticky) lab train-sticky "$L/train.jsonl"    4 500 1 ;;
+    train-sticky) lab train-sticky "$L/train.jsonl"    4 500 "${STICKY:-1}" ;;
     *) echo "unknown step $s"; exit 1 ;;
   esac
 done
