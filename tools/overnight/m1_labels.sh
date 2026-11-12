@@ -9,7 +9,8 @@
 #     train-short   train.jsonl, 4 seeds, 500 actions, single override
 #     train-sticky  train.jsonl, 4 seeds, 500 actions, sticky (the labels to train on: single labels proved blunt)
 # Env: CHECKPOINTS (default 150,500), STICKY (1 or episode, for the sticky steps), SERVERS (default 12 on 7800-7811), C_BIN (default angband-c build-rd), NODE_BIN (a dir with node >= 20);
-# LONG_K / LONG_H (default 8 / 2000) for check-long and check-sticky, STICKY_N (default 200) records for check-sticky.
+# LONG_K / LONG_H (default 8 / 2000) for check-long and check-sticky, STICKY_N (default 200) records for check-sticky,
+# TRAIN_K / TRAIN_H (default 4 / 500) for train-short.
 # Every step runs with full play rules in rollouts (ROLLOUT_FULL_RULES=1) and utility "game" (levels gained − 3 if
 # dead). A 3-record preflight runs first and stops everything if any record comes back unlabelled (a relative path or
 # a restore that doesn't take shows up there, not after hours of empty labels).
@@ -46,7 +47,7 @@ for s in $STEPS; do
     check-long)   lab check-long   "$L/check.jsonl"    "$LK" "$LH" 0 ;;
     check-sticky) lab check-sticky "$L/check200.jsonl" "$LK" "$LH" "${STICKY:-1}" ;;
     check-short)  lab check-short  "$L/check.jsonl"    4 500 0 ;;
-    train-short)  lab train-short  "$L/train.jsonl"    4 500 0 ;;
+    train-short)  lab train-short  "$L/train.jsonl"    "${TRAIN_K:-4}" "${TRAIN_H:-500}" 0 ;;
     train-sticky) lab train-sticky "$L/train.jsonl"    4 500 "${STICKY:-1}" ;;
     *) echo "unknown step $s"; exit 1 ;;
   esac

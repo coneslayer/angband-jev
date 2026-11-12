@@ -36,13 +36,19 @@ def main():
     ap.add_argument("--extra-env", default="", help="NAME=value;... added to every game's environment")
     ap.add_argument("--exclude-clusters", help="JSON list of bank lineages (bank_starts' cluster) to leave out, e.g. "
                     "the check sets' characters, so training games share no character with them")
+    ap.add_argument("--exclude-restores", help="JSON list of savepoint files not to start from (another collection's)")
+    ap.add_argument("--include-clusters", help="JSON list of bank lineages to keep only (e.g. more check decisions "
+                    "from the check sets' characters)")
     a = ap.parse_args()
     run = D.Run(a.run, a.hours, False, a.slots)
     D.app_dir(run); D.freeze_c(run)
-    if a.exclude_clusters:
-        ex = set(json.load(open(a.exclude_clusters)))
+    skip = {os.path.basename(x) for x in json.load(open(a.exclude_restores))} if a.exclude_restores else set()
+    if a.exclude_clusters or a.include_clusters or skip:
+        ex = set(json.load(open(a.exclude_clusters))) if a.exclude_clusters else set()
+        inc = set(json.load(open(a.include_clusters))) if a.include_clusters else None
         starts = [s for s in D18.bank_starts(a.bank.split(","), a.min_depth, a.max_depth, a.seed, 10 ** 6)
-                  if s["cluster"] not in ex][:a.n]
+                  if s["cluster"] not in ex and (inc is None or s["cluster"] in inc)
+                  and os.path.basename(s["restore"] or "") not in skip][:a.n]
     else:
         starts = D18.bank_starts(a.bank.split(","), a.min_depth, a.max_depth, a.seed, a.n)
     extra = D18.class_extras(a.class_extra)

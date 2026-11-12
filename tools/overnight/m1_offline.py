@@ -19,7 +19,9 @@
             ({game_id: lineage}, for a bootstrap over lineages). TREES_TARGET=share trains trees on the win shares.
 
 Usage: m1_offline.py headroom LABELS.jsonl | agree SHORT LONG | score LONG ANSWERS... [--vs BASE] [--clusters JSON]
-       | trees TRAIN LONG RUN SELDIR OUT [LONG_RUN LONG_SELDIR] | ceiling LABELS [BASE] | aligned STAGE_DIR [ARMS]
+       | trees TRAIN LONG RUN SELDIR OUT [LONG_RUN LONG_SELDIR] | ceiling LABELS [BASE] | aligned STAGE_DIR [ARMS] | splits LABELS
+  splits    LABELS → headroom averaged over every half/half seed split, with death-rate and pace ratios (pooled on
+            the held-out seeds) of the pick against the best constant and the rules (Fable's review of 6598a6c).
   aligned   STAGE_DIR (a paired screen's deepS/) → per arm, label u and deepest-level u, arm − base, from the first
             divergence to 500/1,000/2,000/4,000 actions and to the game's end (Fable's aligned-play canary).
 """
@@ -42,8 +44,51 @@ def per_seed(m):
         for r in rs:
             if "dead" not in r: continue
             g = max(0, (r.get("dmax") or 0) - m.get("progress_from", m["depth"]))  # m1_rescore.py: from the deepest level
-            R.setdefault(o, {})[r["k"]] = (g - (3 if r["dead"] else 0), r["dead"], g)
+            R.setdefault(o, {})[r["k"]] = (g - (3 if r["dead"] else 0), r["dead"], g, r.get("act") or 0)
     return R
+
+
+def headroom_splits(recs):
+    """Fable's review of 6598a6c: average over every half/half seed split (one split can be lucky). For each split,
+    the best constant is chosen on the A seeds pooled over decisions and the per-decision pick on A; both are scored
+    on B. Reports the split-averaged pick over the constant (se from per-decision averages) and, pooled on B, the
+    death-rate and pace (levels per action) ratios of the pick against the constant and against the rules."""
+    import itertools
+    rows = []
+    for x in recs:
+        m = x["meta"]; R = per_seed(m)
+        opts = [o for o in m["options"] if o in R]
+        K = max((k for o in opts for k in R[o]), default=0)
+        ks = [k for k in range(1, K + 1) if all(k in R[o] for o in opts)]
+        if len(ks) >= 2 and m["rules_choice"] in opts: rows.append((R, opts, ks, m["rules_choice"]))
+    if not rows: return {"decisions": 0}
+    nk = __import__("collections").Counter(len(ks) for _, _, ks, _ in rows).most_common(1)[0][0]
+    rows = [(R, o, ks[:nk], rc) for R, o, ks, rc in rows if len(ks) >= nk]  # the usual seed count; fewer: dropped
+    combos = [set(c) for c in itertools.combinations(range(nk), nk // 2)]
+    per = [[] for _ in rows]; pool = {"pick": [0, 0, 0.0, 0], "const": [0, 0, 0.0, 0], "rules": [0, 0, 0.0, 0]}
+    consts = []
+    for A_idx in combos:
+        AB = [([ks[i] for i in range(nk) if i in A_idx], [ks[i] for i in range(nk) if i not in A_idx]) for _, _, ks, _ in rows]
+        mean = lambda R, o, kk: st.mean(R[o][k][0] for k in kk)  # noqa: E731
+        tot = {}
+        for (R, opts, ks, rc), (A, B) in zip(rows, AB):
+            for o in opts: tot[o] = tot.get(o, 0.0) + mean(R, o, A)
+        const = max(tot, key=lambda o: (round(tot[o], 9), o == rows[0][3])); consts.append(const)
+        for j, ((R, opts, ks, rc), (A, B)) in enumerate(zip(rows, AB)):
+            best = pick({o: mean(R, o, A) for o in opts}, rc); c = const if const in opts else rc
+            per[j].append(mean(R, best, B) - mean(R, c, B))
+            for name, o in (("pick", best), ("const", c), ("rules", rc)):
+                for k in B:
+                    u, dead, lev, act = R[o][k]; P = pool[name]; P[0] += 1; P[1] += dead; P[2] += lev; P[3] += act
+    avg = [st.mean(v) for v in per]
+    ratio = lambda a, b, i: (pool[a][i] / max(1e-9, pool[a][0])) / max(1e-9, pool[b][i] / max(1e-9, pool[b][0]))  # noqa: E731
+    pace = lambda a: pool[a][2] / max(1, pool[a][3])  # noqa: E731
+    return {"decisions": len(rows), "splits": len(combos), "constants": dict(__import__("collections").Counter(consts)),
+            "pick_over_constant": round(st.mean(avg), 4), "se": round(st.pstdev(avg) / len(avg) ** 0.5, 4),
+            "by_split": [round(st.mean(v[i] for v in per), 4) for i in range(len(combos))],
+            "pick_vs_constant": {"death_ratio": round(ratio("pick", "const", 1), 3), "pace_ratio": round(pace("pick") / max(1e-9, pace("const")), 3)},
+            "pick_vs_rules": {"death_ratio": round(ratio("pick", "rules", 1), 3), "pace_ratio": round(pace("pick") / max(1e-9, pace("rules")), 3)},
+            "constant_vs_rules": {"death_ratio": round(ratio("const", "rules", 1), 3), "pace_ratio": round(pace("const") / max(1e-9, pace("rules")), 3)}}
 
 
 def pick(u, rules):
@@ -328,6 +373,7 @@ def main():
             else: files.append(x)
         print(json.dumps(score(load(a[1]), files, vs, cl), indent=1))
     elif a[0] == "aligned": print(json.dumps(aligned(a[1], a[2].split(",") if len(a) > 2 else None), indent=1))
+    elif a[0] == "splits": print(json.dumps(headroom_splits(load(a[1])), indent=1))
     elif a[0] == "ceiling": print(json.dumps(ceiling(load(a[1]), a[2] if len(a) > 2 else None), indent=1))
     elif a[0] == "trees": print(json.dumps(trees(load(a[1]), load(a[2]), a[3], a[4], a[5], *a[6:8]), indent=1))
     else: sys.exit(__doc__)
